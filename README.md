@@ -44,7 +44,15 @@ More technologies will be added as the project evolves.
 
 ## Status
 
-**Currently in development.**
+**Current milestone: v0.3 - Message Model and Parser — complete.**
+
+The server tracks per-connection SMTP state, parses basic message headers, preserves raw DATA, keeps the SMTP envelope separate from message headers, and supports `EHLO`/`HELO`, `MAIL FROM`, `RCPT TO`, `DATA`, `RSET`, `NOOP`, and `QUIT`. Run it with:
+
+```bash
+go run ./cmd/mailx
+```
+
+Tests can be run with `GOCACHE=/tmp/mailx-gocache go test ./...` when the default Go cache is not writable.
 
 I'm actively learning Go while building MailX, so the architecture and implementation will evolve as I learn more.
 
