@@ -58,6 +58,14 @@ jobs:
             echo ""
             echo "Checking $COMMIT"
 
+            # GitHub-generated merge commits describe integration, not an
+            # authored change. Validate the individual commits they merge.
+            PARENTS="$(git log -1 --format='%P' "$COMMIT")"
+            if [[ "$(wc -w <<< "$PARENTS")" -gt 1 ]]; then
+              echo "Skipping merge commit."
+              continue
+            fi
+
             MESSAGE="$(git log -1 --format='%B' "$COMMIT")"
             SUBJECT="$(git log -1 --format='%s' "$COMMIT")"
 
