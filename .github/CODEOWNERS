@@ -1,0 +1,19 @@
+# MailX Code Owners
+# Default owner for the entire repository
+* @Ferousco-dev
+
+# GitHub configuration and workflows
+/.github/ @Ferousco-dev
+
+# Go source code
+*.go @Ferousco-dev
+
+# Go modules
+/go.mod @Ferousco-dev
+/Go.sum @Ferousco-dev
+
+# Documentation
+*.md @Ferousco-dev
+
+# Security policy
+/SECURITY.md @Ferousco-dev
