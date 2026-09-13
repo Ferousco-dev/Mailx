@@ -30,7 +30,7 @@ func (s *Session) resetTransaction() {
 	}
 }
 
-func HandleConnection(conn net.Conn, sink func(Session, mail.Message)) {
+func HandleConnection(conn net.Conn, sink func(Session, mail.Message) error) {
 	defer conn.Close()
 	s := Session{state: connected}
 	r := bufio.NewReader(conn)
@@ -101,7 +101,11 @@ func HandleConnection(conn net.Conn, sink func(Session, mail.Message)) {
 				continue
 			}
 			if sink != nil {
-				sink(s, message)
+				if err := sink(s, message); err != nil {
+					reply(conn, "451 Local storage error")
+					s.resetTransaction()
+					continue
+				}
 			}
 			reply(conn, "250 Message accepted by MailX")
 			s.resetTransaction()

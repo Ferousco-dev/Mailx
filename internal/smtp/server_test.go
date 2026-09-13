@@ -2,11 +2,15 @@ package smtp
 
 import (
 	"bufio"
+	"errors"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/Ferousco-dev/mailx/internal/mail"
+	"github.com/Ferousco-dev/mailx/internal/storage"
 )
 
 func TestSessionStateAndDotStuffing(t *testing.T) {
@@ -15,7 +19,10 @@ func TestSessionStateAndDotStuffing(t *testing.T) {
 	var got Session
 	var message mail.Message
 	done := make(chan struct{})
-	go func() { HandleConnection(srv, func(s Session, m mail.Message) { got, message = s, m }); close(done) }()
+	go func() {
+		HandleConnection(srv, func(s Session, m mail.Message) error { got, message = s, m; return nil })
+		close(done)
+	}()
 	r := bufio.NewReader(cli)
 	expect(t, r, "220")
 	cli.Write([]byte("RCPT TO:<a@example.com>\r\n"))
@@ -76,7 +83,7 @@ func TestNewGreetingAndDataResetTransaction(t *testing.T) {
 	var received []Session
 	done := make(chan struct{})
 	go func() {
-		HandleConnection(srv, func(s Session, _ mail.Message) { received = append(received, s) })
+		HandleConnection(srv, func(s Session, _ mail.Message) error { received = append(received, s); return nil })
 		close(done)
 	}()
 	r := bufio.NewReader(cli)
@@ -156,9 +163,10 @@ func TestSMTPPreservesEnvelopeAndParsesMessage(t *testing.T) {
 	var message mail.Message
 	done := make(chan struct{})
 	go func() {
-		HandleConnection(srv, func(session Session, received mail.Message) {
+		HandleConnection(srv, func(session Session, received mail.Message) error {
 			envelope = session.Envelope
 			message = received
+			return nil
 		})
 		close(done)
 	}()
@@ -190,6 +198,81 @@ func TestSMTPPreservesEnvelopeAndParsesMessage(t *testing.T) {
 	if message.From != "Alice <alice@example.com>" || len(message.To) != 1 || message.To[0] != "John <john@example.com>" || len(message.Cc) != 1 || message.Subject != "MailX parser test" || message.Date == "" || message.MessageID != "<test123@mailx.local>" || message.Body != "Hello from MailX.\r\nThis is the body.\r\n" || message.Raw == "" {
 		t.Fatalf("unexpected message: %#v", message)
 	}
+}
+
+func TestSMTPPersistsRawMessageBeforeAcceptingDATA(t *testing.T) {
+	store, err := storage.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, cli := net.Pipe()
+	defer cli.Close()
+	var record storage.MessageRecord
+	done := make(chan struct{})
+	go func() {
+		HandleConnection(srv, func(session Session, message mail.Message) error {
+			var err error
+			record, err = storage.NewMessageRecord(session.Envelope, message)
+			if err != nil {
+				return err
+			}
+			return store.Save(record)
+		})
+		close(done)
+	}()
+	r := bufio.NewReader(cli)
+	expect(t, r, "220")
+	for _, command := range []string{"EHLO localhost", "MAIL FROM:<sender@example.com>", "RCPT TO:<recipient@example.com>", "DATA"} {
+		_, _ = cli.Write([]byte(command + "\r\n"))
+		if command == "DATA" {
+			expect(t, r, "354")
+		} else {
+			expect(t, r, "250")
+		}
+	}
+	raw := "Subject: stored\r\nContent-Type: multipart/mixed; boundary=mailx\r\n\r\n" +
+		"--mailx\r\nContent-Type: text/plain\r\n\r\nHello persisted.\r\n" +
+		"--mailx\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"report.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n" +
+		"--mailx--\r\n"
+	_, _ = cli.Write([]byte(raw + ".\r\nQUIT\r\n"))
+	expect(t, r, "250")
+	expect(t, r, "221")
+	<-done
+	stored, err := os.ReadFile(filepath.Join(store.MessagesDir(), record.ID, "message.eml"))
+	if err != nil || string(stored) != raw {
+		t.Fatalf("SMTP accepted before raw persistence: %q, err=%v", stored, err)
+	}
+	if _, err := os.Stat(filepath.Join(store.MessagesDir(), record.ID, "metadata.json")); err != nil {
+		t.Fatalf("SMTP accepted before metadata persistence: %v", err)
+	}
+	attachment, err := os.ReadFile(filepath.Join(store.MessagesDir(), record.ID, "attachments", "0001.bin"))
+	if err != nil || string(attachment) != "%PDF-1.4\n" {
+		t.Fatalf("SMTP accepted before attachment persistence: %q, err=%v", attachment, err)
+	}
+}
+
+func TestSMTPReturnsTemporaryFailureWhenStorageFails(t *testing.T) {
+	srv, cli := net.Pipe()
+	defer cli.Close()
+	done := make(chan struct{})
+	go func() {
+		HandleConnection(srv, func(Session, mail.Message) error { return errors.New("disk unavailable") })
+		close(done)
+	}()
+	r := bufio.NewReader(cli)
+	expect(t, r, "220")
+	for _, command := range []string{"EHLO localhost", "MAIL FROM:<sender@example.com>", "RCPT TO:<recipient@example.com>", "DATA"} {
+		_, _ = cli.Write([]byte(command + "\r\n"))
+		if command == "DATA" {
+			expect(t, r, "354")
+		} else {
+			expect(t, r, "250")
+		}
+	}
+	_, _ = cli.Write([]byte("Subject: failed store\r\n\r\nbody\r\n.\r\nQUIT\r\n"))
+	expect(t, r, "451")
+	expect(t, r, "221")
+	<-done
 }
 func expect(t *testing.T, r *bufio.Reader, p string) {
 	t.Helper()
