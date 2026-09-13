@@ -1,0 +1,126 @@
+name: Commit Policy
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate-commits:
+    name: Validate Commit Policy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit policy
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking MailX commit policy..."
+
+          # Determine the commits to validate.
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+            RANGE="$BASE..$HEAD"
+          else
+            BEFORE="${{ github.event.before }}"
+            HEAD="${{ github.sha }}"
+
+            if [[ "$BEFORE" == "0000000000000000000000000000000000000000" ]]; then
+              RANGE="$HEAD"
+            else
+              RANGE="$BEFORE..$HEAD"
+            fi
+          fi
+
+          echo "Checking commits: $RANGE"
+
+          FAILED=0
+
+          # AI tools/providers that must never appear as attribution.
+          AI_PATTERN='Claude|Anthropic|ChatGPT|OpenAI|GPT|Codex|Cursor|GitHub Copilot|Copilot|Gemini|Google Gemini|Windsurf|Codeium|Cody|Sourcegraph Cody|Tabnine|Devin|Replit Agent|Amazon Q|Q Developer|JetBrains AI|Junie|Aider|Continue'
+
+          while IFS= read -r COMMIT; do
+            [[ -z "$COMMIT" ]] && continue
+
+            echo ""
+            echo "Checking $COMMIT"
+
+            MESSAGE="$(git log -1 --format='%B' "$COMMIT")"
+            SUBJECT="$(git log -1 --format='%s' "$COMMIT")"
+
+            # ----------------------------------------------------------
+            # Rule 1: No AI co-authors
+            # ----------------------------------------------------------
+
+            if echo "$MESSAGE" | grep -Eiq \
+              "Co-Authored-By:.*($AI_PATTERN)"; then
+
+              echo "❌ AI co-author attribution detected."
+              echo "   AI tools must not be listed as commit co-authors."
+              FAILED=1
+            fi
+
+            # ----------------------------------------------------------
+            # Rule 2: No AI generation attribution
+            # ----------------------------------------------------------
+
+            if echo "$MESSAGE" | grep -Eiq \
+              "(Generated|Created|Written|Authored|Produced|Assisted)[[:space:]]+(with|by|using)[[:space:]].*($AI_PATTERN)"; then
+
+              echo "❌ AI generation attribution detected."
+              echo "   Do not add AI-generated attribution to commits."
+              FAILED=1
+            fi
+
+            # ----------------------------------------------------------
+            # Rule 3: Block common AI attribution trailers
+            # ----------------------------------------------------------
+
+            if echo "$MESSAGE" | grep -Eiq \
+              "(AI-Generated|AI-Assisted|Generated-By|Generated-With|AI-Co-Author):"; then
+
+              echo "❌ AI attribution trailer detected."
+              FAILED=1
+            fi
+
+            # ----------------------------------------------------------
+            # Rule 4: Conventional Commits
+            # ----------------------------------------------------------
+
+            if ! echo "$SUBJECT" | grep -Eq \
+              '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-zA-Z0-9._/-]+\))?!?: .+'; then
+
+              echo "❌ Invalid commit message:"
+              echo "   $SUBJECT"
+              echo ""
+              echo "Use Conventional Commits:"
+              echo "   feat: add SMTP server"
+              echo "   fix: retry failed delivery"
+              echo "   docs: update README"
+              echo "   refactor(queue): simplify worker"
+              FAILED=1
+            fi
+
+          done < <(git rev-list "$RANGE")
+
+          echo ""
+
+          if [[ "$FAILED" -ne 0 ]]; then
+            echo "❌ MailX commit policy check failed."
+            exit 1
+          fi
+
+          echo "✅ All commits follow the MailX commit policy."
