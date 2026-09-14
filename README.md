@@ -12,58 +12,134 @@
 
 **MailX** is a mail service I'm building from scratch using Go.
 
-This project is part of my journey learning Go by building a real-world backend system instead of only following tutorials.
+The project started as a way for me to learn Go by building a real backend system instead of only following tutorials, but it is gradually becoming a deeper exploration of how email infrastructure actually works.
+
+The idea is simple:
+
+> Learn the protocol first, build the infrastructure myself, then gradually turn it into a real developer email platform.
+
+MailX does not currently rely on services such as Resend, SendGrid, Mailgun, or Gmail to handle its core SMTP behavior.
 
 ## Goal
 
-The goal is to understand how modern email platforms work under the hood and gradually build a functional mail service from the ground up.
+The long-term goal is to understand and build the core infrastructure behind modern email platforms.
 
-The project will explore concepts such as:
+MailX will gradually explore and implement things such as:
 
+- SMTP servers and clients
 - Email sending and delivery
-- SMTP
-- Email queues
+- MIME parsing
+- Attachments
+- Local mail persistence
+- DNS and MX resolution
+- Delivery queues
 - Background workers
+- Retries and failed delivery handling
+- Bounce handling
 - REST APIs
 - Authentication and API keys
+- Webhooks
 - Email templates
 - Rate limiting
-- Logging and error handling
+- Logging and observability
 - Database design
 - Concurrency with goroutines
-- Retries and failed delivery handling
+- TLS and SMTP authentication
+- DKIM, SPF, and DMARC
+- Inbound email
+- Suppression lists
+- Contacts and broadcasts
+- Developer SDKs and CLI tools
+
+The project is intentionally being built incrementally so I can understand each layer before introducing the next one.
 
 ## Tech Stack
 
 - **Language:** Go
-- **Architecture:** Backend service
 - **Protocol:** SMTP
-- **API:** REST
+- **Architecture:** Backend mail infrastructure
+- **Storage:** Local filesystem for the current milestone
+- **API:** REST API planned
+- **Concurrency:** Goroutines
 
-More technologies will be added as the project evolves.
+More infrastructure will be introduced only when the project reaches the stage where it is actually needed.
 
-## Status
+## Current Status
 
-**Current milestone: v0.3 - Message Model and Parser — complete.**
+**Current milestone: v0.5 — Local Persistence**
 
-The server tracks per-connection SMTP state, parses basic message headers, preserves raw DATA, keeps the SMTP envelope separate from message headers, and supports `EHLO`/`HELO`, `MAIL FROM`, `RCPT TO`, `DATA`, `RSET`, `NOOP`, and `QUIT`. Run it with:
+### Completed
 
-```bash
-go run ./cmd/mailx
-```
+#### v0.1 — Basic SMTP Server
 
-Tests can be run with `GOCACHE=/tmp/mailx-gocache go test ./...` when the default Go cache is not writable.
+MailX can:
 
-I'm actively learning Go while building MailX, so the architecture and implementation will evolve as I learn more.
+- Listen for TCP connections
+- Handle multiple connections concurrently
+- Send SMTP greetings
+- Process basic SMTP commands
+- Receive message DATA
 
-The long-term goal is to understand what it takes to build the core infrastructure behind modern email delivery platforms.
+#### v0.2 — SMTP Session / State Machine
 
-## Why I'm Building This
+MailX now understands SMTP command ordering and supports:
 
-I want to learn a compiled backend language and understand backend infrastructure at a deeper level.
+- `EHLO`
+- `HELO`
+- `MAIL FROM`
+- `RCPT TO`
+- `DATA`
+- `RSET`
+- `NOOP`
+- `QUIT`
 
-Instead of building another basic CRUD project, I decided to challenge myself:
+Each connection maintains its own SMTP session state.
 
-> **Build a mail service from scratch with Go.**
+#### v0.3 — Message Model and Parser
 
-This repository documents that journey.
+MailX separates the SMTP envelope from the Internet message itself and can parse:
+
+- `From`
+- `To`
+- `Cc`
+- `Bcc`
+- `Subject`
+- `Date`
+- `Message-ID`
+- Message body
+- Folded headers
+
+The original SMTP DATA is also preserved as raw message content.
+
+#### v0.4 — MIME Basics
+
+MailX now understands common MIME email structures, including:
+
+- `text/plain`
+- `text/html`
+- `multipart/alternative`
+- `multipart/mixed`
+- Nested multipart messages
+- Base64 decoding
+- Quoted-printable decoding
+- Attachments
+- MIME metadata
+- Content-Disposition
+- Content-Transfer-Encoding
+
+Attachments are extracted as binary-safe byte data while the original message remains unchanged.
+
+#### v0.5 — Local Persistence
+
+MailX can now persist received email to disk.
+
+Each accepted message receives its own MailX-generated internal ID and is stored as:
+
+```text
+data/messages/<mailx-id>/
+├── message.eml
+├── metadata.json
+└── attachments/
+    ├── 0001.bin
+    ├── 0002.bin
+    └── ...

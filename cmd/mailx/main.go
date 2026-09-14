@@ -90,22 +90,19 @@ func serve() error {
 	}
 	defer l.Close()
 	log.Println("MailX SMTP server listening on localhost:2525")
-	for {
-		c, e := l.Accept()
+	server, e := smtp.NewServer(smtp.DefaultConfig(), func(s smtp.Session, m mail.Message) error {
+		record, e := storage.NewMessageRecord(s.Envelope, m)
 		if e != nil {
-			log.Println(e)
-			continue
+			return e
 		}
-		go smtp.HandleConnection(c, func(s smtp.Session, m mail.Message) error {
-			record, e := storage.NewMessageRecord(s.Envelope, m)
-			if e != nil {
-				return e
-			}
-			if e := store.Save(record); e != nil {
-				return e
-			}
-			log.Printf("\n========== EMAIL RECEIVED ==========\nSMTP ENVELOPE\nMAIL FROM: %s\nRCPT TO: %v\nMESSAGE\nFrom: %s\nTo: %v\nCc: %v\nSubject: %s\nDate: %s\nMessage-ID: %s\nBODY\n%s\n====================================", s.Envelope.MailFrom, s.Envelope.Recipients, m.From, m.To, m.Cc, m.Subject, m.Date, m.MessageID, m.Body)
-			return nil
-		})
+		if e := store.Save(record); e != nil {
+			return e
+		}
+		log.Printf("\n========== EMAIL RECEIVED ==========\nSMTP ENVELOPE\nMAIL FROM: %s\nRCPT TO: %v\nMESSAGE\nFrom: %s\nTo: %v\nCc: %v\nSubject: %s\nDate: %s\nMessage-ID: %s\nBODY\n%s\n====================================", s.Envelope.MailFrom, s.Envelope.Recipients, m.From, m.To, m.Cc, m.Subject, m.Date, m.MessageID, m.Body)
+		return nil
+	})
+	if e != nil {
+		return e
 	}
+	return server.Serve(l)
 }

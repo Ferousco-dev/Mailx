@@ -10,7 +10,7 @@ import (
 
 func TestConfigValidation(t *testing.T) {
 	defaults := DefaultConfig()
-	if defaults.CommandLineLimit != 512 || defaults.ReadTimeout != 5*time.Minute || defaults.WriteTimeout != 5*time.Minute || defaults.MaxMessageSize != 10*1024*1024 {
+	if defaults.CommandLineLimit != 512 || defaults.ReadTimeout != 5*time.Minute || defaults.WriteTimeout != 5*time.Minute || defaults.MaxMessageSize != 10*1024*1024 || defaults.MaxConnections != 100 {
 		t.Fatalf("unexpected defaults: %#v", defaults)
 	}
 	valid := []Config{
@@ -19,6 +19,7 @@ func TestConfigValidation(t *testing.T) {
 		{CommandLineLimit: 512, ReadTimeout: time.Second, WriteTimeout: 0},
 		{CommandLineLimit: 1024, ReadTimeout: time.Millisecond, WriteTimeout: time.Millisecond},
 		{CommandLineLimit: 512, MaxMessageSize: 1},
+		{CommandLineLimit: 512, MaxConnections: 1},
 	}
 	for _, config := range valid {
 		if err := config.validate(); err != nil {
@@ -31,6 +32,7 @@ func TestConfigValidation(t *testing.T) {
 		{CommandLineLimit: 512, ReadTimeout: -time.Second},
 		{CommandLineLimit: 512, WriteTimeout: -time.Second},
 		{CommandLineLimit: 512, MaxMessageSize: -1},
+		{CommandLineLimit: 512, MaxConnections: -1},
 	}
 	for _, config := range invalid {
 		if err := config.validate(); err == nil {
@@ -45,6 +47,9 @@ func TestConfigValidation(t *testing.T) {
 	if normalized.MaxMessageSize != DefaultMaxMessageSize {
 		t.Fatalf("zero maximum did not select the finite default: %#v", normalized)
 	}
+	if normalized.MaxConnections != DefaultMaxConnections {
+		t.Fatalf("zero connection maximum did not select the finite default: %#v", normalized)
+	}
 }
 
 func TestCommandLineLimitIncludesCRLF(t *testing.T) {
@@ -55,7 +60,7 @@ func TestCommandLineLimitIncludesCRLF(t *testing.T) {
 		go func() { done <- HandleConnectionWithConfig(server, Config{CommandLineLimit: limit}, nil) }()
 		reader := bufio.NewReader(client)
 		expectRawCRLF(t, reader, "220")
-		line := "NOOP" + strings.Repeat(" ", limit-2-len("NOOP")) + "\r\n"
+		line := "NOOP " + strings.Repeat("x", limit-2-len("NOOP ")) + "\r\n"
 		_, _ = client.Write([]byte(line))
 		expectRawCRLF(t, reader, "250")
 		_, _ = client.Write([]byte("QUIT\r\n"))

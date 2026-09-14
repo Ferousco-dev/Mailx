@@ -231,28 +231,38 @@ func TestMessageSizeConfigIsIndependentAcrossConnections(t *testing.T) {
 	t.Cleanup(func() {
 		mu.Lock()
 		defer mu.Unlock()
-		if accepted != 1 {
-			t.Errorf("accepted messages=%d, want 1", accepted)
+		if accepted != 3 {
+			t.Errorf("accepted messages=%d, want 3", accepted)
 		}
 	})
 
 	for _, test := range []struct {
 		name      string
+		prelude   string
 		raw       string
+		wantRaw   string
 		wantReply string
 	}{
-		{name: "valid", raw: "Subject: valid\r\n\r\nok\r\n", wantReply: "250"},
+		{name: "valid", raw: "Subject: valid\r\n\r\nok\r\n", wantRaw: "Subject: valid\r\n\r\nok\r\n", wantReply: "250"},
+		{name: "dot stuffed", raw: "Subject: dots\r\n\r\n..dot\r\n", wantRaw: "Subject: dots\r\n\r\n.dot\r\n", wantReply: "250"},
+		{name: "malformed then recovered", prelude: "EHLO malformed\n", raw: "Subject: recovered\r\n\r\nok\r\n", wantRaw: "Subject: recovered\r\n\r\nok\r\n", wantReply: "250"},
 		{name: "oversized", raw: "Subject: large\r\n\r\n" + strings.Repeat("x", 128) + "\r\n", wantReply: "552"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			server, client, reader, done := startSMTPWithConfigForSizeTest(t, config, func(Session, mail.Message) error {
+			var receivedRaw string
+			server, client, reader, done := startSMTPWithConfigForSizeTest(t, config, func(_ Session, message mail.Message) error {
 				mu.Lock()
 				accepted++
 				mu.Unlock()
+				receivedRaw = message.Raw
 				return nil
 			})
 			defer server.Close()
+			if test.prelude != "" {
+				writeSMTP(t, client, test.prelude)
+				expectRawCRLF(t, reader, "500")
+			}
 			beginDataForSizeTest(t, client, reader, "sender@example.com", "recipient@example.com")
 			writeSMTP(t, client, test.raw+".\r\n")
 			expectRawCRLF(t, reader, test.wantReply)
@@ -260,6 +270,9 @@ func TestMessageSizeConfigIsIndependentAcrossConnections(t *testing.T) {
 			expectRawCRLF(t, reader, "221")
 			client.Close()
 			waitSMTP(t, done)
+			if receivedRaw != test.wantRaw {
+				t.Fatalf("raw=%q, want %q", receivedRaw, test.wantRaw)
+			}
 		})
 	}
 }
