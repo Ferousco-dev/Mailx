@@ -68,15 +68,18 @@ func (r *Resolver) LookupMX(ctx context.Context, domain string) ([]MX, error) {
 
 	records, err := r.lookup.LookupMX(ctx, normalized)
 	if err != nil {
-		// LookupMX may return records alongside a partial-success error;
-		// treat any record set as authoritative if the error is IsNotFound
-		// (Go signals implicit-fallback intent this way for some domains).
-		// Otherwise classify the DNS error.
 		if len(records) == 0 {
 			if ctx.Err() != nil {
 				return nil, &LookupError{Domain: normalized, Kind: KindTemporary, Err: ctx.Err()}
 			}
-			return nil, classifyDNSError(normalized, err, r, ctx)
+			var dnsErr *net.DNSError
+			if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+				// LookupMX reports both NXDOMAIN and a domain with no MX records
+				// as IsNotFound. LookupHost distinguishes them while applying the
+				// RFC 5321 implicit-MX fallback.
+				return implicitFallback(ctx, normalized, r.lookup)
+			}
+			return nil, classifyDNSError(normalized, err)
 		}
 	}
 
@@ -118,20 +121,10 @@ func (r *Resolver) LookupMX(ctx context.Context, domain string) ([]MX, error) {
 
 // classifyDNSError maps a resolver error into a Kind. It is called only when
 // LookupMX returned no records.
-func classifyDNSError(domain string, err error, r *Resolver, ctx context.Context) *LookupError {
+func classifyDNSError(domain string, err error) *LookupError {
 	var dnsErr *net.DNSError
 	if errors.As(err, &dnsErr) {
 		if dnsErr.IsNotFound {
-			// NoData for MX is not necessarily NXDOMAIN — the domain may
-			// still have A/AAAA. Try implicit-MX fallback.
-			cands, fallbackErr := implicitFallback(ctx, domain, r.lookup)
-			if fallbackErr == nil {
-				// Fallback succeeded — but we're already in an error path,
-				// so honor the Go convention: return candidates the caller
-				// can use by *not* returning an error here. We do that by
-				// signalling through a special sentinel: fold into caller.
-				_ = cands // unreachable normally; kept for future.
-			}
 			return &LookupError{Domain: domain, Kind: KindNotFound, Err: err}
 		}
 		if dnsErr.IsTimeout || dnsErr.IsTemporary {

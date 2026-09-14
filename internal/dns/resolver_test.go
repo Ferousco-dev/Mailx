@@ -256,6 +256,24 @@ func TestLookupMXImplicitFallbackWhenNoMX(t *testing.T) {
 	}
 }
 
+func TestLookupMXImplicitFallbackWhenMXLookupReturnsNotFound(t *testing.T) {
+	f := newFake()
+	f.mxErr["example.com"] = &net.DNSError{
+		Err:        "no such host",
+		Name:       "example.com",
+		IsNotFound: true,
+	}
+	f.host["example.com"] = []string{"192.0.2.1"}
+
+	got, err := NewResolverWith(f).LookupMX(context.Background(), "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Host != "example.com" || got[0].Preference != 0 {
+		t.Fatalf("implicit fallback wrong: %+v", got)
+	}
+}
+
 func TestLookupMXNoMXAndNoAddress(t *testing.T) {
 	f := newFake()
 	// no MX; host resolves to nothing
