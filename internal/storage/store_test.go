@@ -597,6 +597,9 @@ func TestFileStoreListReadsStoredMetadataInIDOrder(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(store.MessagesDir(), "notes.txt"), []byte("not a message"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(store.MessagesDir(), "scratch"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Remove(filepath.Join(store.MessagesDir(), first.ID, messageFile)); err != nil {
 		t.Fatal(err)
 	}
