@@ -77,6 +77,27 @@ func TestControlCommandsAndMalformedEnvelope(t *testing.T) {
 	<-done
 }
 
+func TestDATARejectsArgumentsWithoutResettingTransaction(t *testing.T) {
+	srv, cli := net.Pipe()
+	defer cli.Close()
+	done := make(chan struct{})
+	go func() { HandleConnection(srv, nil); close(done) }()
+	r := bufio.NewReader(cli)
+	expect(t, r, "220")
+	for _, command := range []string{"EHLO client", "MAIL FROM:<sender@example.com>", "RCPT TO:<recipient@example.com>"} {
+		_, _ = cli.Write([]byte(command + "\r\n"))
+		expect(t, r, "250")
+	}
+	_, _ = cli.Write([]byte("DATA unexpected\r\n"))
+	expect(t, r, "501")
+	_, _ = cli.Write([]byte("DATA\r\n"))
+	expect(t, r, "354")
+	_, _ = cli.Write([]byte("Subject: valid\r\n\r\nbody\r\n.\r\nQUIT\r\n"))
+	expect(t, r, "250")
+	expect(t, r, "221")
+	<-done
+}
+
 func TestNewGreetingAndDataResetTransaction(t *testing.T) {
 	srv, cli := net.Pipe()
 	defer cli.Close()

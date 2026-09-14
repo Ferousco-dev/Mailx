@@ -89,6 +89,10 @@ func HandleConnection(conn net.Conn, sink func(Session, mail.Message) error) {
 				reply(conn, "503 Bad sequence of commands")
 				continue
 			}
+			if arg != "" {
+				reply(conn, "501 Syntax: DATA")
+				continue
+			}
 			reply(conn, "354 End data with <CR><LF>.<CR><LF>")
 			raw, ok := data(r)
 			if !ok {

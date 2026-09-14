@@ -242,7 +242,11 @@ func (s *FileStore) List() ([]StoredMessageMetadata, error) {
 		}
 		id := entry.Name()
 		if err := validateID(id); err != nil {
-			return nil, fmt.Errorf("list messages: invalid message directory %q: %w", id, err)
+			// Unrelated directories (OS artifacts, admin scratch space,
+			// etc.) must not break listing of valid messages. Valid-ID
+			// directories with corrupt content still fail closed below via
+			// loadMetadata.
+			continue
 		}
 		metadata, err := s.loadMetadata(id)
 		if err != nil {
@@ -300,16 +304,24 @@ func writeStringExclusive(path, content string) error {
 	if err != nil {
 		return err
 	}
-	written, writeErr := io.WriteString(file, content)
-	closeErr := file.Close()
-	if closeErr != nil {
-		return closeErr
+	// A single Write may write fewer bytes than requested, so loop until
+	// the full content is persisted instead of failing the save on a
+	// benign short write.
+	remaining := content
+	for len(remaining) > 0 {
+		written, writeErr := io.WriteString(file, remaining)
+		if writeErr != nil {
+			_ = file.Close()
+			return writeErr
+		}
+		if written == 0 {
+			_ = file.Close()
+			return io.ErrShortWrite
+		}
+		remaining = remaining[written:]
 	}
-	if writeErr != nil {
-		return writeErr
-	}
-	if written != len(content) {
-		return io.ErrShortWrite
+	if err := file.Close(); err != nil {
+		return err
 	}
 	return nil
 }
@@ -319,16 +331,21 @@ func writeBytesExclusive(path string, content []byte) error {
 	if err != nil {
 		return err
 	}
-	written, writeErr := file.Write(content)
-	closeErr := file.Close()
-	if closeErr != nil {
-		return closeErr
+	remaining := content
+	for len(remaining) > 0 {
+		written, writeErr := file.Write(remaining)
+		if writeErr != nil {
+			_ = file.Close()
+			return writeErr
+		}
+		if written == 0 {
+			_ = file.Close()
+			return io.ErrShortWrite
+		}
+		remaining = remaining[written:]
 	}
-	if writeErr != nil {
-		return writeErr
-	}
-	if written != len(content) {
-		return io.ErrShortWrite
+	if err := file.Close(); err != nil {
+		return err
 	}
 	return nil
 }
