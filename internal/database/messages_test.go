@@ -351,7 +351,14 @@ func TestUpdateMessageStatusTransitionsAndDeliveredAt(t *testing.T) {
 		t.Fatal("new message must not have DeliveredAt set")
 	}
 
-	now := time.Now().UTC()
+	// Postgres timestamptz only stores microsecond precision, so any
+	// finer-grained wall-clock reading gets truncated on round trip. This
+	// is invisible on a clock whose native resolution is already >= 1µs
+	// (true of this test suite's usual macOS dev environment) but real
+	// on Linux, where time.Now() carries genuine nanosecond entropy -
+	// truncate up front so the comparison reflects what is actually
+	// stored, not the clock's raw resolution.
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	if err := db.UpdateMessageStatus(ctx, msg.ID, StatusDelivered, &now); err != nil {
 		t.Fatal(err)
 	}
