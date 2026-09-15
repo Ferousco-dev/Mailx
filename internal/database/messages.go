@@ -16,14 +16,20 @@ type MessageStatus string
 const (
 	StatusQueued     MessageStatus = "queued"
 	StatusProcessing MessageStatus = "processing"
+	StatusRetrying   MessageStatus = "retrying"
 	StatusDelivered  MessageStatus = "delivered"
 	StatusFailed     MessageStatus = "failed"
 	StatusBounced    MessageStatus = "bounced"
 )
 
+// Valid reports whether s is one of the known message statuses, for
+// callers (e.g. internal/api) validating a status filter before it
+// reaches a query.
+func (s MessageStatus) Valid() bool { return s.valid() }
+
 func (s MessageStatus) valid() bool {
 	switch s {
-	case StatusQueued, StatusProcessing, StatusDelivered, StatusFailed, StatusBounced:
+	case StatusQueued, StatusProcessing, StatusRetrying, StatusDelivered, StatusFailed, StatusBounced:
 		return true
 	}
 	return false
@@ -62,6 +68,9 @@ type NewMessage struct {
 	Subject         string
 	MessageIDHeader string
 	Recipients      []RecipientInput
+	// AvailableAt is when the outbox row becomes dispatchable; zero means
+	// now (immediate send). A future time defers dispatch (scheduled send).
+	AvailableAt time.Time
 }
 
 func (n NewMessage) validate() error {
@@ -149,6 +158,17 @@ func (db *DB) InsertMessage(ctx context.Context, in NewMessage) (Message, error)
 		eventID, msg.TenantID, msg.ID,
 	); err != nil {
 		return Message{}, fmt.Errorf("database: insert queued event: %w", normalizeErr(err))
+	}
+
+	availableAt := in.AvailableAt
+	if availableAt.IsZero() {
+		availableAt = msg.CreatedAt
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO outbox (message_id, tenant_id, available_at) VALUES ($1, $2, $3)`,
+		msg.ID, msg.TenantID, availableAt,
+	); err != nil {
+		return Message{}, fmt.Errorf("database: insert outbox row: %w", normalizeErr(err))
 	}
 
 	if err := tx.Commit(ctx); err != nil {

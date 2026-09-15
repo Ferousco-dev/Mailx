@@ -136,19 +136,48 @@ func TestInsertMessagePartialFailureRollsBack(t *testing.T) {
 	ctx := context.Background()
 	tenant := newTestTenant(t, db)
 
-	// Two recipients with the SAME address violate the UNIQUE(message_id,
-	// address) constraint on the second insert, mid-batch — the message
-	// row itself must not survive since it was in the same transaction.
+	// Two recipients with the SAME address AND role violate the v0.18
+	// UNIQUE(message_id, address, header_kind) constraint on the second
+	// insert, mid-batch — the message row itself must not survive since
+	// it was in the same transaction. (Same address in different roles,
+	// or both with a NULL/unclassified role, is deliberately now allowed
+	// — see migration 000003 — so this test pins the role to make the
+	// two rows genuinely duplicate.)
+	to := "to"
 	in := sampleNewMessage(t, tenant.ID)
 	in.Recipients = []RecipientInput{
-		{Address: "<dup@example.com>"},
-		{Address: "<dup@example.com>"},
+		{Address: "<dup@example.com>", HeaderKind: &to},
+		{Address: "<dup@example.com>", HeaderKind: &to},
 	}
 	if _, err := db.InsertMessage(ctx, in); err == nil {
 		t.Fatal("expected duplicate-recipient constraint violation")
 	}
 	if _, err := db.GetMessage(ctx, tenant.ID, in.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("message must not exist after rolled-back transaction, got %v", err)
+	}
+}
+
+func TestInsertMessageAllowsSameAddressInMultipleRoles(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tenant := newTestTenant(t, db)
+
+	to, cc := "to", "cc"
+	in := sampleNewMessage(t, tenant.ID)
+	in.Recipients = []RecipientInput{
+		{Address: "<both@example.com>", HeaderKind: &to},
+		{Address: "<both@example.com>", HeaderKind: &cc},
+	}
+	msg, err := db.InsertMessage(ctx, in)
+	if err != nil {
+		t.Fatalf("same address in different roles must be allowed: %v", err)
+	}
+	recipients, err := db.ListRecipients(ctx, msg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recipients) != 2 {
+		t.Fatalf("expected 2 distinct role rows, got %d", len(recipients))
 	}
 }
 

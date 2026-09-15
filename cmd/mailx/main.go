@@ -27,7 +27,7 @@ func main() {
 func run(args []string, output io.Writer) error {
 	switch len(args) {
 	case 0:
-		return serve()
+		return runFull()
 	case 1:
 		if args[0] == "list" {
 			return listMessages(output)
@@ -103,18 +103,36 @@ func smtpAddr() string {
 	return ":2525"
 }
 
+// notifyShutdown returns a context canceled on SIGTERM/SIGINT — what
+// `docker compose stop`/`down` and Ctrl-C send — so every long-running
+// component (SMTP listener, worker pool, dispatcher, API server) shuts
+// down from ONE signal source instead of each installing its own handler.
+func notifyShutdown() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+}
+
+// serve is the original v0.1-v0.14 SMTP-only entry point, used when
+// DATABASE_URL is not configured (runFull falls back to this).
 func serve() error {
-	store, e := storage.NewFileStore(storageRoot())
-	if e != nil {
-		return e
+	store, err := storage.NewFileStore(storageRoot())
+	if err != nil {
+		return err
 	}
+	ctx, stop := notifyShutdown()
+	defer stop()
+	return runSMTPReceiver(ctx, store)
+}
+
+// runSMTPReceiver blocks until ctx is canceled, at which point it closes
+// its listener so Serve returns instead of relying on SIGKILL.
+func runSMTPReceiver(ctx context.Context, store *storage.FileStore) error {
 	addr := smtpAddr()
-	l, e := net.Listen("tcp", addr)
-	if e != nil {
-		return e
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
 	}
 	log.Printf("MailX SMTP server listening on %s", addr)
-	server, e := smtp.NewServer(smtp.DefaultConfig(), func(s smtp.Session, m mail.Message) error {
+	server, err := smtp.NewServer(smtp.DefaultConfig(), func(s smtp.Session, m mail.Message) error {
 		record, e := storage.NewMessageRecord(s.Envelope, m)
 		if e != nil {
 			return e
@@ -125,22 +143,18 @@ func serve() error {
 		log.Printf("\n========== EMAIL RECEIVED ==========\nSMTP ENVELOPE\nMAIL FROM: %s\nRCPT TO: %v\nMESSAGE\nFrom: %s\nTo: %v\nCc: %v\nSubject: %s\nDate: %s\nMessage-ID: %s\nBODY\n%s\n====================================", s.Envelope.MailFrom, s.Envelope.Recipients, m.From, m.To, m.Cc, m.Subject, m.Date, m.MessageID, m.Body)
 		return nil
 	})
-	if e != nil {
+	if err != nil {
 		l.Close()
-		return e
+		return err
 	}
 
-	// SIGTERM is what `docker compose stop`/`down` send; closing the
-	// listener makes Serve return instead of the process being SIGKILLed.
-	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
-	defer stop()
 	go func() {
-		<-sigCtx.Done()
+		<-ctx.Done()
 		log.Println("MailX SMTP server shutting down")
 		l.Close()
 	}()
 
-	if err := server.Serve(l); err != nil && sigCtx.Err() == nil {
+	if err := server.Serve(l); err != nil && ctx.Err() == nil {
 		return err
 	}
 	return nil

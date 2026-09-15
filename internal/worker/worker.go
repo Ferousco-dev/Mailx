@@ -52,6 +52,16 @@ func WithOnError(fn func(error)) Option {
 	return func(p *Pool) { p.onError = fn }
 }
 
+// WithStatusReporter reports each job's lifecycle outcome (message ID,
+// retry status, and — only for StatusSucceeded — when delivery finished)
+// so a caller can durably persist it (e.g. internal/database.
+// UpdateMessageStatus) without worker itself depending on any storage
+// backend. Best-effort: called synchronously, after Ack/Release has
+// already happened, so a reporter failure never blocks queue progress.
+func WithStatusReporter(fn func(ctx context.Context, messageID string, status retry.LifecycleStatus, deliveredAt time.Time)) Option {
+	return func(p *Pool) { p.statusFn = fn }
+}
+
 type Pool struct {
 	q            queue.Queue
 	loader       Loader
@@ -60,6 +70,7 @@ type Pool struct {
 	reportingMTA string
 	now          func() time.Time
 	onError      func(error)
+	statusFn     func(ctx context.Context, messageID string, status retry.LifecycleStatus, deliveredAt time.Time)
 	states       *stateStore
 	wg           sync.WaitGroup
 }
@@ -89,6 +100,7 @@ func NewPool(q queue.Queue, loader Loader, coordinator Coordinator, cfg Config, 
 		reportingMTA: reportingMTA,
 		now:          func() time.Time { return time.Now().UTC() },
 		onError:      func(error) {},
+		statusFn:     func(context.Context, string, retry.LifecycleStatus, time.Time) {},
 		states:       newStateStore(),
 	}
 	for _, opt := range opts {
