@@ -2,8 +2,11 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/mail"
 	"github.com/Ferousco-dev/mailx/internal/storage"
@@ -13,6 +16,64 @@ func TestRunMigrateRequiresDatabaseURL(t *testing.T) {
 	t.Setenv("DATABASE_URL", "")
 	if err := run([]string{"migrate"}, &bytes.Buffer{}); err == nil {
 		t.Fatal("expected an error when DATABASE_URL is unset")
+	}
+}
+
+func TestRunComponentsFailureCancelsPeers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	peerStarted := make(chan struct{})
+	peerStopped := make(chan struct{})
+	listenerErr := errors.New("bind failed")
+	err := runComponents(ctx,
+		component{"smtp", func(context.Context) error {
+			<-peerStarted
+			return listenerErr
+		}},
+		component{"worker", func(ctx context.Context) error {
+			close(peerStarted)
+			<-ctx.Done()
+			close(peerStopped)
+			return nil
+		}},
+	)
+	if !errors.Is(err, listenerErr) || !strings.Contains(err.Error(), "smtp") {
+		t.Fatalf("listener error not returned: %v", err)
+	}
+	select {
+	case <-peerStopped:
+	default:
+		t.Fatal("peer was not stopped before return")
+	}
+}
+
+func TestRunComponentsUnexpectedExitAndGracefulShutdown(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := runComponents(ctx, component{"api", func(context.Context) error { return nil }})
+	if err == nil || !strings.Contains(err.Error(), "api: exited unexpectedly") {
+		t.Fatalf("unexpected exit not reported: %v", err)
+	}
+
+	shutdownCtx, shutdown := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- runComponents(shutdownCtx, component{"worker", func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			return nil
+		}})
+	}()
+	<-started
+	shutdown()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("graceful shutdown returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("graceful shutdown hung")
 	}
 }
 

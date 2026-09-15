@@ -126,6 +126,39 @@ func TestSendMultipleRecipientsCcBccReplyTo(t *testing.T) {
 	_ = tenantID
 }
 
+func TestSendMixedDomainsRejectedBeforeAcceptance(t *testing.T) {
+	mux, db, tenantID := setupMux(t)
+	for _, recipients := range []map[string]any{
+		{"to": []string{"bob@example.com", "carol@other.example"}},
+		{"to": []string{"bob@example.com"}, "cc": []string{"carol@other.example"}},
+		{"to": []string{"bob@example.com"}, "bcc": []string{"carol@other.example"}},
+	} {
+		recipients["from"] = "alice@example.com"
+		recipients["text"] = "hello"
+		rec := doJSON(t, mux, "POST", "/v1/emails", recipients)
+		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "mixed_recipient_domains") {
+			t.Fatalf("mixed-domain send accepted or misclassified: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	rows, err := db.ListMessages(t.Context(), tenantID, nil, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rejected sends created durable messages: %+v", rows)
+	}
+}
+
+func TestSendSameDomainCaseInsensitive(t *testing.T) {
+	mux, _, _ := setupMux(t)
+	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
+		"from": "alice@example.com", "to": []string{"bob@EXAMPLE.COM", "carol@example.com"}, "text": "hello",
+	})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("same-domain send rejected: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSendUnicodeSubjectAndBody(t *testing.T) {
 	mux, _, _ := setupMux(t)
 	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{

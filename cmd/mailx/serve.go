@@ -59,38 +59,11 @@ func runFull() error {
 		return err
 	}
 
-	var wg sync.WaitGroup
-	runErrs := make(chan error, 4)
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := runSMTPReceiver(ctx, store); err != nil {
-			runErrs <- fmt.Errorf("smtp: %w", err)
-		}
-	}()
-
 	disp := dispatch.New(db, q, dispatch.WithOnError(func(err error) { log.Printf("dispatch: %v", err) }))
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := disp.Run(ctx); err != nil {
-			runErrs <- fmt.Errorf("dispatch: %w", err)
-		}
-	}()
-
 	pool, err := buildWorkerPool(q, store, db)
 	if err != nil {
 		return err
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := pool.Run(ctx); err != nil {
-			runErrs <- fmt.Errorf("worker: %w", err)
-		}
-	}()
-
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, DevTenantID: tenantID,
 		Ready: func(ctx context.Context) error { return db.Ping(ctx) },
@@ -98,26 +71,56 @@ func runFull() error {
 	if err != nil {
 		return err
 	}
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		if err := apiServer.Run(ctx); err != nil {
-			runErrs <- fmt.Errorf("api: %w", err)
-		}
-	}()
-	log.Printf("MailX API listening on %s", httpAddr())
-
-	wg.Wait()
-	close(runErrs)
-	return errors.Join(collectErrors(runErrs)...)
+	return runComponents(ctx,
+		component{"smtp", func(ctx context.Context) error { return runSMTPReceiver(ctx, store) }},
+		component{"dispatch", disp.Run},
+		component{"worker", pool.Run},
+		component{"api", apiServer.Run},
+	)
 }
 
-func collectErrors(ch <-chan error) []error {
-	var out []error
-	for err := range ch {
-		out = append(out, err)
+type component struct {
+	name string
+	run  func(context.Context) error
+}
+
+// runComponents stops the whole process when one component fails or exits
+// unexpectedly. Waiting for all goroutines before observing errors would
+// otherwise leave the dispatcher and workers running after a listener fails.
+func runComponents(ctx context.Context, components ...component) error {
+	if len(components) == 0 {
+		return errors.New("mailx: no components configured")
 	}
-	return out
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errs := make(chan error, len(components))
+	var wg sync.WaitGroup
+	for _, c := range components {
+		wg.Add(1)
+		go func(c component) {
+			defer wg.Done()
+			err := c.run(runCtx)
+			if err != nil {
+				errs <- fmt.Errorf("%s: %w", c.name, err)
+			} else if runCtx.Err() == nil {
+				errs <- fmt.Errorf("%s: exited unexpectedly", c.name)
+			}
+		}(c)
+	}
+
+	var all []error
+	select {
+	case <-ctx.Done():
+	case err := <-errs:
+		all = append(all, err)
+	}
+	cancel()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		all = append(all, err)
+	}
+	return errors.Join(all...)
 }
 
 func openDatabase(ctx context.Context) (*database.DB, error) {
