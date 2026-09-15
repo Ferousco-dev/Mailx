@@ -587,7 +587,13 @@ func TestPanicDuringProcessingIsRecoveredAndReleases(t *testing.T) {
 	if err := q.Enqueue(context.Background(), queue.Job{ID: "j1", MessageID: "m1"}); err != nil {
 		t.Fatal(err)
 	}
-	runPoolUntilIdleOnce(t, p, q, 2*time.Second)
+	// Wait for the coordinator's own attempt-completion signal (which
+	// fires from Attempt's defer even when it panics), not just the
+	// loader having been called — otherwise canceling as soon as the
+	// loader runs can race ahead of Attempt actually panicking, and
+	// Attempt's leading ctx.Err() check short-circuits before the panic,
+	// intermittently failing this test under -race/-count repetition.
+	runPoolForAttempts(t, p, q, 1, 2*time.Second)
 
 	if q.Len() != 1 {
 		t.Fatalf("panicking job must be released, not lost or stuck, Len=%d", q.Len())
