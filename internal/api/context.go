@@ -9,6 +9,8 @@ type ctxKey int
 const (
 	tenantKey ctxKey = iota
 	requestIDKey
+	scopesKey
+	apiKeyIDKey
 )
 
 // withTenant is the ONLY place a request's tenant identity is attached to
@@ -37,4 +39,26 @@ func withRequestID(ctx context.Context, id string) context.Context {
 func requestIDFromContext(ctx context.Context) string {
 	id, _ := ctx.Value(requestIDKey).(string)
 	return id
+}
+
+// withAuth attaches the authenticated request's scopes and the api_keys
+// row id (for logging only — never the key's public key_id or secret) to
+// tenant+request context in one call, set by authenticateMiddleware.
+func withAuth(ctx context.Context, scopes []string, apiKeyRowID string) context.Context {
+	ctx = context.WithValue(ctx, scopesKey, scopes)
+	return context.WithValue(ctx, apiKeyIDKey, apiKeyRowID)
+}
+
+func scopesFromContext(ctx context.Context) []string {
+	scopes, _ := ctx.Value(scopesKey).([]string)
+	return scopes
+}
+
+func hasScope(ctx context.Context, scope string) bool {
+	for _, s := range scopesFromContext(ctx) {
+		if s == scope {
+			return true
+		}
+	}
+	return false
 }

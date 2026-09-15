@@ -24,27 +24,44 @@ func main() {
 	}
 }
 
+const usage = "usage: mailx [list | migrate | inspect <mailx-id> | " +
+	"create-tenant | create-api-key | rotate-api-key | revoke-api-key | list-api-keys]"
+
 func run(args []string, output io.Writer) error {
-	switch len(args) {
-	case 0:
+	if len(args) == 0 {
 		return runFull()
-	case 1:
-		if args[0] == "list" {
-			return listMessages(output)
+	}
+	switch args[0] {
+	case "list":
+		if len(args) != 1 {
+			return fmt.Errorf(usage)
 		}
-		if args[0] == "migrate" {
-			return migrate()
+		return listMessages(output)
+	case "migrate":
+		if len(args) != 1 {
+			return fmt.Errorf(usage)
 		}
-		if args[0] == "inspect" {
+		return migrate()
+	case "inspect":
+		if len(args) != 2 {
 			return fmt.Errorf("usage: mailx inspect <mailx-id>")
 		}
-		return fmt.Errorf("unknown command %q; usage: mailx [list | migrate | inspect <mailx-id>]", args[0])
-	case 2:
-		if args[0] == "inspect" {
-			return inspectMessage(output, args[1])
-		}
+		return inspectMessage(output, args[1])
+	// Bootstrap/admin commands for v0.19 API-key authentication — see
+	// apikeys.go's doc for why these are CLI-only, never a public
+	// unauthenticated REST endpoint.
+	case "create-tenant":
+		return cmdCreateTenant(args[1:], output)
+	case "create-api-key":
+		return cmdCreateAPIKey(args[1:], output)
+	case "rotate-api-key":
+		return cmdRotateAPIKey(args[1:], output)
+	case "revoke-api-key":
+		return cmdRevokeAPIKey(args[1:], output)
+	case "list-api-keys":
+		return cmdListAPIKeys(args[1:], output)
 	}
-	return fmt.Errorf("usage: mailx [list | migrate | inspect <mailx-id>]")
+	return fmt.Errorf("unknown command %q; %s", args[0], usage)
 }
 
 // storageRoot honors MAILX_STORAGE_ROOT so containerized deployments can

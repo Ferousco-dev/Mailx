@@ -48,7 +48,9 @@ services:
       MAILX_HTTP_ADDR: ":8080"
       DATABASE_URL: postgres://${POSTGRES_USER:-mailx}:${POSTGRES_PASSWORD:-mailx-dev-only}@postgres:5432/${POSTGRES_DB:-mailx}?sslmode=disable
       REDIS_ADDR: redis:6379
-      MAILX_DEV_TENANT_ID: ${MAILX_DEV_TENANT_ID:-}
+      # v0.19 API-key verifier pepper — see internal/auth's package doc.
+      # Dev-only placeholder; never a real secret in this repo.
+      MAILX_API_KEY_PEPPER: ${MAILX_API_KEY_PEPPER:-local-dev-pepper-not-for-production}
     volumes:
       - mailx-data:/data
     ports:

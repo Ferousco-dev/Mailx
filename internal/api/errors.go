@@ -14,6 +14,8 @@ type ErrorType string
 const (
 	ErrInvalidRequest         ErrorType = "invalid_request"
 	ErrValidation             ErrorType = "validation_error"
+	ErrAuthentication         ErrorType = "authentication_error"
+	ErrForbidden              ErrorType = "forbidden"
 	ErrNotFoundType           ErrorType = "not_found"
 	ErrConflictType           ErrorType = "conflict"
 	ErrPayloadTooLarge        ErrorType = "payload_too_large"
@@ -25,6 +27,8 @@ const (
 var errorStatus = map[ErrorType]int{
 	ErrInvalidRequest:         http.StatusBadRequest,
 	ErrValidation:             http.StatusUnprocessableEntity,
+	ErrAuthentication:         http.StatusUnauthorized,
+	ErrForbidden:              http.StatusForbidden,
 	ErrNotFoundType:           http.StatusNotFound,
 	ErrConflictType:           http.StatusConflict,
 	ErrPayloadTooLarge:        http.StatusRequestEntityTooLarge,
