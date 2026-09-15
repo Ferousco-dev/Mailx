@@ -1,0 +1,9 @@
+.git
+.github
+.claude
+.env
+.env.example
+data/
+*.md
+assets/
+.DS_Store

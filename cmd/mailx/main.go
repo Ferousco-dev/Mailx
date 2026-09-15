@@ -1,13 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
+	"time"
 
+	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/mail"
 	"github.com/Ferousco-dev/mailx/internal/smtp"
 	"github.com/Ferousco-dev/mailx/internal/storage"
@@ -27,20 +32,30 @@ func run(args []string, output io.Writer) error {
 		if args[0] == "list" {
 			return listMessages(output)
 		}
+		if args[0] == "migrate" {
+			return migrate()
+		}
 		if args[0] == "inspect" {
 			return fmt.Errorf("usage: mailx inspect <mailx-id>")
 		}
-		return fmt.Errorf("unknown command %q; usage: mailx [list | inspect <mailx-id>]", args[0])
+		return fmt.Errorf("unknown command %q; usage: mailx [list | migrate | inspect <mailx-id>]", args[0])
 	case 2:
 		if args[0] == "inspect" {
 			return inspectMessage(output, args[1])
 		}
 	}
-	return fmt.Errorf("usage: mailx [list | inspect <mailx-id>]")
+	return fmt.Errorf("usage: mailx [list | migrate | inspect <mailx-id>]")
+}
+
+// storageRoot honors MAILX_STORAGE_ROOT so containerized deployments can
+// point FileStore at a mounted volume; empty falls through to
+// storage.DefaultRoot.
+func storageRoot() string {
+	return os.Getenv("MAILX_STORAGE_ROOT")
 }
 
 func listMessages(output io.Writer) error {
-	store, e := storage.NewFileStore("")
+	store, e := storage.NewFileStore(storageRoot())
 	if e != nil {
 		return e
 	}
@@ -56,7 +71,7 @@ func listMessages(output io.Writer) error {
 }
 
 func inspectMessage(output io.Writer, id string) error {
-	store, err := storage.NewFileStore("")
+	store, err := storage.NewFileStore(storageRoot())
 	if err != nil {
 		return err
 	}
@@ -79,17 +94,26 @@ func inspectMessage(output io.Writer, id string) error {
 	return nil
 }
 
+// smtpAddr honors MAILX_SMTP_ADDR (e.g. ":2525" or "0.0.0.0:2525") so a
+// container can bind the same port developers already use locally.
+func smtpAddr() string {
+	if addr := os.Getenv("MAILX_SMTP_ADDR"); addr != "" {
+		return addr
+	}
+	return ":2525"
+}
+
 func serve() error {
-	store, e := storage.NewFileStore("")
+	store, e := storage.NewFileStore(storageRoot())
 	if e != nil {
 		return e
 	}
-	l, e := net.Listen("tcp", ":2525")
+	addr := smtpAddr()
+	l, e := net.Listen("tcp", addr)
 	if e != nil {
 		return e
 	}
-	defer l.Close()
-	log.Println("MailX SMTP server listening on localhost:2525")
+	log.Printf("MailX SMTP server listening on %s", addr)
 	server, e := smtp.NewServer(smtp.DefaultConfig(), func(s smtp.Session, m mail.Message) error {
 		record, e := storage.NewMessageRecord(s.Envelope, m)
 		if e != nil {
@@ -102,7 +126,44 @@ func serve() error {
 		return nil
 	})
 	if e != nil {
+		l.Close()
 		return e
 	}
-	return server.Serve(l)
+
+	// SIGTERM is what `docker compose stop`/`down` send; closing the
+	// listener makes Serve return instead of the process being SIGKILLed.
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+	go func() {
+		<-sigCtx.Done()
+		log.Println("MailX SMTP server shutting down")
+		l.Close()
+	}()
+
+	if err := server.Serve(l); err != nil && sigCtx.Err() == nil {
+		return err
+	}
+	return nil
+}
+
+// migrate applies every pending PostgreSQL migration and exits; it is run
+// as a one-shot Compose step before the SMTP server starts, so schema
+// setup is deterministic and visible rather than racing app startup.
+func migrate() error {
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn == "" {
+		return fmt.Errorf("migrate: DATABASE_URL is not set")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, err := database.Open(ctx, database.Config{DSN: dsn})
+	if err != nil {
+		return fmt.Errorf("migrate: connect: %w", err)
+	}
+	defer db.Close()
+	if err := db.Migrate(ctx); err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	log.Println("MailX: migrations applied")
+	return nil
 }

@@ -9,6 +9,13 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/storage"
 )
 
+func TestRunMigrateRequiresDatabaseURL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	if err := run([]string{"migrate"}, &bytes.Buffer{}); err == nil {
+		t.Fatal("expected an error when DATABASE_URL is unset")
+	}
+}
+
 func TestRunListAndInspect(t *testing.T) {
 	t.Chdir(t.TempDir())
 	message, err := mail.ParseMessage("From: Sender <sender@example.com>\r\nTo: Recipient <recipient@example.com>\r\nSubject: persisted subject\r\nMessage-ID: <sender-id@example.com>\r\nContent-Type: multipart/mixed; boundary=mailx\r\n\r\n--mailx\r\nContent-Type: text/plain\r\n\r\nbody marker\r\n--mailx\r\nContent-Type: application/pdf\r\nContent-Disposition: attachment; filename=report.pdf\r\nContent-Transfer-Encoding: base64\r\n\r\nUERG\r\n--mailx--\r\n")
