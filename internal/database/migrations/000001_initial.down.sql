@@ -1,0 +1,5 @@
+DROP TABLE IF EXISTS events;
+DROP TABLE IF EXISTS delivery_attempts;
+DROP TABLE IF EXISTS recipients;
+DROP TABLE IF EXISTS messages;
+DROP TABLE IF EXISTS tenants;

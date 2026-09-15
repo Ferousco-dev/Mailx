@@ -123,6 +123,7 @@ func (e *Engine) Deliver(ctx context.Context, req Request) (Result, error) {
 
 	// 3) Try candidates until acceptance, definitive failure, or exhaustion.
 	var lastErr *transfer.TransferError
+	var lastRemoteMessage string
 	var lastDecision fallbackDecision = stopTemporary
 	for _, mx := range res.MXCandidates {
 		if err := ctx.Err(); err != nil {
@@ -152,6 +153,11 @@ func (e *Engine) Deliver(ctx context.Context, req Request) (Result, error) {
 		att.TransferErr = te
 		res.Attempts = append(res.Attempts, att)
 		lastErr = te
+		// transfer.Result (not TransferError) is where the raw remote SMTP
+		// diagnostic text lives on a failed attempt — see transfer.go's
+		// Transfer, which sets Result.RemoteMessage from the underlying
+		// smtp.DeliveryError.Remote but does not carry it on TransferError.
+		lastRemoteMessage = tRes.RemoteMessage
 		lastDecision = decideFallback(tErr)
 		if lastDecision != tryNext {
 			break
@@ -182,6 +188,7 @@ func (e *Engine) Deliver(ctx context.Context, req Request) (Result, error) {
 		res.FailureStage = string(lastErr.Stage)
 		res.FinalCode = lastErr.Code
 		res.EnhancedStatus = lastErr.Enhanced
+		res.RemoteMessage = lastRemoteMessage
 		res.Recipient = lastErr.Recipient
 		res.FailureMessage = lastErr.Error()
 	}

@@ -248,6 +248,30 @@ func TestNoFallbackOnPermanentSMTPFailure(t *testing.T) {
 	}
 }
 
+// TestFailureResultPreservesRemoteMessage is a regression test for a v0.10
+// bug found while building v0.12's DSN generation: the failure path built
+// Result from the terminating TransferError but never copied its Remote
+// (raw SMTP diagnostic) text into Result.RemoteMessage — only the
+// acceptance path did. Any consumer that needed the actual remote server
+// text on failure (e.g. a bounce/DSN Diagnostic-Code) silently got "".
+func TestFailureResultPreservesRemoteMessage(t *testing.T) {
+	x := &stubTransfer{script: []stubOutcome{
+		{
+			res: transfer.Result{RemoteMessage: "user unknown"},
+			err: &transfer.TransferError{Stage: smtp.StageRcptTo, Code: 550, Recipient: "<a@example.com>"},
+		},
+	}}
+	r := fakeResolver{mx: []dns.MX{{Host: "mx1.example.com", Preference: 10}}}
+	e := newEngine(t, r, x)
+	res, err := e.Deliver(context.Background(), Request{Domain: "example.com", Envelope: envelope("<a@example.com>"), Raw: "x"})
+	if err == nil {
+		t.Fatal("expected failure")
+	}
+	if res.RemoteMessage != "user unknown" {
+		t.Fatalf("RemoteMessage not propagated on failure path: got %q", res.RemoteMessage)
+	}
+}
+
 func TestNoFallbackOnTemporarySMTPCommandFailure(t *testing.T) {
 	x := &stubTransfer{script: []stubOutcome{
 		{err: &transfer.TransferError{Stage: smtp.StageMailFrom, Code: 451, Temporary: true}},
