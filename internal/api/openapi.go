@@ -23,7 +23,7 @@ const openAPISpec = `{
     "/emails": {
       "post": {
         "summary": "Send an email",
-        "description": "Durably accepts an email for asynchronous processing. 202 means MailX has validated and durably recorded the email and has durable responsibility for eventually attempting delivery - it does NOT mean the email has been delivered, that the recipient's server accepted it, or that Redis currently has the job.",
+        "description": "Durably accepts an email for asynchronous processing. All to/cc/bcc recipients must share one delivery domain; mixed-domain requests receive 422 before acceptance. 202 means MailX has validated and durably recorded the email and has durable responsibility for eventually attempting delivery - it does NOT mean the email has been delivered, that the recipient's server accepted it, or that Redis currently has the job.",
         "requestBody": {
           "required": true,
           "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SendEmailRequest"}}}

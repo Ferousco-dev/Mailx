@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
@@ -69,6 +70,10 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, newError(ErrValidation, "invalid_message", err.Error()))
 		return
 	}
+	if !sameDeliveryDomain(built.Envelope) {
+		writeError(w, r, newError(ErrValidation, "mixed_recipient_domains", "all recipients must share one domain for this MailX version"))
+		return
+	}
 
 	parsed, err := mail.ParseMessage(built.Raw)
 	if err != nil {
@@ -116,6 +121,30 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusAccepted, emailFromRow(msg, recipientsFromInputs(id, recipients)))
+}
+
+// The current queue schedules one delivery request per message, and the
+// delivery engine requires every envelope recipient to match its domain.
+// Reject unsupported mixed-domain sends before persistence or acceptance.
+func sameDeliveryDomain(recipients []string) bool {
+	if len(recipients) == 0 {
+		return false
+	}
+	first := recipientDeliveryDomain(recipients[0])
+	for _, recipient := range recipients[1:] {
+		if !strings.EqualFold(first, recipientDeliveryDomain(recipient)) {
+			return false
+		}
+	}
+	return true
+}
+
+func recipientDeliveryDomain(recipient string) string {
+	at := strings.LastIndexByte(recipient, '@')
+	if at < 0 {
+		return ""
+	}
+	return strings.TrimSuffix(recipient[at+1:], ">")
 }
 
 func appendRoleRecipients(out []database.RecipientInput, addrs []string, role string) []database.RecipientInput {
