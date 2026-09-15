@@ -18,29 +18,4 @@ The idea is simple:
 
 > Understand the protocol first, build the infrastructure myself, then gradually turn it into a real developer email platform.
 
-MailX does not depend on Resend, SendGrid, Mailgun, Gmail, or another provider for its core mail delivery behavior.
-
 The long-term goal is to provide a simple developer experience on top of infrastructure that MailX actually owns and understands.
-
----
-
-## Vision
-
-Eventually, a developer should be able to use MailX through a simple API or SDK:
-
-```text
-Application
-    ↓
-MailX API
-    ↓
-Queue
-    ↓
-Workers
-    ↓
-Delivery Engine
-    ↓
-DNS / MX
-    ↓
-SMTP
-    ↓
-Recipient Mail Server
