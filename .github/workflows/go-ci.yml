@@ -16,6 +16,38 @@ jobs:
     name: Build and Test
     runs-on: ubuntu-latest
 
+    # v0.16 (Redis) and v0.15 (PostgreSQL) integration tests require real
+    # infrastructure - the Redis ones deliberately FAIL rather than skip
+    # when unreachable (see internal/queue's requireRedis doc), so CI must
+    # provide both, not just the Go toolchain.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mailx
+          POSTGRES_PASSWORD: mailx-ci-only
+          POSTGRES_DB: mailx_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U mailx -d mailx_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      MAILX_TEST_DATABASE_URL: postgres://mailx:mailx-ci-only@localhost:5432/mailx_test?sslmode=disable
+      REDIS_ADDR: localhost:6379
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -42,6 +74,9 @@ jobs:
 
       - name: Run tests
         run: go test ./...
+
+      - name: Run tests with race detector
+        run: go test -race ./...
 
       - name: Build
         run: go build ./...

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/bounce"
 	"github.com/Ferousco-dev/mailx/internal/delivery"
@@ -51,11 +52,13 @@ func (p *Pool) processOne(ctx context.Context, c queue.Claim) {
 	case retry.StatusSucceeded:
 		p.states.delete(c.Job.ID)
 		p.ackBestEffort(c)
+		p.statusFn(ctx, c.Job.MessageID, outcome.Status, p.now())
 
 	case retry.StatusFailed, retry.StatusExhausted:
 		p.handleTerminalFailure(loaded, state, outcome.Status, c.Job.ID)
 		p.states.delete(c.Job.ID)
 		p.ackBestEffort(c)
+		p.statusFn(ctx, c.Job.MessageID, outcome.Status, time.Time{})
 
 	case retry.StatusRetryable:
 		if outcome.Schedule == nil {
@@ -64,6 +67,7 @@ func (p *Pool) processOne(ctx context.Context, c queue.Claim) {
 			return
 		}
 		p.releaseBestEffort(c, outcome.Schedule.NextRetryAt)
+		p.statusFn(ctx, c.Job.MessageID, outcome.Status, time.Time{})
 
 	default:
 		p.onError(fmt.Errorf("worker: job %s: unrecognized lifecycle status %v", c.Job.ID, outcome.Status))
