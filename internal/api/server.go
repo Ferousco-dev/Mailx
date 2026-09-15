@@ -19,17 +19,17 @@ const (
 	shutdownGrace     = 10 * time.Second
 )
 
-// Config wires the API server to its dependencies. Addr, DevTenantID,
-// and Ready must all be set by the caller (cmd/mailx) — none of them
-// have a safe implicit default.
+// Config wires the API server to its dependencies. Addr, Auth, and Ready
+// must all be set by the caller (cmd/mailx) — none of them have a safe
+// implicit default.
 type Config struct {
 	Addr  string
 	DB    *database.DB
 	Store *storage.FileStore
-	// DevTenantID is v0.18's temporary tenant mechanism (see
-	// middleware.go's devTenantMiddleware doc): every request is
-	// attributed to this tenant until v0.19's API keys exist.
-	DevTenantID string
+	// Auth authenticates every /v1 request — v0.19's real replacement for
+	// v0.18's DevTenantID (see authmiddleware.go). Production code passes
+	// *auth.Service; tests may pass a fake satisfying the same interface.
+	Auth authService
 	// Ready reports whether MailX can currently meet POST /v1/emails'
 	// durability contract (e.g. a live PostgreSQL ping) — see
 	// GET /health/ready's doc for why this must not be a fake check.
@@ -46,8 +46,8 @@ func (c Config) validate() error {
 	if c.Store == nil {
 		return errors.New("api: Store is nil")
 	}
-	if c.DevTenantID == "" {
-		return errors.New("api: DevTenantID is empty")
+	if c.Auth == nil {
+		return errors.New("api: Auth is nil")
 	}
 	if c.Ready == nil {
 		return errors.New("api: Ready is nil")
@@ -73,7 +73,7 @@ func NewServer(cfg Config) (*Server, error) {
 		defer cancel()
 		return cfg.Ready(ctx)
 	}
-	mux := newMux(h, cfg.DevTenantID, readiness)
+	mux := newMux(h, cfg.Auth, readiness)
 	handler := chain(mux, withRecoverMiddleware, withRequestIDMiddleware, limitBody)
 
 	return &Server{httpServer: &http.Server{
