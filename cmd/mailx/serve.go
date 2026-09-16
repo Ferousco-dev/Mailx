@@ -72,7 +72,38 @@ func runFull() error {
 		component{"dispatch", disp.Run},
 		component{"worker", pool.Run},
 		component{"api", apiServer.Run},
+		component{"idempotency-cleanup", func(ctx context.Context) error { return runIdempotencyCleanup(ctx, db) }},
 	)
+}
+
+// idempotencyCleanupInterval/Batch are deliberately conservative: this
+// deletes only already-expired rows (see database.DeleteExpiredIdempotencyKeys's
+// doc — an in-progress row past its own expiry is abandoned, not active
+// work), in small bounded batches, so it never competes meaningfully with
+// request traffic even on a large table.
+const (
+	idempotencyCleanupInterval = 10 * time.Minute
+	idempotencyCleanupBatch    = 1000
+)
+
+func runIdempotencyCleanup(ctx context.Context, db *database.DB) error {
+	ticker := time.NewTicker(idempotencyCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			n, err := db.DeleteExpiredIdempotencyKeys(ctx, time.Now().UTC(), idempotencyCleanupBatch)
+			if err != nil {
+				log.Printf("idempotency-cleanup: %v", err)
+				continue
+			}
+			if n > 0 {
+				log.Printf("idempotency-cleanup: removed %d expired key(s)", n)
+			}
+		}
+	}
 }
 
 type component struct {

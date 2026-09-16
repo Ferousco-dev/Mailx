@@ -40,6 +40,18 @@ func TestOpenAPISpecParses(t *testing.T) {
 	if desc, _ := apiKeyAuth["description"].(string); strings.Contains(strings.ToLower(desc), "is a jwt") {
 		t.Error("must never claim the API key IS a JWT")
 	}
+
+	postEmails := paths["/emails"].(map[string]any)["post"].(map[string]any)
+	params, _ := postEmails["parameters"].([]any)
+	found := false
+	for _, p := range params {
+		if p.(map[string]any)["name"] == "Idempotency-Key" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("POST /emails must document the Idempotency-Key header")
+	}
 }
 
 // TestOpenAPIRoutesMatchRuntime is the drift guard: every path documented

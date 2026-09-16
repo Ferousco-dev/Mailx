@@ -71,6 +71,21 @@ type NewMessage struct {
 	// AvailableAt is when the outbox row becomes dispatchable; zero means
 	// now (immediate send). A future time defers dispatch (scheduled send).
 	AvailableAt time.Time
+	// IdempotencyCompletion, if set, marks the ClaimIdempotencyKey row
+	// this message fulfills as completed IN THE SAME TRANSACTION as the
+	// message/recipients/event/outbox insert below — so "message
+	// committed but idempotency record missing" and "idempotency says
+	// complete but message failed" cannot happen; there is only one
+	// commit for both.
+	IdempotencyCompletion *IdempotencyCompletion
+}
+
+// IdempotencyCompletion identifies the idempotency_keys row to complete.
+// TenantID is taken from NewMessage.TenantID (the two must always agree,
+// so it is not repeated here).
+type IdempotencyCompletion struct {
+	Operation      string
+	IdempotencyKey string
 }
 
 func (n NewMessage) validate() error {
@@ -169,6 +184,26 @@ func (db *DB) InsertMessage(ctx context.Context, in NewMessage) (Message, error)
 		msg.ID, msg.TenantID, availableAt,
 	); err != nil {
 		return Message{}, fmt.Errorf("database: insert outbox row: %w", normalizeErr(err))
+	}
+
+	if in.IdempotencyCompletion != nil {
+		ic := in.IdempotencyCompletion
+		tag, err := tx.Exec(ctx, `
+			UPDATE idempotency_keys SET status = 'completed', resource_id = $1, completed_at = now()
+			WHERE tenant_id = $2 AND operation = $3 AND idempotency_key = $4 AND status = 'in_progress'`,
+			msg.ID, msg.TenantID, ic.Operation, ic.IdempotencyKey,
+		)
+		if err != nil {
+			return Message{}, fmt.Errorf("database: complete idempotency key: %w", normalizeErr(err))
+		}
+		if tag.RowsAffected() == 0 {
+			// The claim this message was meant to fulfill is gone (already
+			// completed by someone else, or reclaimed out from under us
+			// after a long stall) - committing anyway would durably create
+			// a message no longer backed by a valid claim. Roll back
+			// instead; the caller lost the ownership race.
+			return Message{}, fmt.Errorf("database: idempotency claim %s/%s no longer owned: %w", ic.Operation, ic.IdempotencyKey, ErrConflict)
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
