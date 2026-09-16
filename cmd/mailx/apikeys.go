@@ -60,13 +60,13 @@ func cmdCreateAPIKey(args []string, output io.Writer) error {
 	fs := flag.NewFlagSet("create-api-key", flag.ContinueOnError)
 	tenantID := fs.String("tenant", "", "owning tenant id (required)")
 	name := fs.String("name", "", "human-readable key name (required)")
-	scopes := fs.String("scopes", "", "comma-separated scopes, e.g. emails:send,emails:read (required)")
+	scopes := fs.String("scopes", "", "comma-separated scopes, e.g. emails:send,emails:read,domains:read,domains:write (required)")
 	ttl := fs.Duration("ttl", 0, "optional expiration, e.g. 720h (0 = never expires)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *tenantID == "" || *name == "" || *scopes == "" {
-		return fmt.Errorf("usage: mailx create-api-key -tenant <id> -name <name> -scopes emails:send,emails:read [-ttl 720h]")
+		return fmt.Errorf("usage: mailx create-api-key -tenant <id> -name <name> -scopes emails:send,emails:read,domains:read,domains:write [-ttl 720h]")
 	}
 	if *ttl < 0 {
 		return fmt.Errorf("-ttl must not be negative (0 means never expires, got %s)", *ttl)

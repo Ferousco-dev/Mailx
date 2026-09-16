@@ -6,7 +6,7 @@ import "net/http"
 // types/routes. Rationale (see the v0.18 report's "OpenAPI architecture"
 // section): the public JSON schema is a deliberate product surface with
 // its own naming/shape decisions (e.g. "html"/"text", not Go field
-// names), and MailX has exactly three routes today — a generator would
+// names), and MailX still has a small route surface — a generator would
 // buy safety against drift at the cost of a dependency this milestone
 // does not otherwise need. openapi_test.go keeps it from silently
 // diverging from the real handlers by asserting the documented routes
@@ -24,7 +24,7 @@ const openAPISpec = `{
     "/emails": {
       "post": {
         "summary": "Send an email",
-        "description": "Requires the emails:send scope. Durably accepts an email for asynchronous processing. All to/cc/bcc recipients must share one delivery domain; mixed-domain requests receive 422 before acceptance. 202 means MailX has validated and durably recorded the email and has durable responsibility for eventually attempting delivery - it does NOT mean the email has been delivered, that the recipient's server accepted it, or that Redis currently has the job. Retrying safely: supply the same Idempotency-Key on retry to get the original result back instead of creating a second email; this prevents duplicate MailX email SUBMISSIONS from a repeated HTTP request - it does not and cannot guarantee exactly-once SMTP delivery to the recipient's server.",
+        "description": "Requires the emails:send scope. Durably accepts an email for asynchronous processing. All to/cc/bcc recipients must share one delivery domain; mixed-domain requests receive 422 before acceptance. 202 means MailX has validated and durably recorded the email and has durable responsibility for eventually attempting delivery - it does NOT mean the email has been delivered, that the recipient's server accepted it, or that Redis currently has the job. Retrying safely: supply the same Idempotency-Key on retry to get the original result back instead of creating a second email; this prevents duplicate MailX email SUBMISSIONS from a repeated HTTP request - it does not and cannot guarantee exactly-once SMTP delivery to the recipient's server. v0.21 records DNS ownership but does not yet enforce a verified From domain; enforcement is deferred to the sending-identity/DKIM milestone.",
         "parameters": [
           {
             "name": "Idempotency-Key", "in": "header", "required": false,
@@ -78,6 +78,66 @@ const openAPISpec = `{
           "401": {"$ref": "#/components/responses/Error"},
           "403": {"$ref": "#/components/responses/Error"},
           "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/domains": {
+      "post": {
+        "summary": "Add a domain",
+        "description": "Requires domains:write. Creates a pending DNS-ownership resource and returns the TXT record to publish. Ownership verification is not DKIM, SPF, DMARC, or a guarantee of inbox placement.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateDomainRequest"}}}},
+        "responses": {
+          "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Domain"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}, "415": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List domains",
+        "description": "Requires domains:read. Returns only the authenticated tenant's active domain resources.",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}, "description": "Opaque cursor from next_cursor."}
+        ],
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DomainList"}}}},
+          "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"},
+          "500": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/domains/{id}": {
+      "get": {
+        "summary": "Retrieve a domain",
+        "description": "Requires domains:read. A resource owned by another tenant is reported as 404.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Domain"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}, "404": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "delete": {
+        "summary": "Remove a domain",
+        "description": "Requires domains:write. Soft-deletes the resource without deleting message history.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "204": {"description": "Removed"}, "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"}, "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/domains/{id}/verify": {
+      "post": {
+        "summary": "Verify domain ownership",
+        "description": "Requires domains:write. MailX performs a bounded public DNS TXT lookup. A missing or wrong record returns the resource still pending; temporary DNS infrastructure failure returns 503. Verified ownership is monotonic in v0.21 and repeated calls are idempotent.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "Current ownership state", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Domain"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"}
         }
       }
     }
@@ -134,6 +194,33 @@ const openAPISpec = `{
           "data": {"type": "array", "items": {"$ref": "#/components/schemas/Email"}},
           "next_cursor": {"type": "string", "nullable": true}
         }
+      },
+      "CreateDomainRequest": {
+        "type": "object", "required": ["name"], "additionalProperties": false,
+        "properties": {"name": {"type": "string", "example": "example.com", "description": "Public ASCII DNS name. Root and subdomain resources are independent; wildcards, IPs, IDNs, and public suffixes are rejected in v0.21."}}
+      },
+      "DNSRecord": {
+        "type": "object", "required": ["type", "name", "value"],
+        "properties": {
+          "type": {"type": "string", "enum": ["TXT"]},
+          "name": {"type": "string", "example": "_mailx-verification.example.com"},
+          "value": {"type": "string", "example": "mailx-verification=example-token"}
+        }
+      },
+      "Domain": {
+        "type": "object", "required": ["id", "name", "ownership_state", "records", "created_at"],
+        "properties": {
+          "id": {"type": "string"}, "name": {"type": "string"},
+          "ownership_state": {"type": "string", "enum": ["pending", "verified"], "description": "DNS ownership only; not deliverability readiness."},
+          "records": {"type": "array", "items": {"$ref": "#/components/schemas/DNSRecord"}},
+          "created_at": {"type": "string", "format": "date-time"},
+          "verified_at": {"type": "string", "format": "date-time", "nullable": true},
+          "last_checked_at": {"type": "string", "format": "date-time", "nullable": true}
+        }
+      },
+      "DomainList": {
+        "type": "object",
+        "properties": {"data": {"type": "array", "items": {"$ref": "#/components/schemas/Domain"}}, "next_cursor": {"type": "string", "nullable": true}}
       },
       "APIError": {
         "type": "object",

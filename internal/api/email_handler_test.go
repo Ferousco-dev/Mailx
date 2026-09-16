@@ -88,7 +88,7 @@ func setupMuxNoAuth(t *testing.T) (http.Handler, *database.DB, database.Tenant, 
 	h := newEmailHandler(db, store)
 	authSvc := auth.NewService(db, nil)
 	gen, _, err := authSvc.Create(context.Background(), tenant.ID, "test key",
-		[]string{string(auth.ScopeEmailsSend), string(auth.ScopeEmailsRead)}, nil)
+		[]string{string(auth.ScopeEmailsSend), string(auth.ScopeEmailsRead), string(auth.ScopeDomainsRead), string(auth.ScopeDomainsWrite)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,6 +299,18 @@ func TestSendInvalidContentType(t *testing.T) {
 	mux, _, _ := setupMux(t)
 	rec := doRaw(t, mux, "POST", "/v1/emails", "text/plain", []byte(`{}`))
 	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSendAcceptsParameterizedJSONContentType(t *testing.T) {
+	mux, _, _ := setupMux(t)
+	rec := doRaw(t, mux, "POST", "/v1/emails", "application/json; charset=utf-8", []byte(`{
+		"from":"a@example.com",
+		"to":["b@example.com"],
+		"text":"hello"
+	}`))
+	if rec.Code != http.StatusAccepted {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
 	}
 }
