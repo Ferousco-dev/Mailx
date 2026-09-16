@@ -102,7 +102,9 @@ const openAPISpec = `{
         ],
         "responses": {
           "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DomainList"}}}},
-          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}
+          "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"},
+          "500": {"$ref": "#/components/responses/Error"}
         }
       }
     },

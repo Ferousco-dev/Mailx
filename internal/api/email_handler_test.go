@@ -303,6 +303,18 @@ func TestSendInvalidContentType(t *testing.T) {
 	}
 }
 
+func TestSendAcceptsParameterizedJSONContentType(t *testing.T) {
+	mux, _, _ := setupMux(t)
+	rec := doRaw(t, mux, "POST", "/v1/emails", "application/json; charset=utf-8", []byte(`{
+		"from":"a@example.com",
+		"to":["b@example.com"],
+		"text":"hello"
+	}`))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // ------------------------------------------------------------- GET -----
 
 func TestGetExistingEmail(t *testing.T) {

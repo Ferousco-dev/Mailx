@@ -52,6 +52,14 @@ func TestOpenAPISpecParses(t *testing.T) {
 	if !found {
 		t.Error("POST /emails must document the Idempotency-Key header")
 	}
+
+	domainList := paths["/domains"].(map[string]any)["get"].(map[string]any)
+	responses := domainList["responses"].(map[string]any)
+	for _, status := range []string{"200", "400", "401", "403", "422", "500"} {
+		if _, ok := responses[status]; !ok {
+			t.Errorf("GET /domains must document response %s", status)
+		}
+	}
 }
 
 // TestOpenAPIRoutesMatchRuntime is the drift guard: every path documented

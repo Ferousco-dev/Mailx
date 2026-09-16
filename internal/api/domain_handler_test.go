@@ -63,6 +63,15 @@ func createDomain(t *testing.T, mux http.Handler, name string) domainResource {
 	return resource
 }
 
+func TestDomainCreateAcceptsParameterizedJSONContentType(t *testing.T) {
+	resolver := &domainTXTResolver{records: map[string][]string{}}
+	mux, _, _, _ := setupDomainAPI(t, []string{string(auth.ScopeDomainsWrite)}, resolver)
+	rec := doRaw(t, mux, "POST", "/v1/domains", "application/json; charset=utf-8", []byte(`{"name":"example.com"}`))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestDomainCreateGetListVerifyDelete(t *testing.T) {
 	resolver := &domainTXTResolver{records: map[string][]string{}}
 	mux, _, _, _ := setupDomainAPI(t, []string{string(auth.ScopeDomainsRead), string(auth.ScopeDomainsWrite)}, resolver)

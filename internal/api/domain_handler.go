@@ -54,7 +54,7 @@ func domainFromRow(d database.Domain) domainResource {
 }
 
 func (h *domainHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
-	if ct := r.Header.Get("Content-Type"); ct != "" && ct != "application/json" {
+	if !acceptsJSONContentType(r.Header.Get("Content-Type")) {
 		writeError(w, r, newError(ErrUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json"))
 		return
 	}
