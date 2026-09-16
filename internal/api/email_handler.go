@@ -169,6 +169,20 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		Recipients: recipients, AvailableAt: scheduledAt, IdempotencyCompletion: idemCompletion,
 	})
 	if err != nil {
+		// Lost the completion race for our OWN idempotency claim: someone
+		// else (a reclaimer after we stalled past the staleness window)
+		// finished first. If they were retrying the exact same payload as
+		// us (same fingerprint), that is not really a conflict — it is
+		// exactly the "genuinely concurrent identical retry" case this
+		// feature exists for, so replay THEIR result instead of failing
+		// a request that would otherwise have succeeded.
+		if idemCompletion != nil && errors.Is(err, database.ErrConflict) {
+			if resp, ok := h.replayIfCompleted(r.Context(), tenantID, idemCompletion.Operation, idemCompletion.IdempotencyKey, idemCompletion.Fingerprint); ok {
+				w.Header().Set("Idempotency-Replayed", "true")
+				writeJSON(w, http.StatusAccepted, resp)
+				return
+			}
+		}
 		// The outbox insert is part of the SAME transaction as the
 		// message/recipients: a failure here durably rolls back
 		// everything, so the "no orphaned DB row" guarantee holds even
@@ -216,18 +230,40 @@ func (h *emailHandler) resolveIdempotency(ctx context.Context, tenantID, idemKey
 	// where the resource is now, e.g. delivered instead of queued, not a
 	// frozen snapshot of the original 202 body; only the id and the 202
 	// status code itself are guaranteed stable across replays).
+	resp, ok := h.loadReplay(ctx, tenantID, claim)
+	if !ok {
+		return email{}, true, newError(ErrInternal, "internal_error", "failed to load the original result for this idempotency key")
+	}
+	return resp, true, nil
+}
+
+// replayIfCompleted is the recovery path for a caller that lost the
+// completion race for its OWN claim (see handleSend's InsertMessage error
+// handling): if the current claim holder finished with the SAME
+// fingerprint, this was a genuinely concurrent identical retry, not a
+// real conflict, so its result is replayed rather than surfacing an error
+// for a request that would otherwise have succeeded.
+func (h *emailHandler) replayIfCompleted(ctx context.Context, tenantID, operation, idemKey, fingerprint string) (email, bool) {
+	claim, err := h.db.GetIdempotencyKey(ctx, tenantID, operation, idemKey)
+	if err != nil || claim.Status != database.IdempotencyCompleted || claim.Fingerprint != fingerprint {
+		return email{}, false
+	}
+	return h.loadReplay(ctx, tenantID, claim)
+}
+
+func (h *emailHandler) loadReplay(ctx context.Context, tenantID string, claim database.IdempotencyRecord) (email, bool) {
 	if claim.ResourceID == nil {
-		return email{}, true, newError(ErrInternal, "internal_error", "idempotency record is completed but missing its resource")
+		return email{}, false
 	}
-	msg, getErr := h.db.GetMessage(ctx, tenantID, *claim.ResourceID)
-	if getErr != nil {
-		return email{}, true, newError(ErrInternal, "internal_error", "failed to load the original result for this idempotency key")
+	msg, err := h.db.GetMessage(ctx, tenantID, *claim.ResourceID)
+	if err != nil {
+		return email{}, false
 	}
-	recipients, recErr := h.db.ListRecipients(ctx, msg.ID)
-	if recErr != nil {
-		return email{}, true, newError(ErrInternal, "internal_error", "failed to load the original result for this idempotency key")
+	recipients, err := h.db.ListRecipients(ctx, msg.ID)
+	if err != nil {
+		return email{}, false
 	}
-	return emailFromRow(msg, recipients), true, nil
+	return emailFromRow(msg, recipients), true
 }
 
 // pollIdempotencyCompletion waits, bounded, for a genuinely concurrent

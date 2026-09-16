@@ -37,7 +37,7 @@ type apiKeyStore interface {
 	ListAPIKeysForTenant(ctx context.Context, tenantID string) ([]database.APIKey, error)
 	TouchAPIKeyLastUsed(ctx context.Context, id string, at time.Time) error
 	RevokeAPIKey(ctx context.Context, id string) error
-	RotateAPIKey(ctx context.Context, oldID string, newKey database.NewAPIKey, retireAt time.Time) (database.APIKey, error)
+	RotateAPIKey(ctx context.Context, oldID string, newKey database.NewAPIKey, now, retireAt time.Time) (database.APIKey, error)
 }
 
 // Service is the only place that ties key generation/verification
@@ -168,7 +168,7 @@ func (s *Service) Rotate(ctx context.Context, keyID string, grace time.Duration)
 	created, err := s.db.RotateAPIKey(ctx, old.ID, database.NewAPIKey{
 		TenantID: old.TenantID, Name: old.Name, KeyID: gen.KeyID, SecretHash: gen.SecretHash,
 		Scopes: old.Scopes, ExpiresAt: old.ExpiresAt,
-	}, now.Add(grace))
+	}, now, now.Add(grace))
 	if err != nil {
 		// The old key is untouched (transaction rolled back) — it remains
 		// valid, and gen.Raw was never persisted, so it simply cannot

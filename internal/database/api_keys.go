@@ -145,15 +145,16 @@ func (db *DB) RevokeAPIKey(ctx context.Context, id string) error {
 // RotateAPIKey creates a new key row and retires the old one in ONE
 // transaction: either both happen or neither does, so a crash never
 // leaves a new row with no corresponding old-key retirement (or vice
-// versa). retireAt is the OLD key's new expires_at, computed by the
-// caller (internal/auth.Service, using its own clock) rather than this
-// package calling Postgres's now() — the two must agree with whatever
-// clock Authenticate later compares expires_at against, so the caller
-// owns that decision entirely; retireAt == the caller's "now" makes the
-// old key expire immediately. The old key's existing revoked_at (if
-// already revoked) is left untouched - rotating an already-revoked key
-// is allowed but does not un-revoke it.
-func (db *DB) RotateAPIKey(ctx context.Context, oldID string, newKey NewAPIKey, retireAt time.Time) (APIKey, error) {
+// versa). now/retireAt both come from the caller's own clock
+// (internal/auth.Service) rather than this package calling Postgres's
+// now() — the same clock Authenticate later compares expires_at against
+// must own every decision here; retireAt == now makes the old key expire
+// immediately. The old key's revoked_at/expires_at are re-checked HERE,
+// under the row lock below, not just by the caller before calling this -
+// a key that was valid when the caller checked but expires/gets revoked
+// in the gap before the lock is acquired must still be rejected, not
+// silently rotated.
+func (db *DB) RotateAPIKey(ctx context.Context, oldID string, newKey NewAPIKey, now, retireAt time.Time) (APIKey, error) {
 	if err := newKey.validate(); err != nil {
 		return APIKey{}, err
 	}
@@ -168,11 +169,14 @@ func (db *DB) RotateAPIKey(ctx context.Context, oldID string, newKey NewAPIKey, 
 	// until this transaction commits or rolls back, then sees the
 	// now-set replaced_by_id itself and stops — so only one of two
 	// concurrent rotations can ever succeed, and the loser never inserts
-	// a replacement row that would otherwise be left valid.
+	// a replacement row that would otherwise be left valid. Re-reading
+	// expires_at here (not trusting a value read before the lock) closes
+	// the same window for expiry as for replaced_by_id/revoked_at.
 	var oldReplacedByID *string
 	var oldRevokedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT replaced_by_id, revoked_at FROM api_keys WHERE id = $1 FOR UPDATE`, oldID).
-		Scan(&oldReplacedByID, &oldRevokedAt)
+	var oldExpiresAt *time.Time
+	err = tx.QueryRow(ctx, `SELECT replaced_by_id, revoked_at, expires_at FROM api_keys WHERE id = $1 FOR UPDATE`, oldID).
+		Scan(&oldReplacedByID, &oldRevokedAt, &oldExpiresAt)
 	if err != nil {
 		if isNoRows(err) {
 			return APIKey{}, fmt.Errorf("database: rotate api key: %w", ErrNotFound)
@@ -181,6 +185,9 @@ func (db *DB) RotateAPIKey(ctx context.Context, oldID string, newKey NewAPIKey, 
 	}
 	if oldReplacedByID != nil || oldRevokedAt != nil {
 		return APIKey{}, fmt.Errorf("database: rotate api key: key already revoked or already rotated: %w", ErrConflict)
+	}
+	if oldExpiresAt != nil && !oldExpiresAt.After(now) {
+		return APIKey{}, fmt.Errorf("database: rotate api key: key is expired: %w", ErrConflict)
 	}
 
 	rowID, err := newID()

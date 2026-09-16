@@ -168,7 +168,7 @@ func TestRotateAPIKeyCreatesNewRowAndRetiresOld(t *testing.T) {
 	newKey := sampleNewAPIKey(tenant.ID)
 	newKey.KeyID = "keyid00000000000000000000000099"
 	newKey.SecretHash = "newhash0000000000000000000000000000000000000000000000000000"
-	created, err := db.RotateAPIKey(ctx, old.ID, newKey, time.Now().UTC().Add(time.Hour))
+	created, err := db.RotateAPIKey(ctx, old.ID, newKey, time.Now().UTC(), time.Now().UTC().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +204,7 @@ func TestRotateAPIKeyImmediateGraceExpiresNow(t *testing.T) {
 	newKey := sampleNewAPIKey(tenant.ID)
 	newKey.KeyID = "keyid00000000000000000000000098"
 
-	if _, err := db.RotateAPIKey(ctx, old.ID, newKey, time.Now().UTC()); err != nil {
+	if _, err := db.RotateAPIKey(ctx, old.ID, newKey, time.Now().UTC(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	gotOld, err := db.GetAPIKeyByKeyID(ctx, old.KeyID)
@@ -242,7 +242,7 @@ func TestRotateAPIKeyFailureLeavesOldKeyUntouched(t *testing.T) {
 	badNewKey := sampleNewAPIKey(tenant.ID)
 	badNewKey.KeyID = "keyid00000000000000000000000097"
 	badNewKey.Scopes = []string{"not:a:real:scope"}
-	if _, err := db.RotateAPIKey(ctx, old.ID, badNewKey, time.Now().UTC().Add(time.Hour)); err == nil {
+	if _, err := db.RotateAPIKey(ctx, old.ID, badNewKey, time.Now().UTC(), time.Now().UTC().Add(time.Hour)); err == nil {
 		t.Fatal("expected rotation to fail for an invalid scope")
 	}
 
@@ -258,13 +258,42 @@ func TestRotateAPIKeyFailureLeavesOldKeyUntouched(t *testing.T) {
 	}
 }
 
+// TestRotateAPIKeyRejectsAtomicallyExpiredKey is a regression test for a
+// Greptile-flagged bug: the expiry check must be re-evaluated under the
+// SAME row lock used for the replaced_by_id/revoked_at check, using the
+// caller's "now" - not trusted from before the transaction started. This
+// proves the DB layer itself refuses to rotate a key whose expires_at has
+// already passed relative to the `now` given to this call, independent
+// of whatever Service-level pre-check exists.
+func TestRotateAPIKeyRejectsAtomicallyExpiredKey(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tenant := newTestTenant(t, db)
+	past := time.Now().UTC().Add(-time.Hour)
+	old := sampleNewAPIKey(tenant.ID)
+	old.ExpiresAt = &past
+	oldKey, err := db.InsertAPIKey(ctx, old)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	newKey := sampleNewAPIKey(tenant.ID)
+	newKey.KeyID = "keyid00000000000000000000000095"
+	if _, err := db.RotateAPIKey(ctx, oldKey.ID, newKey, time.Now().UTC(), time.Now().UTC().Add(time.Hour)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict rotating an atomically-expired key, got %v", err)
+	}
+	if _, err := db.GetAPIKeyByKeyID(ctx, newKey.KeyID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("the replacement key must not persist when the old key is expired")
+	}
+}
+
 func TestRotateAPIKeyUnknownOldIDIsNotFound(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 	tenant := newTestTenant(t, db)
 	newKey := sampleNewAPIKey(tenant.ID)
 	newKey.KeyID = "keyid00000000000000000000000096"
-	if _, err := db.RotateAPIKey(ctx, "does-not-exist", newKey, time.Now().UTC().Add(time.Hour)); !errors.Is(err, ErrNotFound) {
+	if _, err := db.RotateAPIKey(ctx, "does-not-exist", newKey, time.Now().UTC(), time.Now().UTC().Add(time.Hour)); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 	// The new key must not have been left behind either.
@@ -288,13 +317,13 @@ func TestRotateAPIKeyTwiceSecondCallConflicts(t *testing.T) {
 
 	first := sampleNewAPIKey(tenant.ID)
 	first.KeyID = "keyid00000000000000000000000091"
-	if _, err := db.RotateAPIKey(ctx, old.ID, first, time.Now().UTC().Add(time.Hour)); err != nil {
+	if _, err := db.RotateAPIKey(ctx, old.ID, first, time.Now().UTC(), time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
 	second := sampleNewAPIKey(tenant.ID)
 	second.KeyID = "keyid00000000000000000000000092"
-	if _, err := db.RotateAPIKey(ctx, old.ID, second, time.Now().UTC().Add(time.Hour)); !errors.Is(err, ErrConflict) {
+	if _, err := db.RotateAPIKey(ctx, old.ID, second, time.Now().UTC(), time.Now().UTC().Add(time.Hour)); !errors.Is(err, ErrConflict) {
 		t.Fatalf("expected ErrConflict rotating an already-rotated key, got %v", err)
 	}
 	// The second rotation's key must not have been left behind.
@@ -331,7 +360,7 @@ func TestConcurrentRotationsExactlyOneWinner(t *testing.T) {
 			defer wg.Done()
 			nk := sampleNewAPIKey(tenant.ID)
 			nk.KeyID = fmt.Sprintf("keyidconcurrent%017d", i)
-			_, err := db.RotateAPIKey(ctx, old.ID, nk, time.Now().UTC().Add(time.Hour))
+			_, err := db.RotateAPIKey(ctx, old.ID, nk, time.Now().UTC(), time.Now().UTC().Add(time.Hour))
 			if err == nil {
 				mu.Lock()
 				wins++

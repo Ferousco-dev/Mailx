@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/auth"
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/idempotency"
+	"github.com/Ferousco-dev/mailx/internal/storage"
 )
 
 // doJSONWithKey is doJSON plus an Idempotency-Key header, for the tests
@@ -349,5 +351,76 @@ func TestIdempotencyReplayReflectsCurrentResourceState(t *testing.T) {
 	e2 := decodeEmail(t, second)
 	if e2.Status != "delivered" {
 		t.Fatalf("expected the replay to reflect the CURRENT resource state (delivered), got %s", e2.Status)
+	}
+}
+
+// TestIdempotencyStaleOriginalReplaysReclaimerResultInsteadOfErroring is a
+// regression test for a Greptile-flagged bug: when a caller (A) stalls
+// past the staleness window and its claim gets reclaimed by a genuinely
+// identical retry (B, SAME fingerprint - not a different payload), A
+// finally finishing and trying to complete must not surface a 500 -  B's
+// result (the only real difference from a normal replay is which of two
+// simultaneous identical requests happened to finish the durable work)
+// must be replayed to A instead.
+func TestIdempotencyStaleOriginalReplaysReclaimerResultInsteadOfErroring(t *testing.T) {
+	_, db, tenant, _, _ := setupMuxNoAuth(t)
+	store, err := storage.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newEmailHandler(db, store)
+	ctx := context.Background()
+	const op = idempotency.OperationEmailsCreate
+	const key = "dup-key"
+	const fp = "identical-fingerprint"
+	future := time.Now().UTC().Add(time.Hour)
+
+	// A claims first.
+	if _, owned, err := db.ClaimIdempotencyKey(ctx, tenant.ID, op, key, fp, future, time.Now().UTC().Add(-time.Minute)); err != nil || !owned {
+		t.Fatalf("A's claim: owned=%v err=%v", owned, err)
+	}
+	// B reclaims it as stale - SAME fingerprint, since B is retrying the
+	// identical payload, not a different one.
+	if _, owned, err := db.ClaimIdempotencyKey(ctx, tenant.ID, op, key, fp, future, time.Now().UTC().Add(time.Hour)); err != nil || !owned {
+		t.Fatalf("B's reclaim: owned=%v err=%v", owned, err)
+	}
+	// B finishes and completes normally.
+	inB := sampleNewMessageFor(t, tenant.ID)
+	inB.IdempotencyCompletion = &database.IdempotencyCompletion{Operation: op, IdempotencyKey: key, Fingerprint: fp}
+	msgB, err := db.InsertMessage(ctx, inB)
+	if err != nil {
+		t.Fatalf("B's completion should succeed: %v", err)
+	}
+
+	// A, unaware of the reclaim, finally finishes and tries to complete
+	// with the SAME fingerprint.
+	inA := sampleNewMessageFor(t, tenant.ID)
+	inA.IdempotencyCompletion = &database.IdempotencyCompletion{Operation: op, IdempotencyKey: key, Fingerprint: fp}
+	if _, err := db.InsertMessage(ctx, inA); !errors.Is(err, database.ErrConflict) {
+		t.Fatalf("expected A to lose the completion race with ErrConflict, got %v", err)
+	}
+
+	// This is the fix under test: A's handler-level recovery must replay
+	// B's result rather than surfacing an error.
+	resp, ok := h.replayIfCompleted(ctx, tenant.ID, op, key, fp)
+	if !ok {
+		t.Fatal("expected replayIfCompleted to find B's completed result")
+	}
+	if resp.ID != msgB.ID {
+		t.Fatalf("expected A to replay B's message id %s, got %s", msgB.ID, resp.ID)
+	}
+}
+
+func sampleNewMessageFor(t *testing.T, tenantID string) database.NewMessage {
+	t.Helper()
+	id, err := storage.NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	to := "to"
+	return database.NewMessage{
+		ID: id, TenantID: tenantID, MailFrom: "<a@example.com>", FromHeader: "a@example.com",
+		Subject: "x", MessageIDHeader: "<x@mailx.local>",
+		Recipients: []database.RecipientInput{{Address: "<b@example.com>", HeaderKind: &to}},
 	}
 }
