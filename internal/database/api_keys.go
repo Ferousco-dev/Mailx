@@ -163,6 +163,26 @@ func (db *DB) RotateAPIKey(ctx context.Context, oldID string, newKey NewAPIKey, 
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// SELECT ... FOR UPDATE locks the old row for the rest of this
+	// transaction: a concurrent rotation of the SAME key blocks here
+	// until this transaction commits or rolls back, then sees the
+	// now-set replaced_by_id itself and stops — so only one of two
+	// concurrent rotations can ever succeed, and the loser never inserts
+	// a replacement row that would otherwise be left valid.
+	var oldReplacedByID *string
+	var oldRevokedAt *time.Time
+	err = tx.QueryRow(ctx, `SELECT replaced_by_id, revoked_at FROM api_keys WHERE id = $1 FOR UPDATE`, oldID).
+		Scan(&oldReplacedByID, &oldRevokedAt)
+	if err != nil {
+		if isNoRows(err) {
+			return APIKey{}, fmt.Errorf("database: rotate api key: %w", ErrNotFound)
+		}
+		return APIKey{}, fmt.Errorf("database: lock old api key: %w", normalizeErr(err))
+	}
+	if oldReplacedByID != nil || oldRevokedAt != nil {
+		return APIKey{}, fmt.Errorf("database: rotate api key: key already revoked or already rotated: %w", ErrConflict)
+	}
+
 	rowID, err := newID()
 	if err != nil {
 		return APIKey{}, err
@@ -179,16 +199,13 @@ func (db *DB) RotateAPIKey(ctx context.Context, oldID string, newKey NewAPIKey, 
 		return APIKey{}, fmt.Errorf("database: insert rotated api key: %w", normalizeErr(err))
 	}
 
-	tag, err := tx.Exec(ctx, `
-		UPDATE api_keys SET expires_at = $1, replaced_by_id = $2
-		WHERE id = $3`,
+	// Guaranteed to affect exactly 1 row: we still hold the lock acquired
+	// above, and nothing else could have changed this row since.
+	if _, err := tx.Exec(ctx,
+		`UPDATE api_keys SET expires_at = $1, replaced_by_id = $2 WHERE id = $3`,
 		retireAt, created.ID, oldID,
-	)
-	if err != nil {
+	); err != nil {
 		return APIKey{}, fmt.Errorf("database: retire old api key: %w", normalizeErr(err))
-	}
-	if tag.RowsAffected() == 0 {
-		return APIKey{}, fmt.Errorf("database: retire old api key: %w", ErrNotFound)
 	}
 
 	if err := tx.Commit(ctx); err != nil {

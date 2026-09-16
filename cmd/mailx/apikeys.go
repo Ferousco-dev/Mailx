@@ -68,6 +68,9 @@ func cmdCreateAPIKey(args []string, output io.Writer) error {
 	if *tenantID == "" || *name == "" || *scopes == "" {
 		return fmt.Errorf("usage: mailx create-api-key -tenant <id> -name <name> -scopes emails:send,emails:read [-ttl 720h]")
 	}
+	if *ttl < 0 {
+		return fmt.Errorf("-ttl must not be negative (0 means never expires, got %s)", *ttl)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	db, err := connectForAdmin(ctx)

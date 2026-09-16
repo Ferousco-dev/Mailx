@@ -3,6 +3,8 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -268,5 +270,79 @@ func TestRotateAPIKeyUnknownOldIDIsNotFound(t *testing.T) {
 	// The new key must not have been left behind either.
 	if _, err := db.GetAPIKeyByKeyID(ctx, newKey.KeyID); !errors.Is(err, ErrNotFound) {
 		t.Fatal("new key must not persist when the old key lookup fails")
+	}
+}
+
+// TestRotateAPIKeyTwiceSecondCallConflicts is a regression test for a
+// Greptile-flagged bug: rotating an already-rotated key used to succeed
+// twice, leaving two valid replacement credentials and silently
+// overwriting the first replacement's replaced_by_id.
+func TestRotateAPIKeyTwiceSecondCallConflicts(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tenant := newTestTenant(t, db)
+	old, err := db.InsertAPIKey(ctx, sampleNewAPIKey(tenant.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := sampleNewAPIKey(tenant.ID)
+	first.KeyID = "keyid00000000000000000000000091"
+	if _, err := db.RotateAPIKey(ctx, old.ID, first, time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	second := sampleNewAPIKey(tenant.ID)
+	second.KeyID = "keyid00000000000000000000000092"
+	if _, err := db.RotateAPIKey(ctx, old.ID, second, time.Now().UTC().Add(time.Hour)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict rotating an already-rotated key, got %v", err)
+	}
+	// The second rotation's key must not have been left behind.
+	if _, err := db.GetAPIKeyByKeyID(ctx, second.KeyID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("the losing rotation's replacement key must not persist")
+	}
+	gotOld, err := db.GetAPIKeyByKeyID(ctx, old.KeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotOld.ReplacedByID == nil || *gotOld.ReplacedByID == second.KeyID {
+		t.Fatalf("old key's replaced_by_id must still point at the first (winning) replacement, got %+v", gotOld.ReplacedByID)
+	}
+}
+
+// TestConcurrentRotationsExactlyOneWinner proves the same guarantee
+// under real concurrency rather than sequential calls.
+func TestConcurrentRotationsExactlyOneWinner(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tenant := newTestTenant(t, db)
+	old, err := db.InsertAPIKey(ctx, sampleNewAPIKey(tenant.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const attempts = 10
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins := 0
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			nk := sampleNewAPIKey(tenant.ID)
+			nk.KeyID = fmt.Sprintf("keyidconcurrent%017d", i)
+			_, err := db.RotateAPIKey(ctx, old.ID, nk, time.Now().UTC().Add(time.Hour))
+			if err == nil {
+				mu.Lock()
+				wins++
+				mu.Unlock()
+			} else if !errors.Is(err, ErrConflict) {
+				t.Errorf("unexpected error: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("expected exactly 1 winning rotation among %d concurrent attempts, got %d", attempts, wins)
 	}
 }

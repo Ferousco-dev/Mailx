@@ -148,6 +148,19 @@ func (s *Service) Rotate(ctx context.Context, keyID string, grace time.Duration)
 	if err != nil {
 		return Generated{}, database.APIKey{}, err
 	}
+	now := s.now()
+	// Rotating an already-dead key is meaningless and dangerous to do
+	// silently: copying its expiry to the replacement would hand back an
+	// immediately-expired credential, and moving ITS OWN expiry forward
+	// by `grace` would revive an already-expired (or revoked) secret for
+	// the grace window - exactly the opposite of what grace is for.
+	// Create a fresh key instead.
+	if old.RevokedAt != nil {
+		return Generated{}, database.APIKey{}, fmt.Errorf("auth: cannot rotate a revoked key; create a new one instead")
+	}
+	if old.ExpiresAt != nil && !old.ExpiresAt.After(now) {
+		return Generated{}, database.APIKey{}, fmt.Errorf("auth: cannot rotate an already-expired key; create a new one instead")
+	}
 	gen, err := Generate(s.pepper)
 	if err != nil {
 		return Generated{}, database.APIKey{}, err
@@ -155,7 +168,7 @@ func (s *Service) Rotate(ctx context.Context, keyID string, grace time.Duration)
 	created, err := s.db.RotateAPIKey(ctx, old.ID, database.NewAPIKey{
 		TenantID: old.TenantID, Name: old.Name, KeyID: gen.KeyID, SecretHash: gen.SecretHash,
 		Scopes: old.Scopes, ExpiresAt: old.ExpiresAt,
-	}, s.now().Add(grace))
+	}, now.Add(grace))
 	if err != nil {
 		// The old key is untouched (transaction rolled back) — it remains
 		// valid, and gen.Raw was never persisted, so it simply cannot

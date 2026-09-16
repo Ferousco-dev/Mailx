@@ -318,3 +318,45 @@ func TestServiceTenantIsolationAcrossKeys(t *testing.T) {
 		t.Fatal("distinct tenants must not collapse to the same id")
 	}
 }
+
+// TestServiceRotateRejectsExpiredKey is a regression test for a
+// Greptile-flagged bug: rotating an already-expired key used to copy its
+// past ExpiresAt to the replacement (an immediately-dead new credential)
+// and, with a positive grace period, push the OLD key's expiry into the
+// future — reviving an already-expired secret instead of retiring it.
+func TestServiceRotateRejectsExpiredKey(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tenant := newTestTenant(t, db)
+	svc := NewService(db, nil)
+	frozen := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	svc.now = func() time.Time { return frozen }
+
+	ttl := time.Hour
+	_, record, err := svc.Create(ctx, tenant.ID, "x", []string{string(ScopeEmailsRead)}, &ttl)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	svc.now = func() time.Time { return frozen.Add(2 * time.Hour) } // now past expiry
+	if _, _, err := svc.Rotate(ctx, record.KeyID, time.Hour); err == nil {
+		t.Fatal("expected rotating an already-expired key to be rejected, not revive it")
+	}
+}
+
+func TestServiceRotateRejectsRevokedKey(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tenant := newTestTenant(t, db)
+	svc := NewService(db, nil)
+	_, record, err := svc.Create(ctx, tenant.ID, "x", []string{string(ScopeEmailsRead)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Revoke(ctx, record.KeyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.Rotate(ctx, record.KeyID, time.Hour); err == nil {
+		t.Fatal("expected rotating a revoked key to be rejected")
+	}
+}
