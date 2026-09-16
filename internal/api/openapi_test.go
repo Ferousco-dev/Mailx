@@ -17,13 +17,13 @@ func TestOpenAPISpecParses(t *testing.T) {
 	if !ok {
 		t.Fatal("missing paths object")
 	}
-	for _, want := range []string{"/emails", "/emails/{id}"} {
+	for _, want := range []string{"/emails", "/emails/{id}", "/domains", "/domains/{id}", "/domains/{id}/verify"} {
 		if _, ok := paths[want]; !ok {
 			t.Errorf("documented spec is missing path %q", want)
 		}
 	}
 	schemas := doc["components"].(map[string]any)["schemas"].(map[string]any)
-	for _, want := range []string{"SendEmailRequest", "Email", "EmailList", "APIError"} {
+	for _, want := range []string{"SendEmailRequest", "Email", "EmailList", "CreateDomainRequest", "DNSRecord", "Domain", "DomainList", "APIError"} {
 		if _, ok := schemas[want]; !ok {
 			t.Errorf("documented spec is missing schema %q", want)
 		}
@@ -67,6 +67,11 @@ func TestOpenAPIRoutesMatchRuntime(t *testing.T) {
 		{"POST", "/v1/emails"},
 		{"GET", "/v1/emails"},
 		{"GET", "/v1/emails/some-id"},
+		{"POST", "/v1/domains"},
+		{"GET", "/v1/domains"},
+		{"GET", "/v1/domains/some-id"},
+		{"DELETE", "/v1/domains/some-id"},
+		{"POST", "/v1/domains/some-id/verify"},
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest(c.method, c.path, nil)
@@ -75,7 +80,7 @@ func TestOpenAPIRoutesMatchRuntime(t *testing.T) {
 		}
 		rec := httptest.NewRecorder()
 		mux.ServeHTTP(rec, req)
-		if rec.Code == http.StatusNotFound && c.path != "/v1/emails/some-id" {
+		if rec.Code == http.StatusNotFound && !strings.Contains(c.path, "some-id") {
 			t.Errorf("%s %s: route not found (spec/runtime drift)", c.method, c.path)
 		}
 	}

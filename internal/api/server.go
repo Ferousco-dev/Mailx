@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
+	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 )
 
@@ -30,6 +31,9 @@ type Config struct {
 	// v0.18's DevTenantID (see authmiddleware.go). Production code passes
 	// *auth.Service; tests may pass a fake satisfying the same interface.
 	Auth authService
+	// DomainResolver performs public TXT lookups for ownership verification.
+	// Nil selects the system resolver; tests inject a deterministic fake.
+	DomainResolver maildomain.TXTResolver
 	// Ready reports whether MailX can currently meet POST /v1/emails'
 	// durability contract (e.g. a live PostgreSQL ping) — see
 	// GET /health/ready's doc for why this must not be a fake check.
@@ -68,12 +72,17 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	h := newEmailHandler(cfg.DB, cfg.Store)
+	resolver := cfg.DomainResolver
+	if resolver == nil {
+		resolver = maildomain.NewNetTXTResolver()
+	}
+	domainService := maildomain.NewService(cfg.DB, resolver)
 	readiness := func() error {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		return cfg.Ready(ctx)
 	}
-	mux := newMux(h, cfg.Auth, readiness)
+	mux := newMux(h, cfg.Auth, readiness, domainService)
 	handler := chain(mux, withRecoverMiddleware, withRequestIDMiddleware, limitBody)
 
 	return &Server{httpServer: &http.Server{
