@@ -138,7 +138,7 @@ func TestInsertMessageCompletesIdempotencyClaimInSameTransaction(t *testing.T) {
 	}
 
 	in := sampleNewMessage(t, tenant.ID)
-	in.IdempotencyCompletion = &IdempotencyCompletion{Operation: testOp, IdempotencyKey: "k1"}
+	in.IdempotencyCompletion = &IdempotencyCompletion{Operation: testOp, IdempotencyKey: "k1", Fingerprint: "fp1"}
 	msg, err := db.InsertMessage(ctx, in)
 	if err != nil {
 		t.Fatal(err)
@@ -175,6 +175,56 @@ func TestInsertMessageRollsBackIfIdempotencyClaimLost(t *testing.T) {
 	}
 	if _, err := db.GetMessage(ctx, tenant.ID, in.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatal("message must not have been committed when its idempotency claim was lost")
+	}
+}
+
+// TestInsertMessageRollsBackIfClaimWasReclaimedWithDifferentFingerprint
+// is a regression test for a Greptile-flagged bug: a stalled claimant
+// (A) whose claim gets reclaimed by a different caller (B, different
+// payload/fingerprint) must NOT be able to complete using B's now-current
+// row - that would mark the key completed under B's fingerprint but
+// pointing at A's unrelated message, so a future replay for B's payload
+// would incorrectly return A's message.
+func TestInsertMessageRollsBackIfClaimWasReclaimedWithDifferentFingerprint(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tenant := newTestTenant(t, db)
+	now := time.Now().UTC()
+
+	// A claims first.
+	if _, owned, err := db.ClaimIdempotencyKey(ctx, tenant.ID, testOp, "k1", "fpA", now.Add(time.Hour), now.Add(-time.Minute)); err != nil || !owned {
+		t.Fatalf("A's claim: owned=%v err=%v", owned, err)
+	}
+	// B reclaims it as stale (staleCutoff in the future matches anything).
+	if _, owned, err := db.ClaimIdempotencyKey(ctx, tenant.ID, testOp, "k1", "fpB", now.Add(time.Hour), now.Add(time.Hour)); err != nil || !owned {
+		t.Fatalf("B's reclaim: owned=%v err=%v", owned, err)
+	}
+
+	// A, unaware it was reclaimed, finally finishes and tries to complete
+	// using ITS OWN (now-stale) fingerprint.
+	inA := sampleNewMessage(t, tenant.ID)
+	inA.IdempotencyCompletion = &IdempotencyCompletion{Operation: testOp, IdempotencyKey: "k1", Fingerprint: "fpA"}
+	if _, err := db.InsertMessage(ctx, inA); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected A's stale completion to be rejected with ErrConflict, got %v", err)
+	}
+	if _, err := db.GetMessage(ctx, tenant.ID, inA.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatal("A's message must not have been committed")
+	}
+
+	// B (the rightful current owner) can still complete normally.
+	inB := sampleNewMessage(t, tenant.ID)
+	inB.IdempotencyCompletion = &IdempotencyCompletion{Operation: testOp, IdempotencyKey: "k1", Fingerprint: "fpB"}
+	msgB, err := db.InsertMessage(ctx, inB)
+	if err != nil {
+		t.Fatalf("expected B's completion to succeed: %v", err)
+	}
+
+	rec, err := db.GetIdempotencyKey(ctx, tenant.ID, testOp, "k1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Fingerprint != "fpB" || rec.ResourceID == nil || *rec.ResourceID != msgB.ID {
+		t.Fatalf("expected the completed row to reflect B's fingerprint and message, got %+v", rec)
 	}
 }
 

@@ -82,10 +82,20 @@ type NewMessage struct {
 
 // IdempotencyCompletion identifies the idempotency_keys row to complete.
 // TenantID is taken from NewMessage.TenantID (the two must always agree,
-// so it is not repeated here).
+// so it is not repeated here). Fingerprint MUST be the exact value this
+// caller claimed the row with (see database.ClaimIdempotencyKey) - it is
+// re-checked at completion time, not just at claim time, because the row
+// can be reclaimed by a DIFFERENT caller (with a different fingerprint)
+// in between if this caller stalls past the staleness window. Without
+// this check a stalled claimant could still complete using the
+// reclaimer's now-current row, marking it 'completed' with the WRONG
+// caller's resource_id under the reclaimer's fingerprint - a future
+// replay for the reclaimer's payload would then return the stale
+// claimant's unrelated message.
 type IdempotencyCompletion struct {
 	Operation      string
 	IdempotencyKey string
+	Fingerprint    string
 }
 
 func (n NewMessage) validate() error {
@@ -190,8 +200,9 @@ func (db *DB) InsertMessage(ctx context.Context, in NewMessage) (Message, error)
 		ic := in.IdempotencyCompletion
 		tag, err := tx.Exec(ctx, `
 			UPDATE idempotency_keys SET status = 'completed', resource_id = $1, completed_at = now()
-			WHERE tenant_id = $2 AND operation = $3 AND idempotency_key = $4 AND status = 'in_progress'`,
-			msg.ID, msg.TenantID, ic.Operation, ic.IdempotencyKey,
+			WHERE tenant_id = $2 AND operation = $3 AND idempotency_key = $4
+			  AND status = 'in_progress' AND fingerprint = $5`,
+			msg.ID, msg.TenantID, ic.Operation, ic.IdempotencyKey, ic.Fingerprint,
 		)
 		if err != nil {
 			return Message{}, fmt.Errorf("database: complete idempotency key: %w", normalizeErr(err))

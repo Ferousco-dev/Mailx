@@ -138,7 +138,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusAccepted, resp)
 			return
 		}
-		idemCompletion = &database.IdempotencyCompletion{Operation: idempotency.OperationEmailsCreate, IdempotencyKey: idemKey}
+		idemCompletion = &database.IdempotencyCompletion{Operation: idempotency.OperationEmailsCreate, IdempotencyKey: idemKey, Fingerprint: fingerprint}
 	}
 
 	// FileStore write happens BEFORE the durable DB transaction: if this
