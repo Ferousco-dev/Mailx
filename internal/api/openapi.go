@@ -16,21 +16,36 @@ const openAPISpec = `{
   "info": {
     "title": "MailX API",
     "version": "v1",
-    "description": "MailX's developer-facing email API. Authentication is not yet implemented (see v0.19) - every request in this development build is attributed to one fixed development tenant."
+    "description": "MailX's developer-facing email API. Every /v1 route requires a MailX API key (see securitySchemes.ApiKeyAuth) - management of the keys themselves (create/rotate/revoke) is a CLI/admin operation in v0.19, not a public REST endpoint; see the project's v0.19 report for why."
   },
   "servers": [{"url": "/v1"}],
+  "security": [{"ApiKeyAuth": []}],
   "paths": {
     "/emails": {
       "post": {
         "summary": "Send an email",
-        "description": "Durably accepts an email for asynchronous processing. All to/cc/bcc recipients must share one delivery domain; mixed-domain requests receive 422 before acceptance. 202 means MailX has validated and durably recorded the email and has durable responsibility for eventually attempting delivery - it does NOT mean the email has been delivered, that the recipient's server accepted it, or that Redis currently has the job.",
+        "description": "Requires the emails:send scope. Durably accepts an email for asynchronous processing. All to/cc/bcc recipients must share one delivery domain; mixed-domain requests receive 422 before acceptance. 202 means MailX has validated and durably recorded the email and has durable responsibility for eventually attempting delivery - it does NOT mean the email has been delivered, that the recipient's server accepted it, or that Redis currently has the job. Retrying safely: supply the same Idempotency-Key on retry to get the original result back instead of creating a second email; this prevents duplicate MailX email SUBMISSIONS from a repeated HTTP request - it does not and cannot guarantee exactly-once SMTP delivery to the recipient's server.",
+        "parameters": [
+          {
+            "name": "Idempotency-Key", "in": "header", "required": false,
+            "schema": {"type": "string", "maxLength": 255},
+            "description": "Optional, client-generated, opaque (a UUID is a good choice). Replaying the SAME key with the SAME request body returns the original email (marked with an Idempotency-Replayed: true response header) instead of creating a new one. Replaying the same key with a DIFFERENT body returns 409. MailX guarantees this replay behavior for at least 24 hours from the first use of a key; after that window a key may be reused for a new, unrelated submission. Scoped to your tenant, not to the specific API key used - rotating keys does not break in-flight retries."
+          }
+        ],
         "requestBody": {
           "required": true,
           "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SendEmailRequest"}}}
         },
         "responses": {
-          "202": {"description": "Accepted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Email"}}}},
+          "202": {
+            "description": "Accepted",
+            "headers": {"Idempotency-Replayed": {"description": "Present and \"true\" only when this response replays an earlier result for the same Idempotency-Key.", "schema": {"type": "string"}}},
+            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Email"}}}
+          },
           "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"},
           "413": {"$ref": "#/components/responses/Error"},
           "415": {"$ref": "#/components/responses/Error"},
           "422": {"$ref": "#/components/responses/Error"},
@@ -39,6 +54,7 @@ const openAPISpec = `{
       },
       "get": {
         "summary": "List emails",
+        "description": "Requires the emails:read scope.",
         "parameters": [
           {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
           {"name": "cursor", "in": "query", "schema": {"type": "string"}, "description": "Opaque; from a previous response's next_cursor. Never construct one."},
@@ -46,6 +62,8 @@ const openAPISpec = `{
         ],
         "responses": {
           "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EmailList"}}}},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
           "422": {"$ref": "#/components/responses/Error"}
         }
       }
@@ -53,15 +71,25 @@ const openAPISpec = `{
     "/emails/{id}": {
       "get": {
         "summary": "Retrieve an email",
+        "description": "Requires the emails:read scope.",
         "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
         "responses": {
           "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Email"}}}},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
           "404": {"$ref": "#/components/responses/Error"}
         }
       }
     }
   },
   "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A MailX API key (format mx_<key_id>_<secret>), created via the mailx CLI - NOT a JWT. Paste the raw key (including the mx_ prefix) into Swagger UI's Authorize button to try requests here."
+      }
+    },
     "responses": {
       "Error": {"description": "Error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
     },
@@ -113,7 +141,7 @@ const openAPISpec = `{
           "error": {
             "type": "object",
             "properties": {
-              "type": {"type": "string", "enum": ["invalid_request", "validation_error", "not_found", "conflict", "payload_too_large", "unsupported_media_type", "internal_error", "temporarily_unavailable"]},
+              "type": {"type": "string", "enum": ["invalid_request", "validation_error", "authentication_error", "forbidden", "not_found", "conflict", "payload_too_large", "unsupported_media_type", "internal_error", "temporarily_unavailable"]},
               "code": {"type": "string"},
               "message": {"type": "string"},
               "request_id": {"type": "string"}

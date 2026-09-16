@@ -19,6 +19,21 @@ func TestRunMigrateRequiresDatabaseURL(t *testing.T) {
 	}
 }
 
+// TestCreateAPIKeyRejectsNegativeTTL is a regression test for a
+// Greptile-flagged bug: -ttl -1h was silently treated the same as
+// unset (0), producing a never-expiring key despite an obvious typo.
+// This must be rejected before ever attempting to connect to DATABASE_URL.
+func TestCreateAPIKeyRejectsNegativeTTL(t *testing.T) {
+	t.Setenv("DATABASE_URL", "")
+	err := cmdCreateAPIKey([]string{"-tenant", "t1", "-name", "x", "-scopes", "emails:send", "-ttl", "-1h"}, &bytes.Buffer{})
+	if err == nil {
+		t.Fatal("expected a negative -ttl to be rejected")
+	}
+	if strings.Contains(err.Error(), "DATABASE_URL") {
+		t.Fatalf("expected rejection before any DB connection attempt, got %v", err)
+	}
+}
+
 func TestRunComponentsFailureCancelsPeers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

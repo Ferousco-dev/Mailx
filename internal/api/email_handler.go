@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,9 +11,24 @@ import (
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/idempotency"
 	"github.com/Ferousco-dev/mailx/internal/mail"
 	"github.com/Ferousco-dev/mailx/internal/outbound"
 	"github.com/Ferousco-dev/mailx/internal/storage"
+)
+
+// v0.20 HTTP idempotency tuning. Retention matches the common (e.g.
+// Stripe) convention of guaranteeing replay for roughly a day; staleness
+// is how long an unfinished claim is trusted before a retry is allowed to
+// reclaim it (crash recovery — see database.ClaimIdempotencyKey's doc);
+// poll bounds how long a request waits for a GENUINELY CONCURRENT
+// duplicate to finish before giving up with 409 rather than blocking
+// indefinitely.
+const (
+	idempotencyRetention    = 24 * time.Hour
+	idempotencyStaleAfter   = 30 * time.Second
+	idempotencyPollInterval = 100 * time.Millisecond
+	idempotencyPollTimeout  = 5 * time.Second
 )
 
 // emailHandler holds every dependency POST/GET/LIST need. It depends on
@@ -38,6 +54,18 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	if ct := r.Header.Get("Content-Type"); ct != "" && ct != "application/json" {
 		writeError(w, r, newError(ErrUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json"))
 		return
+	}
+
+	// Validated up front, cheaply, before touching the body: an
+	// idempotency key is entirely optional (see the v0.20 report's
+	// "required vs optional" decision), but if one is supplied it must be
+	// well-formed before any other work happens.
+	idemKey := r.Header.Get("Idempotency-Key")
+	if idemKey != "" {
+		if err := idempotency.ValidateKey(idemKey); err != nil {
+			writeError(w, r, newError(ErrInvalidRequest, "invalid_idempotency_key", err.Error()))
+			return
+		}
 	}
 
 	var req sendEmailRequest
@@ -83,6 +111,36 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tenantID := tenantFromContext(r.Context())
+
+	// Idempotency claim happens HERE — after every validation step above
+	// has already succeeded, so a malformed/invalid request never
+	// consumes the key (a corrected retry with the same key can still
+	// proceed normally), but BEFORE the FileStore write, so a request
+	// that loses the ownership race (a genuine concurrent duplicate)
+	// never does that work at all. See internal/database.
+	// ClaimIdempotencyKey's doc for the concurrency design; PostgreSQL,
+	// not this handler, is what actually arbitrates concurrent claims.
+	var idemCompletion *database.IdempotencyCompletion
+	if idemKey != "" {
+		fingerprint, ferr := idempotency.Fingerprint(req)
+		if ferr != nil {
+			writeError(w, r, newError(ErrInternal, "internal_error", "failed to fingerprint request"))
+			return
+		}
+		resp, handled, herr := h.resolveIdempotency(r.Context(), tenantID, idemKey, fingerprint, now)
+		if herr != nil {
+			writeError(w, r, herr)
+			return
+		}
+		if handled {
+			w.Header().Set("Idempotency-Replayed", "true")
+			writeJSON(w, http.StatusAccepted, resp)
+			return
+		}
+		idemCompletion = &database.IdempotencyCompletion{Operation: idempotency.OperationEmailsCreate, IdempotencyKey: idemKey, Fingerprint: fingerprint}
+	}
+
 	// FileStore write happens BEFORE the durable DB transaction: if this
 	// fails, nothing durable references `id` yet (safe to just error out).
 	// If it succeeds but the DB transaction below fails, `id` is an
@@ -105,13 +163,26 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	recipients = appendRoleRecipients(recipients, built.Cc, "cc")
 	recipients = appendRoleRecipients(recipients, built.Bcc, "bcc")
 
-	tenantID := tenantFromContext(r.Context())
 	msg, err := h.db.InsertMessage(r.Context(), database.NewMessage{
 		ID: id, TenantID: tenantID, MailFrom: built.From, FromHeader: req.From,
 		Subject: req.Subject, MessageIDHeader: fmt.Sprintf("<%s@mailx.local>", id),
-		Recipients: recipients, AvailableAt: scheduledAt,
+		Recipients: recipients, AvailableAt: scheduledAt, IdempotencyCompletion: idemCompletion,
 	})
 	if err != nil {
+		// Lost the completion race for our OWN idempotency claim: someone
+		// else (a reclaimer after we stalled past the staleness window)
+		// finished first. If they were retrying the exact same payload as
+		// us (same fingerprint), that is not really a conflict — it is
+		// exactly the "genuinely concurrent identical retry" case this
+		// feature exists for, so replay THEIR result instead of failing
+		// a request that would otherwise have succeeded.
+		if idemCompletion != nil && errors.Is(err, database.ErrConflict) {
+			if resp, ok := h.replayIfCompleted(r.Context(), tenantID, idemCompletion.Operation, idemCompletion.IdempotencyKey, idemCompletion.Fingerprint); ok {
+				w.Header().Set("Idempotency-Replayed", "true")
+				writeJSON(w, http.StatusAccepted, resp)
+				return
+			}
+		}
 		// The outbox insert is part of the SAME transaction as the
 		// message/recipients: a failure here durably rolls back
 		// everything, so the "no orphaned DB row" guarantee holds even
@@ -121,6 +192,106 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusAccepted, emailFromRow(msg, recipientsFromInputs(id, recipients)))
+}
+
+// resolveIdempotency claims (tenantID, operation, idemKey) or discovers
+// who already holds it. handled=true means the caller must respond
+// immediately with resp (a replay) or err (a conflict/timeout) and must
+// NOT proceed to create a message; handled=false means the caller now
+// owns the claim and must complete it via IdempotencyCompletion.
+func (h *emailHandler) resolveIdempotency(ctx context.Context, tenantID, idemKey, fingerprint string, now time.Time) (resp email, handled bool, err *apiError) {
+	claim, owned, dbErr := h.db.ClaimIdempotencyKey(ctx, tenantID, idempotency.OperationEmailsCreate, idemKey, fingerprint,
+		now.Add(idempotencyRetention), now.Add(-idempotencyStaleAfter))
+	if dbErr != nil {
+		return email{}, false, newError(ErrInternal, "internal_error", "failed to process idempotency key")
+	}
+	if owned {
+		return email{}, false, nil
+	}
+
+	if claim.Fingerprint != fingerprint {
+		// Never echo the original request back — only confirm reuse
+		// happened, not what the original payload contained.
+		return email{}, true, newError(ErrConflictType, "idempotency_key_conflict",
+			"this Idempotency-Key was already used with a different request")
+	}
+
+	if claim.Status == database.IdempotencyInProgress {
+		var perr *apiError
+		claim, perr = h.pollIdempotencyCompletion(ctx, tenantID, idemKey)
+		if perr != nil {
+			return email{}, true, perr
+		}
+	}
+
+	// claim.Status == completed here (poll only returns on completion or
+	// a timeout error above) — replay the CURRENT resource state (see
+	// the v0.20 report's "resource evolution" decision: a replay reflects
+	// where the resource is now, e.g. delivered instead of queued, not a
+	// frozen snapshot of the original 202 body; only the id and the 202
+	// status code itself are guaranteed stable across replays).
+	resp, ok := h.loadReplay(ctx, tenantID, claim)
+	if !ok {
+		return email{}, true, newError(ErrInternal, "internal_error", "failed to load the original result for this idempotency key")
+	}
+	return resp, true, nil
+}
+
+// replayIfCompleted is the recovery path for a caller that lost the
+// completion race for its OWN claim (see handleSend's InsertMessage error
+// handling): if the current claim holder finished with the SAME
+// fingerprint, this was a genuinely concurrent identical retry, not a
+// real conflict, so its result is replayed rather than surfacing an error
+// for a request that would otherwise have succeeded.
+func (h *emailHandler) replayIfCompleted(ctx context.Context, tenantID, operation, idemKey, fingerprint string) (email, bool) {
+	claim, err := h.db.GetIdempotencyKey(ctx, tenantID, operation, idemKey)
+	if err != nil || claim.Status != database.IdempotencyCompleted || claim.Fingerprint != fingerprint {
+		return email{}, false
+	}
+	return h.loadReplay(ctx, tenantID, claim)
+}
+
+func (h *emailHandler) loadReplay(ctx context.Context, tenantID string, claim database.IdempotencyRecord) (email, bool) {
+	if claim.ResourceID == nil {
+		return email{}, false
+	}
+	msg, err := h.db.GetMessage(ctx, tenantID, *claim.ResourceID)
+	if err != nil {
+		return email{}, false
+	}
+	recipients, err := h.db.ListRecipients(ctx, msg.ID)
+	if err != nil {
+		return email{}, false
+	}
+	return emailFromRow(msg, recipients), true
+}
+
+// pollIdempotencyCompletion waits, bounded, for a genuinely concurrent
+// duplicate request to finish — never indefinitely, and it stops early if
+// ctx is canceled (the client gave up, so this request should too).
+func (h *emailHandler) pollIdempotencyCompletion(ctx context.Context, tenantID, idemKey string) (database.IdempotencyRecord, *apiError) {
+	deadline := h.now().Add(idempotencyPollTimeout)
+	ticker := time.NewTicker(idempotencyPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return database.IdempotencyRecord{}, newError(ErrTemporarilyUnavailable, "idempotency_in_progress",
+				"a request with this Idempotency-Key is still being processed")
+		case <-ticker.C:
+			claim, err := h.db.GetIdempotencyKey(ctx, tenantID, idempotency.OperationEmailsCreate, idemKey)
+			if err != nil {
+				return database.IdempotencyRecord{}, newError(ErrInternal, "internal_error", "failed to check idempotency key status")
+			}
+			if claim.Status == database.IdempotencyCompleted {
+				return claim, nil
+			}
+			if h.now().After(deadline) {
+				return database.IdempotencyRecord{}, newError(ErrConflictType, "idempotency_in_progress",
+					"a request with this Idempotency-Key is still being processed; retry shortly")
+			}
+		}
+	}
 }
 
 // The current queue schedules one delivery request per message, and the

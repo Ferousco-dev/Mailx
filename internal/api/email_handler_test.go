@@ -2,15 +2,34 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/Ferousco-dev/mailx/internal/auth"
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 )
+
+// authInjector wraps a mux so every existing test call site (dozens of
+// them, from before v0.19) keeps working unchanged: it attaches a fixed
+// Bearer token to every request rather than requiring each doJSON/doRaw
+// call to know about authentication. Tests that specifically exercise
+// authentication (auth_test.go) bypass this and set headers directly.
+type authInjector struct {
+	next  http.Handler
+	token string
+}
+
+func (a authInjector) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if a.token != "" {
+		r.Header.Set("Authorization", "Bearer "+a.token)
+	}
+	a.next.ServeHTTP(w, r)
+}
 
 func doJSON(t *testing.T, mux http.Handler, method, path string, body any) *httptest.ResponseRecorder {
 	t.Helper()
@@ -44,7 +63,21 @@ func doRaw(t *testing.T, mux http.Handler, method, path, contentType string, bod
 	return rec
 }
 
-func setupMux(t *testing.T) (*http.ServeMux, *database.DB, string) {
+// setupMux builds a full API stack, real authentication included, and
+// returns a handler pre-authenticated as one API key with every current
+// scope — the vast majority of v0.18-era tests care about handler
+// behavior, not authentication itself, so they should not need to know
+// an Authorization header exists. auth_test.go exercises authentication
+// directly via setupMuxNoAuth.
+func setupMux(t *testing.T) (http.Handler, *database.DB, string) {
+	t.Helper()
+	mux, db, tenant, _, rawKey := setupMuxNoAuth(t)
+	return authInjector{next: mux, token: rawKey}, db, tenant.ID
+}
+
+// setupMuxNoAuth is the same stack without the authInjector wrapper, for
+// tests that need to control Authorization themselves.
+func setupMuxNoAuth(t *testing.T) (http.Handler, *database.DB, database.Tenant, *auth.Service, string) {
 	t.Helper()
 	db := newTestDB(t)
 	tenant := newTestTenant(t, db)
@@ -53,8 +86,14 @@ func setupMux(t *testing.T) (*http.ServeMux, *database.DB, string) {
 		t.Fatal(err)
 	}
 	h := newEmailHandler(db, store)
-	mux := newMux(h, tenant.ID, func() error { return nil })
-	return mux, db, tenant.ID
+	authSvc := auth.NewService(db, nil)
+	gen, _, err := authSvc.Create(context.Background(), tenant.ID, "test key",
+		[]string{string(auth.ScopeEmailsSend), string(auth.ScopeEmailsRead)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := newMux(h, authSvc, func() error { return nil })
+	return mux, db, tenant, authSvc, gen.Raw
 }
 
 // ------------------------------------------------------------ POST -----
@@ -308,8 +347,18 @@ func TestGetCrossTenantAccessIsNotFound(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := newEmailHandler(db, store)
-	muxA := newMux(h, tenantA.ID, func() error { return nil })
-	muxB := newMux(h, tenantB.ID, func() error { return nil })
+	authSvc := auth.NewService(db, nil)
+	genA, _, err := authSvc.Create(t.Context(), tenantA.ID, "a", []string{string(auth.ScopeEmailsSend), string(auth.ScopeEmailsRead)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	genB, _, err := authSvc.Create(t.Context(), tenantB.ID, "b", []string{string(auth.ScopeEmailsSend), string(auth.ScopeEmailsRead)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := newMux(h, authSvc, func() error { return nil })
+	muxA := authInjector{next: mux, token: genA.Raw}
+	muxB := authInjector{next: mux, token: genB.Raw}
 
 	sendRec := doJSON(t, muxA, "POST", "/v1/emails", map[string]any{
 		"from": "a@example.com", "to": []string{"b@example.com"}, "text": "x",

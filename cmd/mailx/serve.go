@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/api"
+	"github.com/Ferousco-dev/mailx/internal/auth"
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/delivery"
 	"github.com/Ferousco-dev/mailx/internal/dispatch"
@@ -42,12 +43,6 @@ func runFull() error {
 	}
 	defer db.Close()
 
-	tenantID, err := resolveDevTenant(ctx, db)
-	if err != nil {
-		return err
-	}
-	log.Printf("MailX: development tenant id = %s (see internal/api's devTenantMiddleware doc; every /v1 request uses this tenant until v0.19)", tenantID)
-
 	q, err := openRedisQueue()
 	if err != nil {
 		return err
@@ -64,8 +59,9 @@ func runFull() error {
 	if err != nil {
 		return err
 	}
+	authSvc := auth.NewService(db, apiKeyPepper())
 	apiServer, err := api.NewServer(api.Config{
-		Addr: httpAddr(), DB: db, Store: store, DevTenantID: tenantID,
+		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
 		Ready: func(ctx context.Context) error { return db.Ping(ctx) },
 	})
 	if err != nil {
@@ -76,7 +72,38 @@ func runFull() error {
 		component{"dispatch", disp.Run},
 		component{"worker", pool.Run},
 		component{"api", apiServer.Run},
+		component{"idempotency-cleanup", func(ctx context.Context) error { return runIdempotencyCleanup(ctx, db) }},
 	)
+}
+
+// idempotencyCleanupInterval/Batch are deliberately conservative: this
+// deletes only already-expired rows (see database.DeleteExpiredIdempotencyKeys's
+// doc — an in-progress row past its own expiry is abandoned, not active
+// work), in small bounded batches, so it never competes meaningfully with
+// request traffic even on a large table.
+const (
+	idempotencyCleanupInterval = 10 * time.Minute
+	idempotencyCleanupBatch    = 1000
+)
+
+func runIdempotencyCleanup(ctx context.Context, db *database.DB) error {
+	ticker := time.NewTicker(idempotencyCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			n, err := db.DeleteExpiredIdempotencyKeys(ctx, time.Now().UTC(), idempotencyCleanupBatch)
+			if err != nil {
+				log.Printf("idempotency-cleanup: %v", err)
+				continue
+			}
+			if n > 0 {
+				log.Printf("idempotency-cleanup: removed %d expired key(s)", n)
+			}
+		}
+	}
 }
 
 type component struct {
@@ -136,25 +163,18 @@ func openDatabase(ctx context.Context) (*database.DB, error) {
 	return db, nil
 }
 
-// resolveDevTenant is v0.18's temporary tenant mechanism (see
-// internal/api/middleware.go's devTenantMiddleware doc in full): with
-// MAILX_DEV_TENANT_ID set, that tenant must already exist (fails loudly
-// otherwise, rather than silently creating a duplicate); left unset, one
-// tenant is created on first startup and its id is logged so a developer
-// can pin it — otherwise every restart would mint a fresh tenant and
-// orphan the previous one's data behind tenant-scoped queries.
-func resolveDevTenant(ctx context.Context, db *database.DB) (string, error) {
-	if id := os.Getenv("MAILX_DEV_TENANT_ID"); id != "" {
-		if _, err := db.GetTenant(ctx, id); err != nil {
-			return "", fmt.Errorf("MAILX_DEV_TENANT_ID=%s: %w", id, err)
-		}
-		return id, nil
+// apiKeyPepper loads the optional HMAC pepper for API-key verifier
+// hashing (see internal/auth's package doc for exactly what it does and
+// does not protect against). Unset is a valid, documented local-dev
+// choice — MailX does not refuse to start without one, but never invents
+// a default value, since a "default pepper" baked into the binary would
+// protect nothing a public source repository can't also read.
+func apiKeyPepper() []byte {
+	if p := os.Getenv("MAILX_API_KEY_PEPPER"); p != "" {
+		return []byte(p)
 	}
-	tenant, err := db.CreateTenant(ctx, "development")
-	if err != nil {
-		return "", fmt.Errorf("create development tenant: %w", err)
-	}
-	return tenant.ID, nil
+	log.Println("MailX: MAILX_API_KEY_PEPPER is not set — API key verifiers are unkeyed SHA-256 (see internal/auth's doc). Fine for local development; set a pepper before handling real credentials.")
+	return nil
 }
 
 func openRedisQueue() (*queue.RedisQueue, error) {

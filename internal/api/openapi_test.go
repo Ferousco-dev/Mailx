@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -26,6 +27,30 @@ func TestOpenAPISpecParses(t *testing.T) {
 		if _, ok := schemas[want]; !ok {
 			t.Errorf("documented spec is missing schema %q", want)
 		}
+	}
+
+	schemes := doc["components"].(map[string]any)["securitySchemes"].(map[string]any)
+	apiKeyAuth, ok := schemes["ApiKeyAuth"].(map[string]any)
+	if !ok {
+		t.Fatal("missing ApiKeyAuth security scheme")
+	}
+	if apiKeyAuth["type"] != "http" || apiKeyAuth["scheme"] != "bearer" {
+		t.Errorf("expected an http/bearer security scheme, got %+v", apiKeyAuth)
+	}
+	if desc, _ := apiKeyAuth["description"].(string); strings.Contains(strings.ToLower(desc), "is a jwt") {
+		t.Error("must never claim the API key IS a JWT")
+	}
+
+	postEmails := paths["/emails"].(map[string]any)["post"].(map[string]any)
+	params, _ := postEmails["parameters"].([]any)
+	found := false
+	for _, p := range params {
+		if p.(map[string]any)["name"] == "Idempotency-Key" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("POST /emails must document the Idempotency-Key header")
 	}
 }
 

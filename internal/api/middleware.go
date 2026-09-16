@@ -61,22 +61,6 @@ func withRecoverMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// devTenantMiddleware is v0.18's DELIBERATE, TEMPORARY tenant mechanism:
-// every request is attributed to one fixed tenant configured at server
-// startup (see server.go's DevTenantID). It exists solely so handlers can
-// already be tenant-scoped end to end before real identity exists.
-//
-// v0.19 replaces ONLY this function — deriving the tenant from a validated
-// `Authorization: Bearer mx_...` API key instead — every handler, and the
-// withTenant/tenantFromContext seam it writes through, stays unchanged.
-func devTenantMiddleware(tenantID string) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			next.ServeHTTP(w, r.WithContext(withTenant(r.Context(), tenantID)))
-		})
-	}
-}
-
 // maxBodyBytes bounds every /v1 request body; JSON decoding an unbounded
 // body is an easy memory-exhaustion vector.
 const maxBodyBytes = 5 << 20 // 5 MiB
