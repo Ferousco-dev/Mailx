@@ -360,6 +360,7 @@ func TestIntegrationTemporaryThenSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.q = q2
+	p.now = func() time.Time { return future }
 
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	done2 := make(chan struct{})
@@ -417,6 +418,7 @@ func TestIntegrationExhaustion(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.q = q2
+	p.now = func() time.Time { return future }
 	ctx2, cancel2 := context.WithCancel(context.Background())
 	done2 := make(chan struct{})
 	go func() { p.Run(ctx2); close(done2) }()

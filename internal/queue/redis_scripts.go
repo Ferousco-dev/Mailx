@@ -68,6 +68,21 @@ redis.call('DEL', jobKey)
 return 1
 `)
 
+// renewScript: KEYS={claimed}, ARGV={id,token,leaseExpiryMs,jobPrefix}
+// Returns 1 (renewed), -1 (unknown job), -2 (stale/wrong token).
+var renewScript = redis.NewScript(`
+local jobKey = ARGV[4] .. ARGV[1]
+if redis.call('EXISTS', jobKey) == 0 then
+	return -1
+end
+local cur = redis.call('HGET', jobKey, 'token')
+if cur == false or cur == '0' or cur ~= ARGV[2] then
+	return -2
+end
+redis.call('ZADD', KEYS[1], ARGV[3], ARGV[1])
+return 1
+`)
+
 // releaseScript: KEYS={available,claimed}, ARGV={id,token,availableAtMs,jobPrefix}
 // Returns 1 (released), -1 (unknown job), -2 (stale/wrong token).
 var releaseScript = redis.NewScript(`

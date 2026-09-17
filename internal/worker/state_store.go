@@ -6,9 +6,9 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/retry"
 )
 
-// stateStore is where retry.State lives across a job's Claim -> Release ->
-// Claim cycle: an in-memory, Pool-owned map keyed by job ID, not durable
-// across process restart.
+// stateStore caches retry.State across a job's Claim -> Release -> Claim cycle.
+// It is process-local, but OutcomeStore reconstructs it from durable attempts
+// after restart or cross-process reclaim.
 type stateStore struct {
 	mu     sync.Mutex
 	states map[string]*retry.State
@@ -27,6 +27,26 @@ func (s *stateStore) get(jobID string) *retry.State {
 		s.states[jobID] = st
 	}
 	return st
+}
+
+func (s *stateStore) getOrSet(jobID string, initial *retry.State) *retry.State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if state, ok := s.states[jobID]; ok {
+		return state
+	}
+	if initial == nil {
+		initial = &retry.State{}
+	}
+	s.states[jobID] = initial
+	return initial
+}
+
+func (s *stateStore) lookup(jobID string) (*retry.State, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state, ok := s.states[jobID]
+	return state, ok
 }
 
 func (s *stateStore) delete(jobID string) {

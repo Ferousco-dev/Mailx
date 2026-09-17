@@ -153,6 +153,43 @@ func TestClaimLeaseExpiryAllowsReclamation(t *testing.T) {
 	}
 }
 
+func TestRenewExtendsRedisClaimLease(t *testing.T) {
+	requireRedis(t)
+	ns := testNamespace(t)
+	baseTime := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	owner := newTestRedisQueueNS(t, ns, 4, 100*time.Millisecond)
+	owner.now = func() time.Time { return baseTime }
+	ctx := context.Background()
+	if err := owner.Enqueue(ctx, Job{ID: "renewed", MessageID: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := owner.Claim(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner.now = func() time.Time { return baseTime.Add(90 * time.Millisecond) }
+	if err := owner.Renew(ctx, claim.Job.ID, claim.Token); err != nil {
+		t.Fatal(err)
+	}
+
+	other := newTestRedisQueueNS(t, ns, 4, 100*time.Millisecond)
+	other.now = func() time.Time { return baseTime.Add(110 * time.Millisecond) }
+	tooSoon, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
+	if _, err := other.Claim(tooSoon); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("renewed claim was reclaimed at original expiry: %v", err)
+	}
+
+	other.now = func() time.Time { return baseTime.Add(200 * time.Millisecond) }
+	reclaimed, err := other.Claim(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed.Job.ID != claim.Job.ID || reclaimed.Token == claim.Token {
+		t.Fatalf("unexpected reclaim after renewed expiry: %+v", reclaimed)
+	}
+}
+
 // ------------------------------------------------------- multi-client ----
 
 func TestMultipleClientsExactlyOneOwnerPerClaim(t *testing.T) {

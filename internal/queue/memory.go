@@ -196,6 +196,22 @@ func (q *MemoryQueue) Ack(ctx context.Context, id string, token uint64) error {
 	return nil
 }
 
+func (q *MemoryQueue) Renew(ctx context.Context, id string, token uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	e, ok := q.entries[id]
+	if !ok {
+		return ErrUnknownJob
+	}
+	if !e.claimed || e.token != token {
+		return ErrJobNotClaimed
+	}
+	return nil
+}
+
 func (q *MemoryQueue) Release(ctx context.Context, id string, token uint64, availableAt time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err

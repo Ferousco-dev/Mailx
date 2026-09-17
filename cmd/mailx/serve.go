@@ -212,42 +212,13 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB) (
 	}
 
 	workers := envInt("MAILX_WORKERS", 4)
-	pool, err := worker.NewPool(q, store, coordinator, worker.Config{Workers: workers},
+	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db}, worker.Config{Workers: workers},
 		worker.WithOnError(func(err error) { log.Printf("worker: %v", err) }),
-		worker.WithStatusReporter(func(ctx context.Context, messageID string, status retry.LifecycleStatus, deliveredAt time.Time) {
-			reportStatus(ctx, db, messageID, status, deliveredAt)
-		}),
 	)
 	if err != nil {
 		return nil, err
 	}
 	return pool, nil
-}
-
-// reportStatus translates a retry-level outcome into the durable public
-// status (see internal/database's StatusRetrying doc) — best-effort: a
-// failure to record it is logged, never fatal, since the retry/queue
-// state itself (the thing that actually controls redelivery) is already
-// durable independent of this.
-func reportStatus(ctx context.Context, db *database.DB, messageID string, status retry.LifecycleStatus, deliveredAt time.Time) {
-	var dbStatus database.MessageStatus
-	var delivered *time.Time
-	switch status {
-	case retry.StatusSucceeded:
-		dbStatus = database.StatusDelivered
-		delivered = &deliveredAt
-	case retry.StatusFailed, retry.StatusExhausted:
-		dbStatus = database.StatusFailed
-	case retry.StatusRetryable:
-		dbStatus = database.StatusRetrying
-	default:
-		return
-	}
-	updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := db.UpdateMessageStatus(updateCtx, messageID, dbStatus, delivered); err != nil {
-		log.Printf("worker: report status for %s: %v", messageID, err)
-	}
 }
 
 func httpAddr() string {

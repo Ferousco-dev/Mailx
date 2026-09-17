@@ -30,12 +30,13 @@ func (e EventType) valid() bool {
 
 // Event is one append-only lifecycle record.
 type Event struct {
-	ID         string
-	TenantID   string
-	MessageID  string
-	Type       EventType
-	OccurredAt time.Time
-	Metadata   map[string]any
+	ID                    string
+	TenantID              string
+	MessageID             string
+	Type                  EventType
+	OccurredAt            time.Time
+	Metadata              map[string]any
+	DeliveryAttemptNumber *int
 }
 
 // AppendEvent inserts one event. Metadata is small, genuinely
@@ -65,9 +66,9 @@ func (db *DB) AppendEvent(ctx context.Context, tenantID, messageID string, event
 	err = db.pool.QueryRow(ctx, `
 		INSERT INTO events (id, tenant_id, message_id, event_type, metadata)
 		VALUES ($1,$2,$3,$4,$5)
-		RETURNING id, tenant_id, message_id, event_type, occurred_at, metadata`,
+		RETURNING id, tenant_id, message_id, event_type, occurred_at, metadata, delivery_attempt_number`,
 		id, tenantID, messageID, eventType, metaJSON,
-	).Scan(&e.ID, &e.TenantID, &e.MessageID, &e.Type, &e.OccurredAt, &metaRaw)
+	).Scan(&e.ID, &e.TenantID, &e.MessageID, &e.Type, &e.OccurredAt, &metaRaw, &e.DeliveryAttemptNumber)
 	if err != nil {
 		return Event{}, fmt.Errorf("database: append event: %w", normalizeErr(err))
 	}
@@ -81,7 +82,7 @@ func (db *DB) AppendEvent(ctx context.Context, tenantID, messageID string, event
 // the future GET /emails/{id} timeline view.
 func (db *DB) ListMessageEvents(ctx context.Context, messageID string) ([]Event, error) {
 	rows, err := db.pool.Query(ctx, `
-		SELECT id, tenant_id, message_id, event_type, occurred_at, metadata
+		SELECT id, tenant_id, message_id, event_type, occurred_at, metadata, delivery_attempt_number
 		FROM events WHERE message_id = $1 ORDER BY occurred_at, id`,
 		messageID,
 	)
@@ -117,7 +118,7 @@ func (db *DB) ListTenantEvents(ctx context.Context, tenantID string, limit int, 
 		afterID = &after.ID
 	}
 	rows, err := db.pool.Query(ctx, `
-		SELECT id, tenant_id, message_id, event_type, occurred_at, metadata
+		SELECT id, tenant_id, message_id, event_type, occurred_at, metadata, delivery_attempt_number
 		FROM events
 		WHERE tenant_id = $1
 		  AND ($2::timestamptz IS NULL OR (occurred_at, id) < ($2, $3))
@@ -141,7 +142,7 @@ func scanEvents(rows interface {
 	for rows.Next() {
 		var e Event
 		var metaRaw []byte
-		if err := rows.Scan(&e.ID, &e.TenantID, &e.MessageID, &e.Type, &e.OccurredAt, &metaRaw); err != nil {
+		if err := rows.Scan(&e.ID, &e.TenantID, &e.MessageID, &e.Type, &e.OccurredAt, &metaRaw, &e.DeliveryAttemptNumber); err != nil {
 			return nil, fmt.Errorf("database: scan event: %w", err)
 		}
 		if err := json.Unmarshal(metaRaw, &e.Metadata); err != nil {

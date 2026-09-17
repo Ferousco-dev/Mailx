@@ -17,8 +17,8 @@ var (
 )
 
 // Claim is the ownership handle returned by Queue.Claim; Token guards
-// Ack/Release against stale or reused ownership. There is no lease
-// timeout: an abandoned claim stays claimed until process restart.
+// Renew/Ack/Release against stale or reused ownership. Durable implementations
+// may lease claims so abandoned work can be recovered.
 type Claim struct {
 	Job   Job
 	Token uint64
@@ -35,6 +35,12 @@ type Queue interface {
 
 	// Claim blocks until a job is available, returning exclusive ownership.
 	Claim(ctx context.Context) (Claim, error)
+
+	// Renew extends ownership of a claimed job. Durable queues use it to
+	// prevent a live worker performing required bookkeeping from being
+	// mistaken for a dead worker; in-process queues validate ownership and
+	// otherwise have nothing to extend.
+	Renew(ctx context.Context, id string, token uint64) error
 
 	// Ack completes a claimed job and frees one unit of capacity.
 	Ack(ctx context.Context, id string, token uint64) error

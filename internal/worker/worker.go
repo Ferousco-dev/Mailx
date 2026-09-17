@@ -52,30 +52,20 @@ func WithOnError(fn func(error)) Option {
 	return func(p *Pool) { p.onError = fn }
 }
 
-// WithStatusReporter reports each job's lifecycle outcome (message ID,
-// retry status, and — only for StatusSucceeded — when delivery finished)
-// so a caller can durably persist it (e.g. internal/database.
-// UpdateMessageStatus) without worker itself depending on any storage
-// backend. Best-effort: called synchronously, after Ack/Release has
-// already happened, so a reporter failure never blocks queue progress.
-func WithStatusReporter(fn func(ctx context.Context, messageID string, status retry.LifecycleStatus, deliveredAt time.Time)) Option {
-	return func(p *Pool) { p.statusFn = fn }
-}
-
 type Pool struct {
 	q            queue.Queue
 	loader       Loader
 	coordinator  Coordinator
+	outcomes     OutcomeStore
 	workers      int
 	reportingMTA string
 	now          func() time.Time
 	onError      func(error)
-	statusFn     func(ctx context.Context, messageID string, status retry.LifecycleStatus, deliveredAt time.Time)
 	states       *stateStore
 	wg           sync.WaitGroup
 }
 
-func NewPool(q queue.Queue, loader Loader, coordinator Coordinator, cfg Config, opts ...Option) (*Pool, error) {
+func NewPool(q queue.Queue, loader Loader, coordinator Coordinator, outcomes OutcomeStore, cfg Config, opts ...Option) (*Pool, error) {
 	if q == nil {
 		return nil, errors.New("worker: queue must not be nil")
 	}
@@ -84,6 +74,9 @@ func NewPool(q queue.Queue, loader Loader, coordinator Coordinator, cfg Config, 
 	}
 	if coordinator == nil {
 		return nil, errors.New("worker: coordinator must not be nil")
+	}
+	if outcomes == nil {
+		return nil, errors.New("worker: outcome store must not be nil")
 	}
 	if cfg.Workers <= 0 {
 		return nil, ErrInvalidWorkerCount
@@ -96,11 +89,11 @@ func NewPool(q queue.Queue, loader Loader, coordinator Coordinator, cfg Config, 
 		q:            q,
 		loader:       loader,
 		coordinator:  coordinator,
+		outcomes:     outcomes,
 		workers:      cfg.Workers,
 		reportingMTA: reportingMTA,
 		now:          func() time.Time { return time.Now().UTC() },
 		onError:      func(error) {},
-		statusFn:     func(context.Context, string, retry.LifecycleStatus, time.Time) {},
 		states:       newStateStore(),
 	}
 	for _, opt := range opts {
@@ -142,26 +135,38 @@ func (p *Pool) safeProcess(ctx context.Context, c queue.Claim) {
 	defer func() {
 		if r := recover(); r != nil {
 			p.onError(fmt.Errorf("worker: recovered panic processing job %s: %v", c.Job.ID, r))
-			p.releaseBestEffort(c, p.now())
+			// Once final DATA was accepted, releasing here would knowingly make
+			// the same SMTP transmission eligible again. Keep the claim; Redis
+			// lease recovery plus durable-state loading handles a later reclaim.
+			if state, ok := p.states.lookup(c.Job.ID); ok {
+				if latest, exists := state.Latest(); exists && latest.Result.Accepted {
+					return
+				}
+			}
+			p.release(c, p.now())
 		}
 	}()
 	p.processOne(ctx, c)
 }
 
-// releaseBestEffort uses a fresh context so bookkeeping still completes
-// after the pool's own shutdown context has been canceled.
-func (p *Pool) releaseBestEffort(c queue.Claim, availableAt time.Time) {
+// release uses a fresh context so bookkeeping still completes after the
+// pool's own shutdown context has been canceled.
+func (p *Pool) release(c queue.Claim, availableAt time.Time) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), bookkeepingTimeout)
 	defer cancel()
 	if err := p.q.Release(ctx, c.Job.ID, c.Token, availableAt); err != nil {
 		p.onError(fmt.Errorf("worker: release job %s: %w", c.Job.ID, err))
+		return false
 	}
+	return true
 }
 
-func (p *Pool) ackBestEffort(c queue.Claim) {
+func (p *Pool) ack(c queue.Claim) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), bookkeepingTimeout)
 	defer cancel()
 	if err := p.q.Ack(ctx, c.Job.ID, c.Token); err != nil {
 		p.onError(fmt.Errorf("worker: ack job %s: %w", c.Job.ID, err))
+		return false
 	}
+	return true
 }
