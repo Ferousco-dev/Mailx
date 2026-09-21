@@ -134,8 +134,14 @@ func (h *dkimHandler) handleVerify(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, database.ErrNotFound) {
 		// Distinguish "no such domain" from "no pending key" without leaking
 		// other tenants' domains: the domain lookup is tenant-scoped.
-		if _, _, kerr := h.service.Keys(r.Context(), tenantID, r.PathValue("id")); kerr == nil {
+		_, _, kerr := h.service.Keys(r.Context(), tenantID, r.PathValue("id"))
+		switch {
+		case kerr == nil:
 			writeError(w, r, newError(ErrConflictType, "dkim_no_pending_key", "there is no pending DKIM key to verify; create one first"))
+			return
+		case !errors.Is(kerr, database.ErrNotFound):
+			// A failing lookup is an infrastructure error, not a missing domain.
+			h.fail(w, r, kerr)
 			return
 		}
 	}

@@ -215,8 +215,25 @@ func TestBccNeverAppearsInSignedMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(strings.ToLower(string(signed)), "hidden-recipient") || strings.Contains(strings.ToLower(string(signed)), "bcc") {
-		t.Fatalf("Bcc leaked into the signed message:\n%s", signed)
+	// The hidden address must appear nowhere, and no header may be named Bcc
+	// (checked on header names and the h= list, not on the random signature text).
+	if strings.Contains(strings.ToLower(string(signed)), "hidden-recipient") {
+		t.Fatalf("hidden Bcc recipient leaked into the signed message:\n%s", signed)
+	}
+	head, _, _ := strings.Cut(string(signed), "\r\n\r\n")
+	unfolded := strings.NewReplacer("\r\n\t", " ", "\r\n ", " ").Replace(head)
+	for _, line := range strings.Split(unfolded, "\r\n") {
+		name, value, _ := strings.Cut(line, ":")
+		if strings.EqualFold(strings.TrimSpace(name), "bcc") {
+			t.Fatalf("a Bcc header was written: %q", line)
+		}
+		if strings.EqualFold(name, "DKIM-Signature") {
+			for _, tag := range strings.Split(value, ";") {
+				if k, v, _ := strings.Cut(strings.TrimSpace(tag), "="); k == "h" && strings.Contains(strings.ToLower(strings.ReplaceAll(v, " ", "")), "bcc") {
+					t.Fatalf("h= lists bcc: %s", v)
+				}
+			}
+		}
 	}
 }
 

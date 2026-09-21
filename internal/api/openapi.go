@@ -184,7 +184,7 @@ const openAPISpec = `{
         "responses": {
           "200": {"description": "DKIM state", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DkimStatus"}}}},
           "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
-          "404": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
+          "404": {"$ref": "#/components/responses/Error"}, "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
         }
       },
       "post": {
@@ -195,7 +195,7 @@ const openAPISpec = `{
           "201": {"description": "Key created (pending)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DkimStatus"}}}},
           "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
           "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
-          "503": {"$ref": "#/components/responses/Error"}
+          "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
         }
       }
     },
@@ -208,7 +208,7 @@ const openAPISpec = `{
           "200": {"description": "Verification result", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DkimVerifyResult"}}}},
           "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
           "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
-          "503": {"$ref": "#/components/responses/Error"}
+          "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
         }
       }
     }

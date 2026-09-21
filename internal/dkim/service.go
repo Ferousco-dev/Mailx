@@ -66,14 +66,20 @@ type Service struct {
 	timeout  time.Duration
 	now      func() time.Time
 	genKey   func() (*rsa.PrivateKey, error)
+	// genSlots bounds concurrent RSA key generation (CPU-heavy and not
+	// cancellable) so a burst of requests cannot saturate the process.
+	genSlots chan struct{}
 }
+
+const maxConcurrentKeyGenerations = 2
 
 func NewService(store Store, box *secretbox.Box, resolver TXTResolver, observer Observer) (*Service, error) {
 	if store == nil || box == nil || resolver == nil {
 		return nil, errors.New("dkim: store, secret box and resolver are required")
 	}
 	return &Service{store: store, box: box, resolver: resolver, observer: observer, timeout: 5 * time.Second,
-		now: func() time.Time { return time.Now().UTC() }, genKey: GenerateKey}, nil
+		now: func() time.Time { return time.Now().UTC() }, genKey: GenerateKey,
+		genSlots: make(chan struct{}, maxConcurrentKeyGenerations)}, nil
 }
 
 // aad binds a ciphertext to its tenant, domain and selector so a row's private
@@ -102,7 +108,25 @@ func (s *Service) CreateKey(ctx context.Context, tenantID, domainID string) (dat
 	if dom.DeletedAt != nil || dom.VerificationStatus != database.DomainVerified {
 		return database.DKIMKey{}, dom, database.ErrDomainNotVerified
 	}
+	// Cheap checks first: a domain that already has a pending key must not pay
+	// for another RSA generation only to be told 409. (The unique index remains
+	// the authority for races.)
+	existing, err := s.store.ListDKIMKeys(ctx, tenantID, dom.ID)
+	if err != nil {
+		return database.DKIMKey{}, dom, err
+	}
+	for _, k := range existing {
+		if k.Status == database.DKIMPending {
+			return database.DKIMKey{}, dom, database.ErrDKIMKeyPending
+		}
+	}
+	select {
+	case s.genSlots <- struct{}{}:
+	case <-ctx.Done():
+		return database.DKIMKey{}, dom, ctx.Err()
+	}
 	priv, err := s.genKey()
+	<-s.genSlots
 	if err != nil {
 		return database.DKIMKey{}, dom, err
 	}

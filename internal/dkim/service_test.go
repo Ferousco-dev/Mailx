@@ -537,3 +537,56 @@ func TestGenerateKeyIsRandomAndSelectorsAreValidAndDistinct(t *testing.T) {
 		t.Fatal("independently generated keys must differ")
 	}
 }
+
+// A domain that already has a pending key must not trigger another RSA
+// generation, and concurrent generation is bounded.
+func TestCreateKeyDoesNotGenerateWhenPendingExistsAndBoundsConcurrency(t *testing.T) {
+	r := newRig(t)
+	tn := r.tenant(t, "t")
+	d := r.verifiedDomain(t, tn.ID, "example.com")
+	var mu sync.Mutex
+	generated, inFlight, maxInFlight := 0, 0, 0
+	r.svc.genKey = func() (*rsa.PrivateKey, error) {
+		mu.Lock()
+		generated++
+		inFlight++
+		if inFlight > maxInFlight {
+			maxInFlight = inFlight
+		}
+		mu.Unlock()
+		defer func() { mu.Lock(); inFlight--; mu.Unlock() }()
+		return GenerateKey()
+	}
+	if _, _, err := r.svc.CreateKey(r.ctx, tn.ID, d.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, _, err := r.svc.CreateKey(r.ctx, tn.ID, d.ID); !errors.Is(err, database.ErrDKIMKeyPending) {
+			t.Fatalf("expected pending conflict, got %v", err)
+		}
+	}
+	if generated != 1 {
+		t.Fatalf("rejected requests generated %d keys, want 1 total", generated)
+	}
+	// A burst on a domain with no pending key never runs more than the cap concurrently.
+	d2 := r.verifiedDomain(t, tn.ID, "second.example.com")
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); _, _, _ = r.svc.CreateKey(r.ctx, tn.ID, d2.ID) }()
+	}
+	wg.Wait()
+	if maxInFlight > maxConcurrentKeyGenerations {
+		t.Fatalf("%d concurrent generations, cap is %d", maxInFlight, maxConcurrentKeyGenerations)
+	}
+	// A cancelled request waiting for a slot returns promptly.
+	for i := 0; i < maxConcurrentKeyGenerations; i++ {
+		r.svc.genSlots <- struct{}{}
+	}
+	d3 := r.verifiedDomain(t, tn.ID, "third.example.com")
+	ctx, cancel := context.WithTimeout(r.ctx, 100*time.Millisecond)
+	defer cancel()
+	if _, _, err := r.svc.CreateKey(ctx, tn.ID, d3.ID); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("waiting for a generation slot must honour cancellation, got %v", err)
+	}
+}

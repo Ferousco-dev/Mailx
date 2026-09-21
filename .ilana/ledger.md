@@ -97,3 +97,6 @@ fmt, vet, builds (darwin, linux/amd64, linux/arm64), `go test -count=1 ./...` an
 
 ## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
 v0.26 complete pending commit. Not pushed. Next: v0.27 SPF (not started). DEF-001 and RSK-006 closed.
+
+## 2026-09-21 | REVIEW | constructor | CR-008
+Greptile reviewed PR #15 (3 findings, DEF-011..DEF-013), all fixed with regression tests; key generation is now preceded by the pending check and capped at 2 concurrent generations.

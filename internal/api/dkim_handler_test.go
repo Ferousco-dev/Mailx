@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	msgauth "github.com/emersion/go-msgauth/dkim"
 
@@ -582,5 +583,49 @@ func TestConcurrentSendsAcrossTenantsDuringRotationAlwaysVerify(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s: stored message is unsigned or does not verify under any of its own keys:\n%.400s", pair[0], raw)
 		}
+	}
+}
+
+// storeFailingSecondLookup: the first Keys lookup reports "no pending key"; the
+// follow-up lookup that disambiguates 404 vs 409 hits a database failure.
+type flakyDKIMStore struct {
+	mu    sync.Mutex
+	lists int
+}
+
+func (f *flakyDKIMStore) GetDomain(_ context.Context, _, id string) (database.Domain, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.lists++
+	if f.lists > 1 {
+		return database.Domain{}, errors.New("connection reset by peer")
+	}
+	return database.Domain{ID: id, Name: "example.com"}, nil
+}
+func (f *flakyDKIMStore) CreateDKIMKey(context.Context, string, string, database.NewDKIMKey) (database.DKIMKey, error) {
+	return database.DKIMKey{}, errors.New("unused")
+}
+func (f *flakyDKIMStore) ListDKIMKeys(context.Context, string, string) ([]database.DKIMKey, error) {
+	return nil, nil
+}
+func (f *flakyDKIMStore) ActivateDKIMKey(context.Context, string, string, time.Time) (database.DKIMKey, error) {
+	return database.DKIMKey{}, errors.New("unused")
+}
+func (f *flakyDKIMStore) ActiveSigningKey(context.Context, string, string) (database.DKIMKey, error) {
+	return database.DKIMKey{}, database.ErrNotFound
+}
+
+func TestDKIMVerifyDatabaseFailureIsNot404(t *testing.T) {
+	a := newDKIMAPI(t)
+	ac := a.actor("acme")
+	mk := make([]byte, 32)
+	_, _ = rand.Read(mk)
+	box, _ := secretbox.New(mk)
+	svc, _ := dkim.NewService(&flakyDKIMStore{}, box, a.dns, nil)
+	mux := newMux(newEmailHandler(a.db, a.store), a.authSvc, func() error { return nil }, routeServices{dkim: svc})
+	gen, _, _ := a.authSvc.Create(context.Background(), ac.tenant.ID, "k", []string{string(auth.ScopeDomainsWrite)}, nil)
+	rec := doJSON(t, authInjector{next: mux, token: gen.Raw}, "POST", "/v1/domains/anything/dkim/verify", nil)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("a database failure must be a 500, not a 404/409: %d %s", rec.Code, rec.Body.String())
 	}
 }
