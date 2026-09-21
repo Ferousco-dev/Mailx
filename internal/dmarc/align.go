@@ -1,67 +1,70 @@
 package dmarc
 
 import (
+	"net"
 	"strings"
-
-	"golang.org/x/net/publicsuffix"
-
-	"github.com/Ferousco-dev/mailx/internal/domain"
 )
 
-// OrganizationalDomain returns the registrable domain of d using the Public
-// Suffix List (ICANN section), through the same canonicalization MailX uses for
-// domain ownership, so the two can never disagree about what a domain is. It is
-// deliberately NOT a suffix test: "co.uk" and "com" have no organizational
-// domain, and "attackerexample.com" is unrelated to "example.com".
-//
-// RFC 9989 replaced the PSL with a DNS Tree Walk for the organizational domain;
-// the two agree except where a public-suffix operator publishes psd= records or
-// the PSL and DNS disagree. MailX uses the PSL for alignment (offline,
-// deterministic, no attacker-influenced DNS in the decision) and documents the
-// difference as a limitation.
-func OrganizationalDomain(d string) (string, error) {
-	name, err := domain.Normalize(d)
-	if err != nil {
-		return "", err
+// canonical lowercases and validates a DNS name for comparison: ASCII LDH labels
+// only (MailX supports no IDN/A-labels anywhere), no IP literals, no empty or
+// over-long labels. It is a syntax gate, not a boundary: it says nothing about
+// where an organization begins. That is decided only by the RFC 9989 DNS Tree
+// Walk (treewalk.go).
+func canonical(d string) (string, bool) {
+	d = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
+	if d == "" || len(d) > 253 || net.ParseIP(d) != nil {
+		return "", false
 	}
-	return publicsuffix.EffectiveTLDPlusOne(name)
+	for _, label := range strings.Split(d, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' || strings.HasPrefix(label, "xn--") {
+			return "", false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return "", false
+			}
+		}
+	}
+	return d, true
 }
 
-// Aligned reports DMARC identifier alignment (RFC 9989) between the RFC 5322
-// From domain and an authenticated identifier: identical domains in strict mode,
-// the same organizational domain in relaxed mode. Comparison is case-insensitive;
-// anything that does not canonicalize (IDN, IP literals, public suffixes) is
-// never aligned. This is alignment of two names only: it says nothing about
-// whether SPF or DKIM passed.
-func Aligned(fromDomain, authenticated string, mode Mode) bool {
-	from, err1 := domain.Normalize(fromDomain)
-	id, err2 := domain.Normalize(authenticated)
-	if err1 != nil || err2 != nil {
-		return false
+// OrgFunc returns the Organizational Domain of a domain as determined by an
+// RFC 9989 DNS Tree Walk. ok is false when that could not be determined (DNS
+// failure), which is different from "not aligned".
+type OrgFunc func(domain string) (org string, ok bool)
+
+// Aligned reports RFC 9989 identifier alignment (section 4.4 and 4.10.2)
+// between the RFC 5322 From domain and an authenticated identifier.
+//
+//   - Identical domains are aligned in both modes with no DNS at all.
+//   - Strict mode is a plain string comparison of the canonical names.
+//   - Relaxed mode compares Organizational Domains obtained from org, which must
+//     be backed by the DNS Tree Walk. There is no suffix test and no label-count
+//     guess.
+//
+// known is false only when relaxed alignment needed an Organizational Domain
+// that could not be determined; aligned is then false and must not be read as
+// "not aligned". Alignment relates two names; it does not say SPF or DKIM passed.
+func Aligned(fromDomain, authenticated string, mode Mode, org OrgFunc) (aligned, known bool) {
+	from, ok1 := canonical(fromDomain)
+	id, ok2 := canonical(authenticated)
+	if !ok1 || !ok2 {
+		return false, true
+	}
+	if from == id {
+		return true, true
 	}
 	if mode == Strict {
-		return from == id
+		return false, true
 	}
-	ofrom, err1 := OrganizationalDomain(from)
-	oid, err2 := OrganizationalDomain(id)
-	return err1 == nil && err2 == nil && strings.EqualFold(ofrom, oid)
-}
-
-// walkNames lists the names whose _dmarc. record can govern domain, from the
-// domain itself up to its organizational domain, capped at maxQueries.
-func walkNames(d string, maxQueries int) []string {
-	name, err := domain.Normalize(d)
-	if err != nil {
-		return nil
+	if org == nil {
+		return false, false
 	}
-	org, err := OrganizationalDomain(name)
-	if err != nil {
-		return []string{name}
+	of, ok1 := org(from)
+	oi, ok2 := org(id)
+	if !ok1 || !ok2 {
+		return false, false
 	}
-	names := []string{name}
-	for name != org && len(names) < maxQueries {
-		_, name, _ = strings.Cut(name, ".")
-		names = append(names, name)
-	}
-	return names
+	return of == oi, true
 }

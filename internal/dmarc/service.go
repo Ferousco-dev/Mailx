@@ -3,8 +3,6 @@ package dmarc
 import (
 	"context"
 	"errors"
-	"net"
-	"strings"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
@@ -54,11 +52,9 @@ const (
 	ReasonMultiple        = "multiple_dmarc_records"
 )
 
-// Sources of the effective policy.
-const (
-	SourceDomain = "domain"
-	SourceOrg    = "organizational_domain"
-)
+// WarnConflictDiscarded: a set of multiple records at another name was discarded
+// (RFC 9989 4.10) while the walk found a policy elsewhere.
+const WarnConflictDiscarded = "conflicting_records_discarded"
 
 // Path is one aligned-authentication path (DKIM or SPF).
 type Path struct {
@@ -78,7 +74,7 @@ type Expected struct{ Action, Type, Name, Value string }
 type DNSResult struct {
 	Status          DNSStatus
 	Reason          string
-	Source          string // domain | organizational_domain
+	Source          string // domain | organizational_domain | public_suffix_domain
 	RecordName      string
 	Policy          Policy // p as published
 	SubdomainPolicy Policy // sp as published
@@ -140,7 +136,6 @@ var (
 const (
 	defaultTimeout   = 5 * time.Second
 	maxConcurrent    = 16
-	maxQueries       = 8
 	dmarcLabel       = "_dmarc."
 	recommendedValue = "v=DMARC1; p=none"
 )
@@ -176,6 +171,7 @@ func (s *Service) Describe(ctx context.Context, tenantID, id string) (Result, er
 	if err != nil {
 		return Result{}, err
 	}
+	in.align = func(from, id string, mode Mode) (bool, bool) { return Aligned(from, id, mode, nil) }
 	res := assess(in, dnsFinding{status: StatusUnchecked})
 	res.Readiness = ReadinessUnchecked
 	return res, nil
@@ -204,10 +200,34 @@ func (s *Service) Verify(ctx context.Context, tenantID, id string) (Result, erro
 	}
 	lctx, cancel := context.WithTimeout(ctx, s.timeout)
 	defer cancel()
-	found := s.walk(lctx, dom.Name)
-	if found.status == StatusTempError && ctx.Err() != nil {
+	from, ok := canonical(dom.Name)
+	if !ok {
+		return Result{}, errors.New("dmarc: stored domain is not a valid name")
+	}
+	// One tree walk from the From domain yields both the governing policy and its
+	// Organizational Domain. Other identities are walked only when relaxed
+	// alignment needs their Organizational Domain (never in normal MailX operation,
+	// where every identity equals the From domain). Walks are memoized per call.
+	walks := map[string]*walkResult{}
+	orgOf := func(d string) (string, bool) {
+		if w, ok := walks[d]; ok {
+			return w.org, true
+		}
+		w, err := s.treeWalk(lctx, d)
+		if err != nil {
+			return "", false
+		}
+		walks[d] = w
+		return w.org, true
+	}
+	found := dnsFinding{status: StatusTempError, reason: ReasonDNS}
+	if w, err := s.treeWalk(lctx, from); err == nil {
+		walks[from] = w
+		found = findingFrom(w)
+	} else if ctx.Err() != nil {
 		return Result{}, ctx.Err()
 	}
+	in.align = func(f, id string, mode Mode) (bool, bool) { return Aligned(f, id, mode, orgOf) }
 	res := assess(in, found)
 	s.observe(res)
 	return res, nil
@@ -224,7 +244,7 @@ func (s *Service) observe(res Result) {
 // inputs gathers DKIM and SPF facts. Failures degrade a path to unknown; only
 // caller cancellation aborts.
 func (s *Service) inputs(ctx context.Context, tenantID string, dom database.Domain, checkSPF bool) (input, error) {
-	in := input{from: dom.Name, checked: checkSPF}
+	in := input{from: dom.Name, checked: checkSPF, spfIdentity: dom.Name}
 	if s.dkim != nil {
 		d, active, err := s.dkim.ActiveSigningDomain(ctx, tenantID, dom.ID)
 		if err != nil {
@@ -250,192 +270,4 @@ func (s *Service) inputs(ctx context.Context, tenantID string, dom database.Doma
 		in.spfErr = true
 	}
 	return in, nil
-}
-
-// dnsFinding is the outcome of the bounded DNS walk.
-type dnsFinding struct {
-	status  DNSStatus
-	reason  string
-	name    string // domain (without _dmarc.) whose record was found
-	records []string
-	rec     Record
-}
-
-// walk queries _dmarc.<name> for the domain and then each parent up to its
-// organizational domain, stopping at the first name that has DMARC records.
-func (s *Service) walk(ctx context.Context, from string) dnsFinding {
-	for _, name := range walkNames(from, maxQueries) {
-		records, err := s.resolver.LookupTXT(ctx, dmarcLabel+name)
-		if err != nil {
-			var dnsErr *net.DNSError
-			if errors.As(err, &dnsErr) && dnsErr.IsNotFound && !dnsErr.IsTemporary && !dnsErr.IsTimeout {
-				continue
-			}
-			return dnsFinding{status: StatusTempError, reason: ReasonDNS}
-		}
-		if len(records) > MaxTXTRecords {
-			return dnsFinding{status: StatusInvalid, reason: ReasonTooManyTXT, name: name}
-		}
-		var candidates []string
-		for _, r := range records {
-			if IsDMARC(r) {
-				candidates = append(candidates, r)
-			}
-		}
-		switch len(candidates) {
-		case 0:
-			continue
-		case 1:
-			rec, perr := Parse(candidates[0])
-			if perr != nil {
-				reason := ReasonBadTag
-				var ie *InvalidError
-				if errors.As(perr, &ie) {
-					reason = ie.Reason
-				}
-				return dnsFinding{status: StatusInvalid, reason: reason, name: name}
-			}
-			return dnsFinding{status: StatusMonitoring, name: name, records: candidates, rec: rec}
-		default:
-			return dnsFinding{status: StatusConflict, reason: ReasonMultiple, name: name}
-		}
-	}
-	return dnsFinding{status: StatusNotConfigured}
-}
-
-type input struct {
-	from       string
-	checked    bool
-	dkimActive bool
-	dkimDomain string
-	dkimErr    bool
-	spf        SPFView
-	spfErr     bool
-}
-
-// assess is the pure core: DNS finding + DKIM/SPF facts -> Result.
-func assess(in input, f dnsFinding) Result {
-	res := Result{Domain: in.from, Mode: in.spf.Mode, Checked: f.status != StatusUnchecked}
-	res.OrgDomain, _ = OrganizationalDomain(in.from)
-	res.DNS = DNSResult{Status: f.status, Reason: f.reason, RecordName: recordName(f.name)}
-
-	adkim, aspf := Relaxed, Relaxed // defaults when no usable record exists
-	if f.status == StatusMonitoring {
-		rec := f.rec
-		adkim, aspf = rec.Adkim, rec.Aspf
-		res.DNS.Published = f.records[0]
-		res.DNS.Policy, res.DNS.SubdomainPolicy, res.DNS.Testing = rec.Policy, rec.SubPolicy, rec.Testing
-		res.DNS.ReportURIs = len(rec.RUAHosts)
-		res.DNS.Source, res.DNS.Effective = SourceDomain, rec.Policy
-		if f.name != in.from { // inherited from a parent: sp applies to existing subdomains
-			res.DNS.Source = SourceOrg
-			if rec.SubPolicy != "" {
-				res.DNS.Effective = rec.SubPolicy
-			}
-		}
-		if res.DNS.Effective != PolicyNone {
-			res.DNS.Status = StatusEnforcing
-		}
-		res.Warnings = append(res.Warnings, rec.Warnings...)
-		if res.DNS.Effective == PolicyNone {
-			res.Warnings = appendOnce(res.Warnings, WarnMonitoringOnly)
-		}
-		if rec.Testing {
-			res.Warnings = appendOnce(res.Warnings, WarnTesting)
-		}
-		for _, h := range rec.RUAHosts {
-			if oh, err := OrganizationalDomain(h); err != nil || !strings.EqualFold(oh, res.OrgDomain) {
-				res.Warnings = appendOnce(res.Warnings, WarnExternalReportDest)
-			}
-		}
-	}
-	res.DKIM, res.SPF = paths(in, adkim, aspf)
-	if in.spf.Mode == "relay" && res.DKIM.Status == PathReady {
-		res.Warnings = appendOnce(res.Warnings, WarnRelayAlters)
-	}
-	res.Expected = expected(in.from, res.DNS.Status)
-	res.Readiness = readiness(res.DNS.Status, res.DKIM, res.SPF)
-	return res
-}
-
-func recordName(name string) string {
-	if name == "" {
-		return ""
-	}
-	return dmarcLabel + name
-}
-
-func expected(from string, st DNSStatus) Expected {
-	switch st {
-	case StatusNotConfigured, StatusUnchecked:
-		return Expected{Action: "create", Type: "TXT", Name: dmarcLabel + from, Value: recommendedValue}
-	case StatusMonitoring, StatusEnforcing:
-		return Expected{Action: "none"} // an existing policy is never rewritten
-	case StatusConflict:
-		return Expected{Action: "merge_records"}
-	case StatusInvalid:
-		return Expected{Action: "fix_record"}
-	}
-	return Expected{Action: "retry_later"}
-}
-
-// paths models both aligned-authentication paths. DKIM: MailX signs with the
-// From domain once a key is active. SPF: MAIL FROM equals the API From address
-// in direct mode, so its domain is the From domain; in relay mode the relay may
-// rewrite the return-path, which MailX cannot know.
-func paths(in input, adkim, aspf Mode) (dk, sp Path) {
-	dk = Path{Identity: in.from, Mode: adkim}
-	if in.dkimActive && in.dkimDomain != "" {
-		dk.Identity = in.dkimDomain
-	}
-	dk.Aligned = Aligned(in.from, dk.Identity, adkim)
-	switch {
-	case in.dkimErr:
-		dk.Status, dk.Reason = PathUnknown, ReasonNotChecked
-	case !dk.Aligned:
-		dk.Status = PathNotAligned
-	case !in.dkimActive:
-		dk.Status, dk.Reason = PathNotConfigured, ReasonNoActiveKey
-	default:
-		dk.Status = PathReady
-	}
-
-	sp = Path{Identity: in.from, Mode: aspf}
-	sp.Aligned = Aligned(in.from, sp.Identity, aspf)
-	switch {
-	case in.spfErr:
-		sp.Status, sp.Reason = PathUnknown, ReasonSPFUnavailable
-	case in.spf.Mode == "relay":
-		sp.Identity, sp.Aligned = "", false
-		sp.Status, sp.Reason = PathUnknown, ReasonRelayReturnPath
-	case !sp.Aligned:
-		sp.Status = PathNotAligned
-	case !in.checked:
-		sp.Status, sp.Reason = PathUnknown, ReasonNotChecked
-	case in.spf.Status == "verified":
-		sp.Status = PathReady
-	case in.spf.Status == "temporary_error" || in.spf.Status == "sending_infrastructure_unknown" || in.spf.Status == "":
-		sp.Status, sp.Reason = PathUnknown, ReasonSPFUnavailable
-	default: // not_configured, mismatch, conflict, invalid
-		sp.Status, sp.Reason = PathNotConfigured, ReasonSPFNotVerified
-	}
-	return dk, sp
-}
-
-func readiness(st DNSStatus, dk, sp Path) string {
-	switch st {
-	case StatusUnchecked:
-		return ReadinessUnchecked
-	case StatusTempError:
-		return ReadinessUnknown
-	case StatusNotConfigured, StatusInvalid, StatusConflict:
-		return ReadinessDNSAction
-	}
-	switch {
-	case dk.Status == PathReady || sp.Status == PathReady:
-		return ReadinessReady
-	case dk.Status == PathUnknown || sp.Status == PathUnknown:
-		return ReadinessUnknown
-	}
-	return ReadinessAuthIncomp
 }

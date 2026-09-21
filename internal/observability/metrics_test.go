@@ -224,7 +224,9 @@ func TestAuthMetricLabelsAreBounded(t *testing.T) {
 			t.Errorf("missing %s", want)
 		}
 	}
-	for _, banned := range []string{"alice", "user@example.com", "535"} {
+	// "535" is matched as a label value: the dump also holds runtime/process
+	// samples (memory sizes, timestamps) whose digits can contain it by chance.
+	for _, banned := range []string{"alice", "user@example.com", `="535"`} {
 		if strings.Contains(out, banned) {
 			t.Fatalf("unbounded AUTH label value %q reached exposition", banned)
 		}

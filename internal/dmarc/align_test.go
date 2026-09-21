@@ -1,82 +1,117 @@
 package dmarc
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
-func TestOrganizationalDomain(t *testing.T) {
-	for in, want := range map[string]string{
-		"example.com": "example.com", "mail.example.com": "example.com", "A.B.Example.COM.": "example.com",
-		"example.co.uk": "example.co.uk", "mail.example.co.uk": "example.co.uk", "appmd.dev": "appmd.dev", "x.y.appmd.dev": "appmd.dev",
-	} {
-		got, err := OrganizationalDomain(in)
-		if err != nil || got != want {
-			t.Errorf("OrganizationalDomain(%q) = %q, %v; want %q", in, got, err, want)
+// zoneOrg builds an OrgFunc backed by a real tree walk over a fake DNS zone.
+func zoneOrg(t *testing.T, zone txtMap) OrgFunc {
+	t.Helper()
+	svc := &Service{resolver: &fakeDNS{fn: zone.fn}}
+	return func(d string) (string, bool) {
+		w, err := svc.treeWalk(context.Background(), d)
+		if err != nil {
+			return "", false
 		}
-	}
-	for _, in := range []string{"com", "co.uk", "uk", "", "localhost", "127.0.0.1", "exämple.com", "xn--e1afmkfd.com", "*.example.com", "a..b.com", "sub.blogspot.com"} {
-		if got, err := OrganizationalDomain(in); err == nil {
-			t.Errorf("OrganizationalDomain(%q) = %q, want error (no registrable ICANN domain)", in, got)
-		}
+		return w.org, true
 	}
 }
 
-// Alignment is a relation between two NAMES; it never says SPF or DKIM passed.
-func TestAlignmentMatrix(t *testing.T) {
+func rec(v string) []string { return []string{v} }
+
+// Strict alignment is a plain comparison and must never consult DNS.
+func TestStrictAlignmentNeverUsesDNS(t *testing.T) {
 	for _, tc := range []struct {
 		name, from, id string
-		mode           Mode
 		want           bool
 	}{
-		{"A strict identical", "example.com", "example.com", Strict, true},
-		{"A strict identical, case", "Example.COM", "example.com.", Strict, true},
-		{"B strict subdomain identity", "example.com", "mail.example.com", Strict, false},
-		{"B strict subdomain From", "mail.example.com", "example.com", Strict, false},
-		{"C relaxed subdomain identity", "example.com", "mail.example.com", Relaxed, true},
-		{"D relaxed subdomain From", "mail.example.com", "example.com", Relaxed, true},
-		{"relaxed siblings share org domain", "a.example.com", "b.example.com", Relaxed, true},
-		{"E co.uk relaxed", "example.co.uk", "mail.example.co.uk", Relaxed, true},
-		{"E co.uk strict", "example.co.uk", "mail.example.co.uk", Strict, false},
-		{"E co.uk vs other co.uk org", "example.co.uk", "other.co.uk", Relaxed, false},
-		{"E co.uk suffix itself", "example.co.uk", "co.uk", Relaxed, false},
-		{"F lookalike", "example.com", "attackerexample.com", Relaxed, false},
-		{"F lookalike reversed", "attackerexample.com", "example.com", Relaxed, false},
-		{"F lookalike strict", "example.com", "attackerexample.com", Strict, false},
-		{"G attacker suffix", "example.com", "example.com.attacker.com", Relaxed, false},
-		{"G attacker suffix strict", "example.com", "example.com.attacker.com", Strict, false},
-		{"public suffix com", "example.com", "com", Relaxed, false},
-		{"public suffix both", "co.uk", "co.uk", Strict, false},
-		{"different tld", "example.com", "example.org", Relaxed, false},
-		{"empty identity", "example.com", "", Relaxed, false},
-		{"ip literal", "example.com", "127.0.0.1", Relaxed, false},
-		{"idn is not aligned (unsupported)", "example.com", "exämple.com", Relaxed, false},
-		{"unknown mode is relaxed", "example.com", "mail.example.com", Mode("x"), true},
+		{"identical", "example.com", "example.com", true},
+		{"identical case and dot", "Example.COM", "example.com.", true},
+		{"subdomain identity", "example.com", "mail.example.com", false},
+		{"subdomain From", "mail.example.com", "example.com", false},
+		{"lookalike", "example.com", "attackerexample.com", false},
+		{"attacker suffix", "example.com", "example.com.attacker.com", false},
+		{"different tld", "example.com", "example.org", false},
+		{"empty", "example.com", "", false},
+		{"ip literal", "example.com", "127.0.0.1", false},
+		{"idn unsupported", "example.com", "exämple.com", false},
+		{"punycode unsupported", "example.com", "xn--e1afmkfd.com", false},
 	} {
-		if got := Aligned(tc.from, tc.id, tc.mode); got != tc.want {
-			t.Errorf("%s: Aligned(%q,%q,%s) = %v", tc.name, tc.from, tc.id, tc.mode, got)
+		aligned, known := Aligned(tc.from, tc.id, Strict, func(string) (string, bool) {
+			t.Fatalf("%s: strict alignment consulted the Organizational Domain", tc.name)
+			return "", false
+		})
+		if aligned != tc.want || !known {
+			t.Errorf("%s: Aligned(%q,%q,strict) = %v,%v", tc.name, tc.from, tc.id, aligned, known)
+		}
+	}
+	// Identical domains are aligned in relaxed mode without DNS as well.
+	if a, k := Aligned("example.com", "EXAMPLE.com", Relaxed, nil); !a || !k {
+		t.Fatal("identical domains must align in relaxed mode with no DNS")
+	}
+}
+
+// Relaxed alignment follows the RFC 9989 Tree Walk: A-G matrix from the milestone.
+func TestRelaxedAlignmentUsesTreeWalkOrganizationalDomain(t *testing.T) {
+	zone := txtMap{
+		"_dmarc.example.com":   rec("v=DMARC1; p=none"),
+		"_dmarc.example.co.uk": rec("v=DMARC1; p=none"),
+		"_dmarc.attacker.com":  rec("v=DMARC1; p=none"),
+	}
+	org := zoneOrg(t, zone)
+	for _, tc := range []struct {
+		name, from, id string
+		aligned, known bool
+	}{
+		{"B subdomain identity, org record at example.com", "mail.example.com", "example.com", true, true},
+		{"C subdomain identity", "example.com", "mail.example.com", true, true},
+		{"siblings under one org", "a.example.com", "b.example.com", true, true},
+		{"deep name (F)", "deep.mail.example.com", "example.com", true, true},
+		{"co.uk registrable domain", "example.co.uk", "mail.example.co.uk", true, true},
+		{"D lookalike", "example.com", "attackerexample.com", false, true},
+		{"D lookalike reversed", "attackerexample.com", "example.com", false, true},
+		{"E attacker suffix", "example.com", "example.com.attacker.com", false, true},
+		{"E attacker suffix reversed", "example.com.attacker.com", "example.com", false, true},
+		{"different orgs", "example.com", "example.org", false, true},
+		{"co.uk suffix is not an org of example.co.uk", "example.co.uk", "other.co.uk", false, true},
+	} {
+		aligned, known := Aligned(tc.from, tc.id, Relaxed, org)
+		if aligned != tc.aligned || known != tc.known {
+			t.Errorf("%s: Aligned(%q,%q,relaxed) = %v,%v want %v,%v", tc.name, tc.from, tc.id, aligned, known, tc.aligned, tc.known)
 		}
 	}
 }
 
-func TestWalkNamesBoundedAndOrdered(t *testing.T) {
-	for in, want := range map[string][]string{
-		"example.com":       {"example.com"},
-		"mail.example.com":  {"mail.example.com", "example.com"},
-		"a.b.example.co.uk": {"a.b.example.co.uk", "b.example.co.uk", "example.co.uk"},
-		"co.uk":             nil,
-		"":                  nil,
-	} {
-		got := walkNames(in, maxQueries)
-		if len(got) != len(want) {
-			t.Errorf("walkNames(%q) = %v want %v", in, got, want)
-			continue
-		}
-		for i := range got {
-			if got[i] != want[i] {
-				t.Errorf("walkNames(%q) = %v want %v", in, got, want)
-			}
+// Without any published record there is no Organizational Domain information:
+// RFC 9989 4.10.2 says the starting domain is its own Organizational Domain, so
+// distinct names do not align. (The old PSL logic would have said they do.)
+func TestRelaxedAlignmentWithoutRecordsDoesNotGuessAnOrganization(t *testing.T) {
+	org := zoneOrg(t, txtMap{})
+	if a, k := Aligned("mail.example.com", "example.com", Relaxed, org); a || !k {
+		t.Fatalf("no records anywhere: aligned=%v known=%v", a, k)
+	}
+}
+
+func TestRelaxedAlignmentIsUnknownWhenDNSFails(t *testing.T) {
+	fail := func(string) (string, bool) { return "", false }
+	if a, k := Aligned("mail.example.com", "example.com", Relaxed, fail); a || k {
+		t.Fatalf("aligned=%v known=%v: a DNS failure is unknown, never 'not aligned'", a, k)
+	}
+	if a, k := Aligned("mail.example.com", "example.com", Relaxed, nil); a || k {
+		t.Fatal("relaxed alignment without an Organizational Domain source must be unknown")
+	}
+}
+
+func TestCanonical(t *testing.T) {
+	for in, want := range map[string]string{"Example.COM.": "example.com", " a.b ": "a.b", "com": "com"} {
+		if got, ok := canonical(in); !ok || got != want {
+			t.Errorf("canonical(%q) = %q,%v", in, got, ok)
 		}
 	}
-	deep := "a.b.c.d.e.f.g.h.i.j.k.l.example.com"
-	if n := len(walkNames(deep, maxQueries)); n > maxQueries {
-		t.Fatalf("walk exceeded the query bound: %d", n)
+	for _, in := range []string{"", ".", "a..b", "-a.com", "a-.com", "a_b.com", "127.0.0.1", "::1", "exämple.com", "xn--a.com", "a b.com", "*.a.com"} {
+		if got, ok := canonical(in); ok {
+			t.Errorf("canonical(%q) = %q, want rejection", in, got)
+		}
 	}
 }

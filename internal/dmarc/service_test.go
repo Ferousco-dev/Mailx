@@ -218,22 +218,22 @@ func TestPolicyDiscoveryWalksToOrganizationalDomainAndIsBounded(t *testing.T) {
 	if res.DNS.Source != SourceOrg || res.DNS.Policy != PolicyReject || res.DNS.Effective != PolicyNone || res.DNS.Status != StatusMonitoring {
 		t.Fatalf("inheritance: %+v", res.DNS)
 	}
-	if got := dns.names; len(got) != 2 || got[0] != "_dmarc.mail.example.com" || got[1] != "_dmarc.example.com" {
-		t.Fatalf("queries: %v", got)
+	if got := dns.names; len(got) != 3 || got[0] != "_dmarc.mail.example.com" || got[1] != "_dmarc.example.com" || got[2] != "_dmarc.com" {
+		t.Fatalf("queries (RFC 9989 walks to the TLD): %v", got)
 	}
 	// Without sp the parent's p applies.
 	dns = &fakeDNS{fn: txtMap{"_dmarc.example.com": {"v=DMARC1; p=quarantine"}}.fn}
 	if res = verifyOnce(t, "mail.example.com", dns, nil, nil); res.DNS.Effective != PolicyQuarantine || res.DNS.Status != StatusEnforcing {
 		t.Fatalf("%+v", res.DNS)
 	}
-	// The domain's own record wins and stops the walk.
+	// The domain's own record governs; the walk still continues to find the Organizational Domain.
 	dns = &fakeDNS{fn: txtMap{"_dmarc.mail.example.com": {"v=DMARC1; p=none"}, "_dmarc.example.com": {"v=DMARC1; p=reject"}}.fn}
-	if res = verifyOnce(t, "mail.example.com", dns, nil, nil); res.DNS.Source != SourceDomain || res.DNS.Effective != PolicyNone || dns.calls.Load() != 1 {
-		t.Fatalf("%+v calls=%d", res.DNS, dns.calls.Load())
+	if res = verifyOnce(t, "mail.example.com", dns, nil, nil); res.DNS.Source != SourceDomain || res.DNS.Effective != PolicyNone || dns.calls.Load() != 3 || res.OrgDomain != "example.com" {
+		t.Fatalf("%+v calls=%d org=%s", res.DNS, dns.calls.Load(), res.OrgDomain)
 	}
-	// A conflict at the domain does not silently fall through to the parent.
+	// A conflict at the domain is reported even though receivers would fall back to the parent's policy.
 	dns = &fakeDNS{fn: txtMap{"_dmarc.mail.example.com": {"v=DMARC1; p=none", "v=DMARC1; p=none"}, "_dmarc.example.com": {"v=DMARC1; p=reject"}}.fn}
-	if res = verifyOnce(t, "mail.example.com", dns, nil, nil); res.DNS.Status != StatusConflict {
+	if res = verifyOnce(t, "mail.example.com", dns, nil, nil); res.DNS.Status != StatusConflict || res.DNS.Effective != "" {
 		t.Fatalf("%+v", res.DNS)
 	}
 	// Never more than the query bound, even for absurdly deep names.
@@ -317,6 +317,85 @@ func TestStrictAndRelaxedModesDriveAlignmentOfPaths(t *testing.T) {
 	sstrict := &fakeDNS{fn: txtMap{"_dmarc.example.com": {"v=DMARC1; p=none; aspf=s"}}.fn}
 	if r := verifyOnce(t, dom, sstrict, nil, directSPF("verified")); r.SPF.Status != PathReady || r.SPF.Mode != Strict {
 		t.Fatalf("%+v", r.SPF)
+	}
+}
+
+// Relaxed alignment of BOTH paths follows the tree-walk Organizational Domain.
+// Every zone here is one where the old PSL logic would say "aligned".
+func TestPathAlignmentUsesTreeWalkForDKIMAndSPF(t *testing.T) {
+	zone := txtMap{
+		"_dmarc.example.com":      {"v=DMARC1; p=none; adkim=r; aspf=r"},
+		"_dmarc.mail.example.com": {"v=DMARC1; p=none; psd=n"}, // the mail.example.com division is its own organization
+	}
+	svc := &Service{resolver: &fakeDNS{fn: zone.fn}}
+	align := func(from, id string, mode Mode) (bool, bool) {
+		return Aligned(from, id, mode, func(d string) (string, bool) {
+			w, err := svc.treeWalk(context.Background(), d)
+			if err != nil {
+				return "", false
+			}
+			return w.org, true
+		})
+	}
+	base := input{from: "example.com", checked: true, dkimActive: true, spf: SPFView{Mode: "direct", Status: "verified"}, align: align}
+	for _, tc := range []struct {
+		name        string
+		dkimDomain  string
+		spfIdentity string
+		dkim, spf   string
+	}{
+		{"both aligned", "example.com", "example.com", PathReady, PathReady},
+		{"DKIM aligned, SPF identity in another org division", "example.com", "a.mail.example.com", PathReady, PathNotAligned},
+		{"DKIM in another org division, SPF aligned", "a.mail.example.com", "example.com", PathNotAligned, PathReady},
+		{"neither aligned", "a.mail.example.com", "b.mail.example.com", PathNotAligned, PathNotAligned},
+		{"foreign domains", "attacker.net", "attackerexample.com", PathNotAligned, PathNotAligned},
+	} {
+		in := base
+		in.dkimDomain, in.spfIdentity = tc.dkimDomain, tc.spfIdentity
+		dk, sp := paths(in, Relaxed, Relaxed)
+		if dk.Status != tc.dkim || sp.Status != tc.spf {
+			t.Errorf("%s: dkim=%+v spf=%+v", tc.name, dk, sp)
+		}
+	}
+	// Strict needs no DNS and ignores the walk.
+	in := base
+	in.dkimDomain, in.spfIdentity = "mail.example.com", "mail.example.com"
+	if dk, sp := paths(in, Strict, Strict); dk.Status != PathNotAligned || sp.Status != PathNotAligned {
+		t.Fatalf("strict: %+v %+v", dk, sp)
+	}
+	// The identities of the same organization division DO align (both under mail.example.com).
+	in.from = "a.mail.example.com"
+	in.dkimDomain, in.spfIdentity = "b.mail.example.com", "c.mail.example.com"
+	if dk, sp := paths(in, Relaxed, Relaxed); dk.Status != PathReady || sp.Status != PathReady {
+		t.Fatalf("same division: %+v %+v", dk, sp)
+	}
+	// A DNS failure while determining the boundary is unknown, never a false 'not aligned' or 'ready'.
+	in.align = func(f, id string, m Mode) (bool, bool) {
+		return Aligned(f, id, m, func(string) (string, bool) { return "", false })
+	}
+	if dk, sp := paths(in, Relaxed, Relaxed); dk.Status != PathUnknown || dk.Reason != ReasonDNS || sp.Status != PathUnknown {
+		t.Fatalf("dns failure: %+v %+v", dk, sp)
+	}
+}
+
+// Service-level: a SERVFAIL at the parent after a clean miss at the child fails the
+// whole discovery; the weaker grandparent policy is never used and readiness is not claimed.
+func TestParentServfailAfterChildMissIsTemporaryAndNeverReady(t *testing.T) {
+	dns := &fakeDNS{fn: func(_ context.Context, name string) ([]string, error) {
+		switch name {
+		case "_dmarc.a.example.com":
+			return nil, notFound()
+		case "_dmarc.example.com":
+			return nil, &net.DNSError{Err: "server failure", IsTemporary: true}
+		}
+		return []string{"v=DMARC1; p=none"}, nil
+	}}
+	res := verifyOnce(t, "a.example.com", dns, fakeDKIM{domain: "a.example.com", active: true}, directSPF("verified"))
+	if res.DNS.Status != StatusTempError || res.Readiness != ReadinessUnknown || res.DNS.Effective != "" || res.OrgDomain != "" {
+		t.Fatalf("%+v", res)
+	}
+	if names := dns.names; names[len(names)-1] != "_dmarc.example.com" {
+		t.Fatalf("queried past the failure: %v", names)
 	}
 }
 
@@ -435,16 +514,24 @@ func TestConcurrentVerificationIsolatedAndBounded(t *testing.T) {
 			return []string{"v=DMARC1; p=nope"}, nil
 		case strings.Contains(name, "slow"):
 			return nil, &net.DNSError{IsTimeout: true, IsTemporary: true}
+		case strings.HasPrefix(name, "_dmarc.psdn"):
+			return []string{"v=DMARC1; p=none; psd=n"}, nil
+		case strings.HasPrefix(name, "_dmarc.psdy"): // a PSD record above the domain: governs via the PSD source
+			return []string{"v=DMARC1; p=reject; sp=none; psd=y"}, nil
 		}
 		return nil, notFound()
 	}}
 	want := map[string]DNSStatus{}
 	for tn := 0; tn < 6; tn++ {
-		for i, kind := range []string{"monitor", "enforce", "dup", "bad", "slow", "none"} {
+		for i, kind := range []string{"monitor", "enforce", "dup", "bad", "slow", "none", "psdn", "psdy"} {
 			tenant, id := fmt.Sprintf("t%d", tn), fmt.Sprintf("d%d", i)
-			st.add(tenant, id, fmt.Sprintf("%s-%d.example.com", kind, tn), true)
+			domain := fmt.Sprintf("%s-%d.example.com", kind, tn)
+			if kind == "psdy" {
+				domain = "x." + domain // the psd=y record sits ABOVE the domain, at psdy-N.example.com
+			}
+			st.add(tenant, id, domain, true)
 			want[tenant+"|"+id] = map[string]DNSStatus{"monitor": StatusMonitoring, "enforce": StatusEnforcing, "dup": StatusConflict,
-				"bad": StatusInvalid, "slow": StatusTempError, "none": StatusNotConfigured}[kind]
+				"bad": StatusInvalid, "slow": StatusTempError, "none": StatusNotConfigured, "psdn": StatusMonitoring, "psdy": StatusMonitoring}[kind]
 		}
 	}
 	obs := &recorder{}

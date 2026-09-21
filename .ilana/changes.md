@@ -10,3 +10,4 @@
 - CR-008 [approved, 2026-09-21]: address Greptile review of PR #15 (DEF-011..DEF-013); no scope beyond the three findings.
 - CR-009 [approved, 2026-09-21]: implement v0.27 SPF sending-authorization guidance (design `docs/design-v0.27.md`); DMARC, PTR/rDNS, HELO deliverability changes, real Internet delivery and any sending block excluded.
 - CR-010 [approved, 2026-09-21]: implement v0.28 DMARC policy, alignment and DNS readiness (design `docs/design-v0.28.md`); PTR/rDNS/HELO, MTA-STS, DANE, ARC, BIMI, report intake and real Internet delivery excluded.
+- CR-011 [approved, 2026-09-21]: v0.28 corrective pass: replace PSL-based DMARC Organizational Domain with the RFC 9989 DNS Tree Walk (DEF-015); no v0.29 work, no API shape change.

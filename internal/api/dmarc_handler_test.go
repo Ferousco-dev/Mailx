@@ -86,7 +86,7 @@ func TestDMARCLifecycleThroughAPI(t *testing.T) {
 	g := decodeDMARC(t, rec.Body)
 	if rec.Code != 200 || g.Checked || g.Readiness != "unchecked" || g.ReceiverResult != "not_observed" || g.Expected.Action != "create" ||
 		g.Expected.Name != "_dmarc.example.com" || g.Expected.Value != "v=DMARC1; p=none" || g.DKIM.Status != "not_configured" || g.SPF.Status != "unknown" ||
-		g.OrgDomain != "example.com" || strings.Contains(g.Expected.Value, "rua") {
+		g.OrgDomain != "" || strings.Contains(g.Expected.Value, "rua") { // the Organizational Domain needs the DNS Tree Walk, so GET does not claim one
 		t.Fatalf("GET: %d %+v", rec.Code, g)
 	}
 
@@ -99,7 +99,8 @@ func TestDMARCLifecycleThroughAPI(t *testing.T) {
 	// Publish monitoring policy: DNS ok but no aligned authentication configured yet.
 	a.dns.setTXT("_dmarc.example.com", "v=DMARC1; p=none;")
 	v = decodeDMARC(t, doJSON(t, ac.h, "POST", base+"/verify", nil).Body)
-	if v.DNS.Status != "monitoring" || v.Readiness != "authentication_incomplete" || v.DKIM.Status != "not_configured" || v.SPF.Status != "not_configured" {
+	if v.DNS.Status != "monitoring" || v.Readiness != "authentication_incomplete" || v.DKIM.Status != "not_configured" || v.SPF.Status != "not_configured" ||
+		v.OrgDomain != "example.com" {
 		t.Fatalf("%+v", v)
 	}
 
@@ -276,7 +277,7 @@ func TestMailFromEqualsFromDomain(t *testing.T) {
 	// domains compare case-insensitively (RFC 5321 2.4, RFC 7208 4.3).
 	path := strings.Trim(msg.MailFrom, "<>")
 	at := strings.LastIndexByte(path, '@')
-	if !dmarc.Aligned("example.com", path[at+1:], dmarc.Strict) {
+	if ok, _ := dmarc.Aligned("example.com", path[at+1:], dmarc.Strict, nil); !ok {
 		t.Fatalf("MAIL FROM %q is not the From domain", msg.MailFrom)
 	}
 }

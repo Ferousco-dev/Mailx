@@ -46,3 +46,29 @@ func assertNoImports(t *testing.T, dir string, forbidden []string) {
 		}
 	}
 }
+
+// RFC 9989: the DNS Tree Walk is the only authority for the Organizational Domain.
+// The Public Suffix List, suffix matching and MailX's ownership-domain package must
+// not appear anywhere in the DMARC production code.
+func TestNoPSLOrSuffixMatchingInDMARCProduction(t *testing.T) {
+	assertNoImports(t, ".", []string{"publicsuffix", "internal/domain"})
+	files, _ := filepath.Glob("*.go")
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, banned := range []string{"strings.HasSuffix", "EffectiveTLDPlusOne", "PublicSuffix("} {
+			// Comments may mention them; code must not use them.
+			for _, line := range strings.Split(string(src), "\n") {
+				code, _, _ := strings.Cut(line, "//")
+				if strings.Contains(code, banned) {
+					t.Errorf("%s uses %s", f, banned)
+				}
+			}
+		}
+	}
+}
