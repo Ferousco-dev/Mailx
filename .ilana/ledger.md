@@ -146,3 +146,6 @@ fmt, vet, builds (darwin, linux/amd64), `go test -count=1 ./...` and `-race` wit
 
 ## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
 v0.29 complete pending commit. Not pushed. OPERATIONAL NOTE: recreating the compose service with the existing `.env` (which declares `MAILX_SENDING_IPS`) now requires `MAILX_SMTP_HOSTNAME`. Next: v0.30 suppression (not started); the first controlled Internet-delivery test is a separate explicit action.
+
+## 2026-09-21 | DECISION | conductor | low-memory PostgreSQL profile
+User asked for the tested PostgreSQL settings as an opt-in profile (DEC-077). Added `compose.low-memory.yaml` (durability pinned on), `docs/low-memory-deployment.md`, startup database-settings validation (`database.DB.ServerSettings`, `cmd/mailx/dbsettings.go`) and tests. Evidence: Compose applies the exact settings (checked in `pg_settings`); MailX is silent against the profile and warns four ways against a weakened server; full suite green against a `max_connections=20` server (six full runs, no connection errors). One earlier first-run of the suite against a fresh tuned database reported 5 non-ok lines that could not be reproduced in six later runs (including fresh-database first runs with and without the tuning); cause unknown, no evidence it is related to the tuning. The default `compose.yaml` is unchanged.

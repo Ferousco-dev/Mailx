@@ -97,6 +97,16 @@ docker compose down
 
 Use `docker compose down -v` only when you intentionally want to delete all local MailX, PostgreSQL, and Redis data.
 
+### Small hosts (about 1 GB RAM)
+
+An opt-in low-memory PostgreSQL profile is available for small deployments. It is not the default and it keeps PostgreSQL's durability settings on:
+
+```bash
+docker compose -f compose.yaml -f compose.low-memory.yaml up -d
+```
+
+See `docs/low-memory-deployment.md` for what it changes, the measured effect and the trade-offs.
+
 ## API example
 
 Every `/v1` endpoint requires a scoped MailX API key. Tenant and key management are deliberately operator-only CLI operations.

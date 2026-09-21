@@ -55,6 +55,7 @@ func runFull() error {
 		return err
 	}
 	defer db.Close()
+	warnDatabaseSettings(o, db)
 
 	ident, err := loadSMTPIdentity()
 	if err != nil {
