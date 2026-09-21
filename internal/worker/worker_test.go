@@ -89,6 +89,10 @@ type scriptedCoordinator struct {
 	// the desired number of concurrent Attempt calls.
 	delay   time.Duration
 	barrier chan struct{}
+	// entered, if non-nil, receives one value when Attempt has passed the
+	// canceled-context check and is committed to real work (before any
+	// barrier wait), so a test can cancel strictly after that point.
+	entered chan struct{}
 
 	// notify, if non-nil, receives one value after every completed
 	// Attempt call so tests can wait deterministically instead of polling.
@@ -99,6 +103,65 @@ type coordOutcome struct {
 	outcome retry.Outcome
 	err     error
 	panic   any // if non-nil, Attempt panics with this value instead
+}
+
+type fakeOutcomeStore struct {
+	mu       sync.Mutex
+	terminal map[string]bool
+	attempts map[string][]retry.DeliveryAttempt
+	next     map[string]time.Time
+	persist  func(context.Context, string, retry.DeliveryAttempt, retry.Outcome) error
+}
+
+func newFakeOutcomeStore() *fakeOutcomeStore {
+	return &fakeOutcomeStore{
+		terminal: map[string]bool{}, attempts: map[string][]retry.DeliveryAttempt{}, next: map[string]time.Time{},
+	}
+}
+
+func (s *fakeOutcomeStore) Load(_ context.Context, messageID string) (DurableDeliveryState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	state := &retry.State{}
+	for _, attempt := range s.attempts[messageID] {
+		var err error
+		if attempt.Decision != retry.TerminalSuccess {
+			err = &delivery.Error{Kind: attempt.Result.Kind, Temporary: attempt.Decision == retry.Retry, Err: errors.New("persisted")}
+		}
+		if recordErr := state.Record(attempt.Result, err); recordErr != nil {
+			return DurableDeliveryState{}, recordErr
+		}
+	}
+	var next *time.Time
+	if at, ok := s.next[messageID]; ok {
+		next = &at
+	}
+	return DurableDeliveryState{RetryState: state, Terminal: s.terminal[messageID], NextRetryAt: next}, nil
+}
+
+func (s *fakeOutcomeStore) Persist(ctx context.Context, messageID string, attempt retry.DeliveryAttempt, outcome retry.Outcome) error {
+	if s.persist != nil {
+		if err := s.persist(ctx, messageID, attempt, outcome); err != nil {
+			return err
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.attempts[messageID] {
+		if existing.Number == attempt.Number {
+			return nil
+		}
+	}
+	s.attempts[messageID] = append(s.attempts[messageID], attempt)
+	if outcome.Schedule != nil {
+		s.next[messageID] = outcome.Schedule.NextRetryAt
+	} else {
+		delete(s.next, messageID)
+	}
+	if attempt.Decision != retry.Retry {
+		s.terminal[messageID] = true
+	}
+	return nil
 }
 
 func newScriptedCoordinator() *scriptedCoordinator {
@@ -154,6 +217,12 @@ func (c *scriptedCoordinator) Attempt(ctx context.Context, state *retry.State, r
 		case <-time.After(c.delay):
 		}
 	}
+	if c.entered != nil {
+		select {
+		case c.entered <- struct{}{}:
+		default:
+		}
+	}
 	if c.barrier != nil {
 		<-c.barrier
 	}
@@ -189,7 +258,7 @@ func (c *scriptedCoordinator) totalAttempts() int { return int(atomic.LoadInt32(
 
 func mustPool(t *testing.T, q queue.Queue, l Loader, c Coordinator, cfg Config, opts ...Option) *Pool {
 	t.Helper()
-	p, err := NewPool(q, l, c, cfg, opts...)
+	p, err := NewPool(q, l, c, newFakeOutcomeStore(), cfg, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,25 +313,29 @@ func TestNewPoolValidation(t *testing.T) {
 	q := mustQ(t, 4)
 	l := newFakeLoader()
 	c := newScriptedCoordinator()
+	outcomes := newFakeOutcomeStore()
 
-	if _, err := NewPool(nil, l, c, Config{Workers: 1}); err == nil {
+	if _, err := NewPool(nil, l, c, outcomes, Config{Workers: 1}); err == nil {
 		t.Fatal("nil queue must be rejected")
 	}
-	if _, err := NewPool(q, nil, c, Config{Workers: 1}); err == nil {
+	if _, err := NewPool(q, nil, c, outcomes, Config{Workers: 1}); err == nil {
 		t.Fatal("nil loader must be rejected")
 	}
-	if _, err := NewPool(q, l, nil, Config{Workers: 1}); err == nil {
+	if _, err := NewPool(q, l, nil, outcomes, Config{Workers: 1}); err == nil {
 		t.Fatal("nil coordinator must be rejected")
 	}
+	if _, err := NewPool(q, l, c, nil, Config{Workers: 1}); err == nil {
+		t.Fatal("nil outcome store must be rejected")
+	}
 	for _, n := range []int{0, -1, -100} {
-		if _, err := NewPool(q, l, c, Config{Workers: n}); !errors.Is(err, ErrInvalidWorkerCount) {
+		if _, err := NewPool(q, l, c, outcomes, Config{Workers: n}); !errors.Is(err, ErrInvalidWorkerCount) {
 			t.Fatalf("workers=%d: expected ErrInvalidWorkerCount, got %v", n, err)
 		}
 	}
-	if _, err := NewPool(q, l, c, Config{Workers: 1}); err != nil {
+	if _, err := NewPool(q, l, c, outcomes, Config{Workers: 1}); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
-	if _, err := NewPool(q, l, c, Config{Workers: 10000}); err != nil {
+	if _, err := NewPool(q, l, c, outcomes, Config{Workers: 10000}); err != nil {
 		t.Fatalf("large worker count rejected: %v", err)
 	}
 }
@@ -473,6 +546,7 @@ func TestRetryStatePersistsAcrossClaimReleaseClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.q = q2 // simulate the same pool continuing to run against fresh availability
+	p.now = func() time.Time { return sched1.NextRetryAt }
 	runPoolForAttempts(t, p, q2, 2, 2*time.Second)
 
 	if c.totalAttempts() != 2 {

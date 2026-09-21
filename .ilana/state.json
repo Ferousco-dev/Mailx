@@ -1,0 +1,45 @@
+{
+  "ilana_version": "1.0.3",
+  "project": "mailx",
+  "mode": "FLEET",
+  "phase": "08",
+  "gate": "G8",
+  "agent": "release-manager",
+  "process_style": "hybrid",
+  "rigour": 3,
+  "open": [],
+  "overrides": [],
+  "counters": {
+    "REQ": 0,
+    "NFR": 0,
+    "DOM": 0,
+    "DES": 8,
+    "TC": 0,
+    "DEF": 7,
+    "CR": 4,
+    "RSK": 11,
+    "DEC": 36,
+    "MET": 9,
+    "ETH": 1
+  },
+  "attempts": {
+    "G0": 1,
+    "G1": 1,
+    "G2": 1,
+    "G3": 1,
+    "G4": 1,
+    "G5": 1,
+    "G6": 1,
+    "G7": 1,
+    "G8": 1
+  },
+  "mailx": {
+    "last_completed_milestone": "v0.23",
+    "ilana_current_through": "v0.23",
+    "current_milestone": "none (v0.24 not started)",
+    "current_milestone_status": "v0.23 complete",
+    "next_milestone": "v0.24 (not started)",
+    "recovered_from_head": "481da4a",
+    "recovered_on": "2026-09-21"
+  }
+}

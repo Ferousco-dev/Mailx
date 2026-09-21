@@ -4,23 +4,27 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/api"
 	"github.com/Ferousco-dev/mailx/internal/auth"
+	"github.com/Ferousco-dev/mailx/internal/buildinfo"
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/delivery"
 	"github.com/Ferousco-dev/mailx/internal/dispatch"
 	"github.com/Ferousco-dev/mailx/internal/dns"
+	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/queue"
 	"github.com/Ferousco-dev/mailx/internal/retry"
 	"github.com/Ferousco-dev/mailx/internal/smtp"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 	"github.com/Ferousco-dev/mailx/internal/transfer"
+	"github.com/Ferousco-dev/mailx/internal/webhook"
 	"github.com/Ferousco-dev/mailx/internal/worker"
 )
 
@@ -34,8 +38,17 @@ func runFull() error {
 		return serve()
 	}
 
+	o, err := newObs()
+	if err != nil {
+		return err
+	}
+	slog.SetDefault(o.log)
 	ctx, stop := notifyShutdown()
 	defer stop()
+	info := buildinfo.Get()
+	o.log.Info("mailx_start", "http_addr", httpAddr(), "smtp_addr", smtpAddr(), "observability_addr", observabilityAddr(),
+		"version", info.Version, "commit", info.Commit)
+	defer o.log.Info("mailx_stop")
 
 	db, err := openDatabase(ctx)
 	if err != nil {
@@ -54,26 +67,76 @@ func runFull() error {
 		return err
 	}
 
-	disp := dispatch.New(db, q, dispatch.WithOnError(func(err error) { log.Printf("dispatch: %v", err) }))
-	pool, err := buildWorkerPool(q, store, db)
+	ready := readiness(db, q)
+	o.metrics.SetQueueDepth(q.Depth)
+
+	disp := dispatch.New(db, q, dispatch.WithOnError(o.errLogger("dispatch")),
+		dispatch.WithLogger(o.log), dispatch.WithMetrics(o.metrics))
+	pool, err := buildWorkerPool(q, store, db, o)
 	if err != nil {
 		return err
 	}
 	authSvc := auth.NewService(db, apiKeyPepper())
+	webhookRuntime, err := buildWebhookRuntime(db, o)
+	if err != nil {
+		return err
+	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
-		Ready: func(ctx context.Context) error { return db.Ping(ctx) },
+		Webhooks: webhookRuntime.service,
+		Ready:    ready.Check,
+		Logger:   o.log, Metrics: o.metrics,
 	})
 	if err != nil {
 		return err
 	}
-	return runComponents(ctx,
-		component{"smtp", func(ctx context.Context) error { return runSMTPReceiver(ctx, store) }},
-		component{"dispatch", disp.Run},
-		component{"worker", pool.Run},
-		component{"api", apiServer.Run},
-		component{"idempotency-cleanup", func(ctx context.Context) error { return runIdempotencyCleanup(ctx, db) }},
-	)
+	components := []component{
+		o.logged("smtp", func(ctx context.Context) error { return runSMTPReceiver(ctx, store, o) }),
+		o.logged("dispatch", disp.Run),
+		o.logged("worker", pool.Run),
+		o.logged("webhook-fanout", webhookRuntime.fanout.Run),
+		o.logged("webhook-worker", webhookRuntime.workers.Run),
+		o.logged("api", apiServer.Run),
+		o.logged("idempotency-cleanup", func(ctx context.Context) error { return runIdempotencyCleanup(ctx, db, o) }),
+	}
+	if addr := observabilityAddr(); addr != "" {
+		op := observability.NewServer(addr, observability.OperatorMux(o.metrics, ready))
+		components = append(components, o.logged("observability", op.Run))
+	}
+	return runComponents(ctx, components...)
+}
+
+type webhookComponents struct {
+	service *webhook.Service
+	fanout  *webhook.FanOut
+	workers *webhook.WorkerPool
+}
+
+func buildWebhookRuntime(db *database.DB, o obs) (webhookComponents, error) {
+	key, err := webhook.DecodeMasterKey(os.Getenv("MAILX_WEBHOOK_MASTER_KEY"))
+	if err != nil {
+		return webhookComponents{}, err
+	}
+	box, err := webhook.NewSecretBox(key)
+	if err != nil {
+		return webhookComponents{}, err
+	}
+	allowInsecure := envBool("MAILX_WEBHOOK_ALLOW_INSECURE")
+	policy := webhook.URLPolicy{AllowHTTP: allowInsecure, AllowPrivate: allowInsecure}
+	service, err := webhook.NewService(db, box, policy)
+	if err != nil {
+		return webhookComponents{}, err
+	}
+	onError := o.errLogger("webhook")
+	workers, err := webhook.NewWorkerPool(db, box, webhook.NewClient(policy), webhook.WorkerConfig{
+		Workers: envInt("MAILX_WEBHOOK_WORKERS", 4), ClaimLease: 30 * time.Second,
+	}, onError)
+	if err != nil {
+		return webhookComponents{}, err
+	}
+	service.WithLogger(o.log)
+	workers.WithObservability(o.log, o.metrics)
+	return webhookComponents{service: service, fanout: webhook.NewFanOut(db, onError), workers: workers}, nil
 }
 
 // idempotencyCleanupInterval/Batch are deliberately conservative: this
@@ -86,7 +149,7 @@ const (
 	idempotencyCleanupBatch    = 1000
 )
 
-func runIdempotencyCleanup(ctx context.Context, db *database.DB) error {
+func runIdempotencyCleanup(ctx context.Context, db *database.DB, o obs) error {
 	ticker := time.NewTicker(idempotencyCleanupInterval)
 	defer ticker.Stop()
 	for {
@@ -96,11 +159,11 @@ func runIdempotencyCleanup(ctx context.Context, db *database.DB) error {
 		case <-ticker.C:
 			n, err := db.DeleteExpiredIdempotencyKeys(ctx, time.Now().UTC(), idempotencyCleanupBatch)
 			if err != nil {
-				log.Printf("idempotency-cleanup: %v", err)
+				o.log.Warn("idempotency_cleanup_failed", "error", err.Error())
 				continue
 			}
 			if n > 0 {
-				log.Printf("idempotency-cleanup: removed %d expired key(s)", n)
+				o.log.Info("idempotency_cleanup", "removed", n)
 			}
 		}
 	}
@@ -173,7 +236,7 @@ func apiKeyPepper() []byte {
 	if p := os.Getenv("MAILX_API_KEY_PEPPER"); p != "" {
 		return []byte(p)
 	}
-	log.Println("MailX: MAILX_API_KEY_PEPPER is not set — API key verifiers are unkeyed SHA-256 (see internal/auth's doc). Fine for local development; set a pepper before handling real credentials.")
+	slog.Warn("api_key_pepper_not_set", "detail", "API key verifiers are unkeyed SHA-256; fine for local development, set MAILX_API_KEY_PEPPER before handling real credentials")
 	return nil
 }
 
@@ -193,7 +256,7 @@ func openRedisQueue() (*queue.RedisQueue, error) {
 	return q, nil
 }
 
-func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB) (*worker.Pool, error) {
+func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o obs) (*worker.Pool, error) {
 	client, err := smtp.NewClient(smtp.ClientConfig{Identity: "mailx.local"})
 	if err != nil {
 		return nil, err
@@ -212,42 +275,13 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB) (
 	}
 
 	workers := envInt("MAILX_WORKERS", 4)
-	pool, err := worker.NewPool(q, store, coordinator, worker.Config{Workers: workers},
-		worker.WithOnError(func(err error) { log.Printf("worker: %v", err) }),
-		worker.WithStatusReporter(func(ctx context.Context, messageID string, status retry.LifecycleStatus, deliveredAt time.Time) {
-			reportStatus(ctx, db, messageID, status, deliveredAt)
-		}),
+	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db}, worker.Config{Workers: workers},
+		worker.WithOnError(o.errLogger("worker")), worker.WithLogger(o.log), worker.WithMetrics(o.metrics),
 	)
 	if err != nil {
 		return nil, err
 	}
 	return pool, nil
-}
-
-// reportStatus translates a retry-level outcome into the durable public
-// status (see internal/database's StatusRetrying doc) — best-effort: a
-// failure to record it is logged, never fatal, since the retry/queue
-// state itself (the thing that actually controls redelivery) is already
-// durable independent of this.
-func reportStatus(ctx context.Context, db *database.DB, messageID string, status retry.LifecycleStatus, deliveredAt time.Time) {
-	var dbStatus database.MessageStatus
-	var delivered *time.Time
-	switch status {
-	case retry.StatusSucceeded:
-		dbStatus = database.StatusDelivered
-		delivered = &deliveredAt
-	case retry.StatusFailed, retry.StatusExhausted:
-		dbStatus = database.StatusFailed
-	case retry.StatusRetryable:
-		dbStatus = database.StatusRetrying
-	default:
-		return
-	}
-	updateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := db.UpdateMessageStatus(updateCtx, messageID, dbStatus, delivered); err != nil {
-		log.Printf("worker: report status for %s: %v", messageID, err)
-	}
 }
 
 func httpAddr() string {
@@ -273,4 +307,13 @@ func envDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }

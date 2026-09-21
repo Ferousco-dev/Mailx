@@ -28,14 +28,35 @@ func (e EventType) valid() bool {
 	return false
 }
 
+// PublicEventType maps internal lifecycle names to the stable developer API.
+// delivery_attempted is intentionally internal: deferred/delivered/failed are
+// the externally meaningful outcomes of an operation.
+func PublicEventType(e EventType) (string, bool) {
+	switch e {
+	case EventQueued:
+		return "email.queued", true
+	case EventDelivered:
+		return "email.delivered", true
+	case EventDeferred:
+		return "email.delivery_delayed", true
+	case EventFailed:
+		return "email.failed", true
+	case EventBounced:
+		return "email.bounced", true
+	default:
+		return "", false
+	}
+}
+
 // Event is one append-only lifecycle record.
 type Event struct {
-	ID         string
-	TenantID   string
-	MessageID  string
-	Type       EventType
-	OccurredAt time.Time
-	Metadata   map[string]any
+	ID                    string
+	TenantID              string
+	MessageID             string
+	Type                  EventType
+	OccurredAt            time.Time
+	Metadata              map[string]any
+	DeliveryAttemptNumber *int
 }
 
 // AppendEvent inserts one event. Metadata is small, genuinely
@@ -65,9 +86,9 @@ func (db *DB) AppendEvent(ctx context.Context, tenantID, messageID string, event
 	err = db.pool.QueryRow(ctx, `
 		INSERT INTO events (id, tenant_id, message_id, event_type, metadata)
 		VALUES ($1,$2,$3,$4,$5)
-		RETURNING id, tenant_id, message_id, event_type, occurred_at, metadata`,
+		RETURNING id, tenant_id, message_id, event_type, occurred_at, metadata, delivery_attempt_number`,
 		id, tenantID, messageID, eventType, metaJSON,
-	).Scan(&e.ID, &e.TenantID, &e.MessageID, &e.Type, &e.OccurredAt, &metaRaw)
+	).Scan(&e.ID, &e.TenantID, &e.MessageID, &e.Type, &e.OccurredAt, &metaRaw, &e.DeliveryAttemptNumber)
 	if err != nil {
 		return Event{}, fmt.Errorf("database: append event: %w", normalizeErr(err))
 	}
@@ -81,7 +102,7 @@ func (db *DB) AppendEvent(ctx context.Context, tenantID, messageID string, event
 // the future GET /emails/{id} timeline view.
 func (db *DB) ListMessageEvents(ctx context.Context, messageID string) ([]Event, error) {
 	rows, err := db.pool.Query(ctx, `
-		SELECT id, tenant_id, message_id, event_type, occurred_at, metadata
+		SELECT id, tenant_id, message_id, event_type, occurred_at, metadata, delivery_attempt_number
 		FROM events WHERE message_id = $1 ORDER BY occurred_at, id`,
 		messageID,
 	)
@@ -104,6 +125,16 @@ type EventCursor struct {
 // exactly; never joins messages (tenant_id is denormalized on events for
 // this reason).
 func (db *DB) ListTenantEvents(ctx context.Context, tenantID string, limit int, after *EventCursor) ([]Event, error) {
+	return db.listTenantEvents(ctx, tenantID, limit, after, false)
+}
+
+// ListTenantPublicEvents excludes internal bookkeeping events before applying
+// pagination, so an internal event cannot create a short or skipped API page.
+func (db *DB) ListTenantPublicEvents(ctx context.Context, tenantID string, limit int, after *EventCursor) ([]Event, error) {
+	return db.listTenantEvents(ctx, tenantID, limit, after, true)
+}
+
+func (db *DB) listTenantEvents(ctx context.Context, tenantID string, limit int, after *EventCursor, publicOnly bool) ([]Event, error) {
 	if tenantID == "" {
 		return nil, errors.New("database: tenant ID is empty")
 	}
@@ -117,13 +148,14 @@ func (db *DB) ListTenantEvents(ctx context.Context, tenantID string, limit int, 
 		afterID = &after.ID
 	}
 	rows, err := db.pool.Query(ctx, `
-		SELECT id, tenant_id, message_id, event_type, occurred_at, metadata
+		SELECT id, tenant_id, message_id, event_type, occurred_at, metadata, delivery_attempt_number
 		FROM events
 		WHERE tenant_id = $1
 		  AND ($2::timestamptz IS NULL OR (occurred_at, id) < ($2, $3))
+		  AND (NOT $5 OR event_type IN ('queued','delivered','deferred','failed','bounced'))
 		ORDER BY occurred_at DESC, id DESC
 		LIMIT $4`,
-		tenantID, afterTime, afterID, limit,
+		tenantID, afterTime, afterID, limit, publicOnly,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("database: list tenant events: %w", normalizeErr(err))
@@ -141,7 +173,7 @@ func scanEvents(rows interface {
 	for rows.Next() {
 		var e Event
 		var metaRaw []byte
-		if err := rows.Scan(&e.ID, &e.TenantID, &e.MessageID, &e.Type, &e.OccurredAt, &metaRaw); err != nil {
+		if err := rows.Scan(&e.ID, &e.TenantID, &e.MessageID, &e.Type, &e.OccurredAt, &metaRaw, &e.DeliveryAttemptNumber); err != nil {
 			return nil, fmt.Errorf("database: scan event: %w", err)
 		}
 		if err := json.Unmarshal(metaRaw, &e.Metadata); err != nil {

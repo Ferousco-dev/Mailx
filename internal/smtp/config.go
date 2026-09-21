@@ -33,6 +33,8 @@ type Config struct {
 	// MaxRecipients caps RCPT TO entries in one transaction. Zero selects
 	// DefaultMaxRecipients.
 	MaxRecipients int
+	// Observer receives session events; nil disables observation.
+	Observer Observer
 }
 
 func DefaultConfig() Config {

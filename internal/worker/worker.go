@@ -10,10 +10,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/delivery"
+	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/queue"
 	"github.com/Ferousco-dev/mailx/internal/retry"
 	"github.com/Ferousco-dev/mailx/internal/storage"
@@ -21,7 +23,11 @@ import (
 
 var ErrInvalidWorkerCount = errors.New("worker: worker count must be positive")
 
-const bookkeepingTimeout = 5 * time.Second
+const (
+	bookkeepingTimeout = 5 * time.Second
+	// claimRetryDelay is the pause after a failed queue claim.
+	claimRetryDelay = time.Second
+)
 
 // Loader and Coordinator are narrow interfaces so tests can substitute
 // deterministic fakes; *storage.FileStore and *retry.Coordinator satisfy
@@ -52,30 +58,37 @@ func WithOnError(fn func(error)) Option {
 	return func(p *Pool) { p.onError = fn }
 }
 
-// WithStatusReporter reports each job's lifecycle outcome (message ID,
-// retry status, and — only for StatusSucceeded — when delivery finished)
-// so a caller can durably persist it (e.g. internal/database.
-// UpdateMessageStatus) without worker itself depending on any storage
-// backend. Best-effort: called synchronously, after Ack/Release has
-// already happened, so a reporter failure never blocks queue progress.
-func WithStatusReporter(fn func(ctx context.Context, messageID string, status retry.LifecycleStatus, deliveredAt time.Time)) Option {
-	return func(p *Pool) { p.statusFn = fn }
+// WithLogger installs a structured logger. Records carry job/message IDs and
+// bounded categories only (never recipients, domains, or remote SMTP text).
+func WithLogger(l *slog.Logger) Option {
+	return func(p *Pool) {
+		if l != nil {
+			p.log = l
+		}
+	}
+}
+
+// WithMetrics installs the aggregate metrics sink; nil disables metrics.
+func WithMetrics(m *observability.Metrics) Option {
+	return func(p *Pool) { p.metrics = m }
 }
 
 type Pool struct {
+	log          *slog.Logger
+	metrics      *observability.Metrics
 	q            queue.Queue
 	loader       Loader
 	coordinator  Coordinator
+	outcomes     OutcomeStore
 	workers      int
 	reportingMTA string
 	now          func() time.Time
 	onError      func(error)
-	statusFn     func(ctx context.Context, messageID string, status retry.LifecycleStatus, deliveredAt time.Time)
 	states       *stateStore
 	wg           sync.WaitGroup
 }
 
-func NewPool(q queue.Queue, loader Loader, coordinator Coordinator, cfg Config, opts ...Option) (*Pool, error) {
+func NewPool(q queue.Queue, loader Loader, coordinator Coordinator, outcomes OutcomeStore, cfg Config, opts ...Option) (*Pool, error) {
 	if q == nil {
 		return nil, errors.New("worker: queue must not be nil")
 	}
@@ -84,6 +97,9 @@ func NewPool(q queue.Queue, loader Loader, coordinator Coordinator, cfg Config, 
 	}
 	if coordinator == nil {
 		return nil, errors.New("worker: coordinator must not be nil")
+	}
+	if outcomes == nil {
+		return nil, errors.New("worker: outcome store must not be nil")
 	}
 	if cfg.Workers <= 0 {
 		return nil, ErrInvalidWorkerCount
@@ -96,11 +112,12 @@ func NewPool(q queue.Queue, loader Loader, coordinator Coordinator, cfg Config, 
 		q:            q,
 		loader:       loader,
 		coordinator:  coordinator,
+		outcomes:     outcomes,
 		workers:      cfg.Workers,
 		reportingMTA: reportingMTA,
 		now:          func() time.Time { return time.Now().UTC() },
 		onError:      func(error) {},
-		statusFn:     func(context.Context, string, retry.LifecycleStatus, time.Time) {},
+		log:          observability.Discard(),
 		states:       newStateStore(),
 	}
 	for _, opt := range opts {
@@ -130,8 +147,27 @@ func (p *Pool) runWorker(ctx context.Context) {
 		}
 		c, err := p.q.Claim(ctx)
 		if err != nil {
-			return
+			// Shutdown or a closed queue ends the worker. Any other error is a
+			// transient backend outage (e.g. Redis down): keep the worker alive,
+			// back off, and resume when the queue recovers, so a dependency
+			// outage never takes the whole process (and its liveness) down.
+			if ctx.Err() != nil || errors.Is(err, queue.ErrQueueClosed) {
+				return
+			}
+			p.metrics.QueueOp("claim", err)
+			p.onError(fmt.Errorf("worker: claim: %w", err))
+			p.log.Error("queue_claim_failed")
+			timer := time.NewTimer(claimRetryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			continue
 		}
+		p.metrics.QueueOp("claim", nil)
+		p.log.Debug("queue_claimed", "job_id", c.Job.ID, "message_id", c.Job.MessageID)
 		p.safeProcess(ctx, c)
 	}
 }
@@ -142,26 +178,47 @@ func (p *Pool) safeProcess(ctx context.Context, c queue.Claim) {
 	defer func() {
 		if r := recover(); r != nil {
 			p.onError(fmt.Errorf("worker: recovered panic processing job %s: %v", c.Job.ID, r))
-			p.releaseBestEffort(c, p.now())
+			p.log.Error("worker_panic", "job_id", c.Job.ID, "message_id", c.Job.MessageID)
+			// Once final DATA was accepted, releasing here would knowingly make
+			// the same SMTP transmission eligible again. Keep the claim; Redis
+			// lease recovery plus durable-state loading handles a later reclaim.
+			if state, ok := p.states.lookup(c.Job.ID); ok {
+				if latest, exists := state.Latest(); exists && latest.Result.Accepted {
+					return
+				}
+			}
+			p.release(c, p.now())
 		}
 	}()
 	p.processOne(ctx, c)
 }
 
-// releaseBestEffort uses a fresh context so bookkeeping still completes
-// after the pool's own shutdown context has been canceled.
-func (p *Pool) releaseBestEffort(c queue.Claim, availableAt time.Time) {
+// release uses a fresh context so bookkeeping still completes after the
+// pool's own shutdown context has been canceled.
+func (p *Pool) release(c queue.Claim, availableAt time.Time) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), bookkeepingTimeout)
 	defer cancel()
-	if err := p.q.Release(ctx, c.Job.ID, c.Token, availableAt); err != nil {
+	err := p.q.Release(ctx, c.Job.ID, c.Token, availableAt)
+	p.metrics.QueueOp("release", err)
+	if err != nil {
 		p.onError(fmt.Errorf("worker: release job %s: %w", c.Job.ID, err))
+		p.log.Error("queue_release_failed", "job_id", c.Job.ID, "message_id", c.Job.MessageID)
+		return false
 	}
+	p.log.Info("queue_released", "job_id", c.Job.ID, "message_id", c.Job.MessageID, "available_at", availableAt.UTC())
+	return true
 }
 
-func (p *Pool) ackBestEffort(c queue.Claim) {
+func (p *Pool) ack(c queue.Claim) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), bookkeepingTimeout)
 	defer cancel()
-	if err := p.q.Ack(ctx, c.Job.ID, c.Token); err != nil {
+	err := p.q.Ack(ctx, c.Job.ID, c.Token)
+	p.metrics.QueueOp("ack", err)
+	if err != nil {
 		p.onError(fmt.Errorf("worker: ack job %s: %w", c.Job.ID, err))
+		p.log.Error("queue_ack_failed", "job_id", c.Job.ID, "message_id", c.Job.MessageID)
+		return false
 	}
+	p.log.Info("queue_acked", "job_id", c.Job.ID, "message_id", c.Job.MessageID)
+	return true
 }

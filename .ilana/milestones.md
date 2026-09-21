@@ -1,0 +1,56 @@
+# MailX Milestone History (v0.1 -> v0.23)
+
+Recovered 2026-09-21 from Git history (50 commits, `1218cf8`..`481da4a`) and the code at HEAD `481da4a`.
+Method: commit diffs, package doc comments, migrations, and in-code `vX.Y` labels. No git tags exist.
+
+**Evidence grades.** `LABELED` = the repo itself names the version (commit subject or code comment).
+`INFERRED` = mapped by commit order/content; the version number is not written in the repo.
+`UNAVAILABLE` = history cannot establish it. Nothing below is taken from memory or old prompts.
+
+**Boundary caveats.** Several milestones landed in one commit, and the four review-fix commits
+after v0.20 carry no version label. Milestone-to-commit mapping for v0.1-v0.6 is INFERRED (six
+feature/fix commits, in order). The repository never recorded per-milestone completion dates beyond
+commit dates (all v0.1-v0.15 work is dated 2026-09-13..15).
+
+## Milestones
+
+| Ver | Topic | Commit(s) | Grade | Summary (verified in code) |
+| --- | --- | --- | --- | --- |
+| pre | Repo scaffolding | `1218cf8`..`b4ee290` | n/a | Initial commit, README, CoC, CONTRIBUTING, LICENSE, SECURITY, issue templates, CI (`commit-policy.yml`, Go CI, `security.yml` with govulncheck). No product code. |
+| v0.1 | SMTP handshake | `09cec8f` | INFERRED | Root `main.go` TCP server: `220` greeting, EHLO/HELO, MAIL FROM, RCPT TO, DATA, QUIT, printed received mail to stdout. Every command answered `250 OK` without validation. |
+| v0.2 | SMTP session state | `5c753c4` | INFERRED | Command-order state machine; out-of-sequence commands get `503 Bad sequence of commands`. |
+| v0.3/v0.4 | Envelope/Message split + MIME parsing | `7567efc` | INFERRED (two milestones' worth in one commit; exact split UNAVAILABLE) | `internal/mail`: `Envelope` (MAIL FROM + RCPT TO) separate from `Message` (headers/bodies/attachments); parser handles multipart/alternative and mixed, nesting depth limit, transfer-encoding decode, attachments, address lists, raw preserved. Server moved to `internal/smtp/server.go`, entry to `cmd/mailx`. |
+| v0.5 | Local persistence | `2447ed5` (+ merges `c9448e2`, `8e45819`, `651b125`) | INFERRED | `internal/storage.FileStore`: per-message dir with `message.eml`, `metadata.json`, attachments; MailX-owned message ID separate from untrusted `Message-ID` header; `mailx list` / `mailx inspect`. |
+| v0.6 | SMTP hardening | `7a6cff3`, `147b252` | INFERRED | Command-line limit (512), message size cap (10 MiB, canonical bytes), max connections (100), max recipients (100), read/write timeouts, robustness/size tests; storage persistence fixes. |
+| v0.7 | Outbound SMTP client | `b475d67` | LABELED (`client.go`, `delivery.go`) | `internal/smtp` client: dial, greeting, EHLO/HELO, MAIL, RCPT (all-or-error), DATA with CRLF normalization + dot-stuffing, QUIT. `DeliveryResult.Accepted` true only after 2xx to DATA terminator; QUIT failure recorded but does not un-accept. Also a listener abstraction. |
+| v0.8 | Transfer abstraction | `b475d67` | LABELED (`transfer.go`) | `internal/transfer`: one SMTP attempt to a known host:port -> structured `Result` (attempt ID, stage, temp/perm, code, enhanced status, remote text, QuitError). No DNS/retry. |
+| v0.9 | DNS / MX discovery | `b475d67` | LABELED (`resolver.go`) | `internal/dns`: MX lookup, RFC 7505 Null MX, implicit-MX fallback (RFC 5321 5.1), NXDOMAIN vs temporary distinction, ASCII-only domains, `MaxCandidates=32`, host safety filter, fuzz corpus. |
+| v0.10 | Synchronous delivery engine | `b475d67` | LABELED (`delivery.go`) | `internal/delivery`: DNS + transfer; MX candidates by preference (equal-preference shuffle); falls back to next MX only on pre-session failures (dial/greeting/EHLO/HELO); once the remote engaged in MAIL/RCPT/DATA its answer is final. Never queues, never retries, never re-opens a connection after acceptance. Result `Kind`s. |
+| v0.11 | Retry engine | `2c70b50` | LABELED (code refers to "v0.11 retry") | `internal/retry`: `Decide` (accepted => success even if err set; temp DNS/transfer => Retry; everything else, incl. unknown, => terminal), exponential backoff 30m base / 4h cap, 5 total operations, `State`, `Coordinator.Attempt` does exactly one operation and never waits. |
+| v0.12 | Bounce / DSN | `ecdab15` | LABELED (code: "v0.12's DSN generation") | `internal/bounce`: failure classification, RFC 3463 enhanced status parsing, per-recipient status, RFC 3464 multipart/report generation (headers only, never original body), null reverse-path + bounce-loop refusal. **Generation only: DSNs are never sent** (see limitations). |
+| v0.13 | Queue | `ecdab15` | LABELED (`queue` tests) | `internal/queue`: bounded in-memory `Queue` interface, claim tokens, delayed availability, at-least-once, duplicate-active-ID no-op. |
+| v0.14 | Worker pool | `ecdab15` | LABELED | `internal/worker`: fixed N goroutines (no goroutine-per-job), claim -> retry coordinator -> Ack/Release, panic containment, graceful shutdown. |
+| v0.15 | PostgreSQL persistence | `ecdab15` | LABELED (migration 000001) | `internal/database` (pgx): migrations 000001-000002; tenants/messages/recipients/delivery_attempts/events; TEXT crypto-random IDs; tenant_id everywhere from day one; raw MIME NOT in DB (stays in FileStore, same ID); indexes derived from real query plans (EXPLAIN tests). Also fix: propagate remote SMTP diagnostic text. |
+| v0.16 | Redis distributed queue | `cca7289` (+ merge `c59b3a9`) | LABELED | `RedisQueue`: 4 atomic Lua scripts (enqueue/claim/ack/release), two ZSETs + job hash, claim lease + bounded reclaim sweep, ownership token checked atomically on Ack/Release; shared parity tests with MemoryQueue. `retry.State` deliberately NOT in Redis. |
+| v0.17 | Docker Compose | `d9c8bc9` | LABELED | `compose.yaml` (Postgres 16, Redis 7 AOF, mailx, one-shot `migrate` service), multi-stage non-root Dockerfile, `mailx migrate`, loopback-only host ports, SIGTERM graceful stop. |
+| v0.18 | Developer REST API | `bbe9b51`, `1bd1960`, `c9f723e`, `f0d9635`, `5ebd574`/`16e099b` (identical-subject duplicates), merges `df66c2b`, `72c78b2` | LABELED | stdlib `net/http` v1 API: `POST/GET /v1/emails`, cursor pagination, hand-written OpenAPI at `/openapi.json` + `/docs` with drift test; `internal/outbound` builds RFC 5322/2045 MIME (CRLF/header-injection rejection, Bcc envelope-only); **transactional outbox** (migration 000004) + `internal/dispatch` poller; `retrying` status (000005); recipient role uniqueness (000003); single binary now runs SMTP + dispatcher + worker + API. Follow-ups: race fix in panic test, CI Postgres/Redis services, x/text vuln bump, microsecond-precision test fix, mixed-domain sends rejected with 422 and component failure stops the process. |
+| v0.19 | API-key auth | `da7d257` | LABELED | `mx_<key_id>_<secret>`; verifier HMAC-SHA256(pepper, secret) (unkeyed SHA-256 fallback if no pepper); scopes checked in Go and in PostgreSQL CHECK; revoke/rotate (grace via `expires_at`); every auth failure => same generic 401; bootstrap only via CLI (`create-tenant`, `create-api-key`, `rotate-api-key`, `revoke-api-key`, `list-api-keys`), no public key-creation endpoint. |
+| v0.19-v0.20 review fixes | API-key + idempotency races | `8ba5264`, `ae0bc48`, `389c31d` | LABELED (bodies name v0.20) | Rotate under row lock (`FOR UPDATE`), rotating a revoked/expired key rejected, expiry re-checked atomically; migration 000008 fixes an index that could not serve its query (forward-fix, never edit applied 000006); idempotency completion requires matching fingerprint; same-fingerprint stalled original replays reclaimer's result instead of 500. |
+| v0.20 | HTTP idempotency | `75c0915` | LABELED | `Idempotency-Key` on `POST /v1/emails`; PK `(tenant_id, operation, key)`; SHA-256 fingerprint of validated request; claim via `INSERT .. ON CONFLICT DO NOTHING` with stale-claim reclaim; completion committed in the SAME transaction as message/outbox insert; 409 for same key/different payload; replay reflects current resource state (`Idempotency-Replayed: true`); periodic expired-row cleanup. |
+| v0.21 | DNS domain ownership | `6fb4d6b`, `3581def` | LABELED (code: "rejected in v0.21"; commit unlabeled) | `internal/domain` + migration 000009 + `/v1/domains` CRUD + `POST /v1/domains/{id}/verify`: TXT `_mailx-verification.<name>` = `mailx-verification=<token>`; ASCII/ICANN-suffix-only; only one tenant may hold ACTIVE VERIFIED ownership of a name (unique partial index), pending claims may overlap; new scopes `domains:read/write`. `3581def` accepts parameterized JSON content types. Verification does not imply SPF/DKIM/DMARC. **Verified ownership is not enforced on send** (see limitations). |
+| v0.21/v0.22 boundary | Durable delivery outcomes | `57ee1d0` | INFERRED (unlabeled; sits between the v0.21 and v0.22 commits; part of the v0.22 event-truth foundation) | Replaced best-effort post-Ack status reporter with `OutcomeStore`: attempt row + message status + immutable event persisted in ONE transaction (`PersistDeliveryOutcome`), *before* queue Ack/Release; worker loads durable state before SMTP so a reclaimed job never knowingly retransmits; queue gained `Renew` (lease refresh during DB outage); migration 000010 (`events.delivery_attempt_number`, unique per message+attempt). Retry state is now rebuilt from PostgreSQL on reclaim. |
+| v0.22 | Webhooks / events | `481da4a` | LABELED (migration 000011, OpenAPI) | Migration 000011 (subscriptions, deliveries, delivery attempts, `events.fanned_out_at`, scopes `webhooks:read/write`); `/v1/webhooks` CRUD, `rotate-secret`, `/deliveries`, `/v1/events`; fan-out worker + delivery worker pool inside the same binary; signed HTTP POST (HMAC-SHA256, `MailX-Webhook-*` headers); AES-256-GCM encrypted signing secrets (`MAILX_WEBHOOK_MASTER_KEY`); SSRF/DNS-rebinding defence at dial time; at-least-once with stable event ID. **COMPLETE.** |
+| v0.23 | Logs / observability | `feat: add operational observability` (after `481da4a`) | LABELED (SRS/design) | Also DEF-004: worker survives Redis claim failures. slog structured logs with correlation IDs; SMTP session IDs; private-content removal from SMTP sink log; Prometheus metrics on a separate operator listener with `/health/live` + `/health/ready` (PostgreSQL+Redis, 2 s bound); `RedisQueue.Ping/Depth`; build info via ldflags; 3 new env vars; no migrations. |
+
+## Roadmap position (verified 2026-09-21)
+
+- v0.22 Webhooks / Events: **COMPLETE** (`481da4a`).
+- v0.23 Logs / Observability: **COMPLETE** (validated 2026-09-21: fmt, vet, build, `go test`, `go test -race`, Compose e2e; see `git log` for the `feat: add operational observability` commit).
+- v0.24 (STARTTLS/TLS per SRS out-of-scope note): NOT STARTED. The repository does not define a v0.24 scope beyond that SRS mention; UNAVAILABLE otherwise.
+
+## Uncertain / unavailable
+
+- Exact v0.1-v0.6 numbering and the v0.3 vs v0.4 split (labels never written into the repo).
+- Whether `3581def` (JSON content types) and `57ee1d0` belong to v0.21, v0.22, or a hardening step: unlabeled.
+- Historical (v0.1-v0.22) test results were not re-run during the recovery; v0.23 validation is recorded in the ledger.
+- Human intent/dates for anything not in commit metadata.

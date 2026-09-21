@@ -57,6 +57,9 @@ func (s *Server) Serve(listener net.Listener) error {
 			// Immediate close keeps overload handling non-blocking and prevents
 			// rejected connections from creating more goroutines or wait queues.
 			_ = conn.Close()
+			if o := s.config.Observer; o != nil {
+				observe(o.SessionRejected)
+			}
 			continue
 		}
 		go s.handle(conn)

@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
+	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/storage"
+	"github.com/Ferousco-dev/mailx/internal/webhook"
 )
 
 const (
@@ -34,6 +37,11 @@ type Config struct {
 	// DomainResolver performs public TXT lookups for ownership verification.
 	// Nil selects the system resolver; tests inject a deterministic fake.
 	DomainResolver maildomain.TXTResolver
+	Webhooks       *webhook.Service
+	// Logger and Metrics are optional; nil disables the corresponding
+	// observation without changing request handling.
+	Logger  *slog.Logger
+	Metrics *observability.Metrics
 	// Ready reports whether MailX can currently meet POST /v1/emails'
 	// durability contract (e.g. a live PostgreSQL ping) — see
 	// GET /health/ready's doc for why this must not be a fake check.
@@ -52,6 +60,9 @@ func (c Config) validate() error {
 	}
 	if c.Auth == nil {
 		return errors.New("api: Auth is nil")
+	}
+	if c.Webhooks == nil {
+		return errors.New("api: Webhooks is nil")
 	}
 	if c.Ready == nil {
 		return errors.New("api: Ready is nil")
@@ -82,8 +93,12 @@ func NewServer(cfg Config) (*Server, error) {
 		defer cancel()
 		return cfg.Ready(ctx)
 	}
-	mux := newMux(h, cfg.Auth, readiness, domainService)
-	handler := chain(mux, withRecoverMiddleware, withRequestIDMiddleware, limitBody)
+	mux := newMux(h, cfg.Auth, readiness, routeServices{domains: domainService, webhooks: cfg.Webhooks})
+	log := cfg.Logger
+	if log == nil {
+		log = observability.Discard()
+	}
+	handler := chain(mux, withRequestIDMiddleware(log, cfg.Metrics), withRecoverMiddleware(log), limitBody)
 
 	return &Server{httpServer: &http.Server{
 		Addr:              cfg.Addr,

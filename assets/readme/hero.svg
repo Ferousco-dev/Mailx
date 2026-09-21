@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="420" viewBox="0 0 1200 420" role="img" aria-labelledby="title desc">
+  <title id="title">MailX</title>
+  <desc id="desc">Developer-first email infrastructure built from the protocol up in Go</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#071426"/><stop offset=".58" stop-color="#102A43"/><stop offset="1" stop-color="#183B56"/></linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#21D4FD"/><stop offset="1" stop-color="#6C63FF"/></linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="22"/></filter>
+  </defs>
+  <rect width="1200" height="420" rx="28" fill="url(#bg)"/>
+  <circle cx="1030" cy="55" r="180" fill="#21D4FD" opacity=".08"/><circle cx="1130" cy="360" r="240" fill="#6C63FF" opacity=".09"/>
+  <path d="M0 346C180 298 296 388 475 346s310-70 485-22 240 20 240 20v76H0z" fill="#fff" opacity=".025"/>
+  <g transform="translate(118 92)">
+    <circle cx="116" cy="116" r="110" fill="#21D4FD" opacity=".13" filter="url(#glow)"/>
+    <rect x="20" y="42" width="192" height="148" rx="28" fill="none" stroke="url(#accent)" stroke-width="10"/>
+    <path d="M29 58l87 72 87-72" fill="none" stroke="url(#accent)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M29 177l61-57m113 57l-61-57" fill="none" stroke="#21D4FD" stroke-width="7" stroke-linecap="round" opacity=".72"/>
+    <path d="M180 20h46m-35 22h54" stroke="#fff" stroke-width="7" stroke-linecap="round" opacity=".76"/>
+  </g>
+  <g font-family="Inter,Segoe UI,Arial,sans-serif">
+    <text x="430" y="154" fill="#fff" font-size="94" font-weight="750" letter-spacing="-4">MailX</text>
+    <text x="434" y="207" fill="#B7C9DC" font-size="25" font-weight="500">Developer-first email infrastructure</text>
+    <text x="434" y="242" fill="#B7C9DC" font-size="25" font-weight="500">built from the protocol up in Go.</text>
+    <g transform="translate(434 288)" font-size="15" font-weight="650" letter-spacing=".5">
+      <rect width="88" height="38" rx="19" fill="#21D4FD" opacity=".14"/><text x="44" y="25" text-anchor="middle" fill="#6EE7FF">GO</text>
+      <rect x="100" width="136" height="38" rx="19" fill="#6C63FF" opacity=".17"/><text x="168" y="25" text-anchor="middle" fill="#BDB9FF">POSTGRESQL</text>
+      <rect x="248" width="96" height="38" rx="19" fill="#F43F5E" opacity=".14"/><text x="296" y="25" text-anchor="middle" fill="#FDA4AF">REDIS</text>
+      <rect x="356" width="100" height="38" rx="19" fill="#fff" opacity=".08"/><text x="406" y="25" text-anchor="middle" fill="#D7E3EF">SMTP</text>
+    </g>
+  </g>
+</svg>

@@ -1,0 +1,178 @@
+package observability
+
+import (
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/Ferousco-dev/mailx/internal/buildinfo"
+)
+
+func newTestMetrics(t *testing.T) *Metrics {
+	t.Helper()
+	m, err := NewMetrics(buildinfo.Info{Version: "v-test", Commit: "c-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func gather(t *testing.T, m *Metrics) map[string]bool {
+	t.Helper()
+	fams, err := m.Registry().Gather() // pedantic registry: fails on any inconsistency
+	if err != nil {
+		t.Fatalf("pedantic gather: %v", err)
+	}
+	names := map[string]bool{}
+	for _, f := range fams {
+		names[f.GetName()] = true
+		for _, metric := range f.GetMetric() {
+			if len(metric.GetLabel()) > 3 {
+				t.Fatalf("%s has %d labels", f.GetName(), len(metric.GetLabel()))
+			}
+		}
+		if strings.Contains(f.GetName(), "duration") && !strings.HasSuffix(f.GetName(), "_seconds") {
+			t.Fatalf("duration metric %s is not in seconds", f.GetName())
+		}
+	}
+	return names
+}
+
+func TestEveryMetricFamilyIsExposed(t *testing.T) {
+	m := newTestMetrics(t)
+	m.SetQueueDepth(func(context.Context) (int64, error) { return 3, nil })
+	m.HTTPRequest("GET", "/v1/emails", 200, time.Millisecond)
+	m.SMTPSessionStarted()
+	m.SMTPSessionEnded("completed")
+	m.SMTPSessionRejected()
+	m.SMTPMessage("accepted")
+	m.DeliveryAttempt("accepted", "terminal_success", time.Second)
+	m.QueueOp("claim", nil)
+	m.WebhookAttempt("succeeded", time.Millisecond)
+	names := gather(t, m)
+	for _, want := range []string{
+		"mailx_build_info", "mailx_http_requests_total", "mailx_http_request_duration_seconds",
+		"mailx_smtp_sessions_total", "mailx_smtp_active_sessions", "mailx_smtp_messages_total",
+		"mailx_delivery_attempts_total", "mailx_delivery_attempt_duration_seconds",
+		"mailx_queue_operations_total", "mailx_queue_depth", "mailx_webhook_attempts_total",
+		"mailx_webhook_attempt_duration_seconds", "go_goroutines",
+	} {
+		if !names[want] {
+			t.Errorf("family %s missing", want)
+		}
+	}
+	for name := range names {
+		if strings.HasSuffix(name, "_total") == false && strings.Contains(name, "attempts") && !strings.Contains(name, "duration") {
+			t.Errorf("counter %s lacks _total", name)
+		}
+	}
+}
+
+func TestLabelValuesAreBounded(t *testing.T) {
+	m := newTestMetrics(t)
+	m.HTTPRequest("BREW", "/v1/emails", 799, 0)
+	m.SMTPSessionStarted()
+	m.SMTPSessionEnded("user@example.com")
+	m.SMTPMessage("secret-body")
+	m.DeliveryAttempt("550 mailbox unknown for bob@example.com", "weird", 0)
+	m.QueueOp("delete_everything", errors.New("boom for bob@example.com"))
+	m.WebhookAttempt("https://evil.example/hook", 0)
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+	for _, banned := range []string{"BREW", "user@example.com", "secret-body", "550 mailbox", "bob@example", "delete_everything", "evil.example", `status_class="7xx"`} {
+		if strings.Contains(body, banned) {
+			t.Fatalf("unbounded label value %q reached exposition", banned)
+		}
+	}
+	if !strings.Contains(body, `method="other"`) || !strings.Contains(body, `kind="other"`) || !strings.Contains(body, `status_class="other"`) {
+		t.Fatal("unexpected values must collapse to \"other\"")
+	}
+}
+
+func TestMetricsHandlerContentTypeAndBuildInfo(t *testing.T) {
+	m := newTestMetrics(t)
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if rec.Code != 200 || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/plain") {
+		t.Fatalf("code=%d content-type=%q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+	if !strings.Contains(rec.Body.String(), `mailx_build_info{commit="c-test",version="v-test"} 1`) {
+		t.Fatal("build info missing from exposition")
+	}
+}
+
+func TestQueueDepthCollectionFailureCountsErrorAndEmitsNoSample(t *testing.T) {
+	m := newTestMetrics(t)
+	m.SetQueueDepth(func(context.Context) (int64, error) { return 0, errors.New("redis down") })
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	body := rec.Body.String()
+	if strings.Contains(body, "mailx_queue_depth ") || !strings.Contains(body, "mailx_queue_depth_errors_total 1") {
+		t.Fatalf("depth failure handling wrong:\n%s", body)
+	}
+	if strings.Contains(body, "redis down") {
+		t.Fatal("error text leaked into metrics")
+	}
+	m.SetQueueDepth(func(context.Context) (int64, error) { panic("depth panic") })
+	rec = httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	if rec.Code != 200 {
+		t.Fatalf("panicking depth source broke scrape: %d", rec.Code)
+	}
+}
+
+func TestNilMetricsIsInert(t *testing.T) {
+	var m *Metrics
+	m.HTTPRequest("GET", "/x", 200, 0)
+	m.SMTPSessionStarted()
+	m.SMTPSessionEnded("completed")
+	m.SMTPSessionRejected()
+	m.SMTPMessage("accepted")
+	m.DeliveryAttempt("accepted", "retry", 0)
+	m.QueueOp("ack", nil)
+	m.WebhookAttempt("failed", 0)
+	m.SetQueueDepth(nil)
+}
+
+func TestMetricsRecoverFromInternalPanic(t *testing.T) {
+	m := newTestMetrics(t)
+	m.httpTotal = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "wrong"}, []string{"only_one"})
+	m.HTTPRequest("GET", "/x", 200, 0) // label-count mismatch panics inside; must be swallowed
+}
+
+func TestOperatorMuxIsolationAndMetricsEndpoint(t *testing.T) {
+	m := newTestMetrics(t)
+	srv := httptest.NewServer(OperatorMux(m, NewReadiness(nil)))
+	defer srv.Close()
+	get := func(path string) (int, string) {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	if code, _ := get("/metrics"); code != 200 {
+		t.Fatalf("/metrics = %d", code)
+	}
+	for _, p := range []string{"/v1/emails", "/v1/webhooks", "/openapi.json", "/docs"} {
+		if code, _ := get(p); code != 404 {
+			t.Fatalf("operator listener served %s (%d)", p, code)
+		}
+	}
+}
+
+func scrape(m *Metrics) string {
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
+	return rec.Body.String()
+}

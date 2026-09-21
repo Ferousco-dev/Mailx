@@ -88,7 +88,7 @@ func setupMuxNoAuth(t *testing.T) (http.Handler, *database.DB, database.Tenant, 
 	h := newEmailHandler(db, store)
 	authSvc := auth.NewService(db, nil)
 	gen, _, err := authSvc.Create(context.Background(), tenant.ID, "test key",
-		[]string{string(auth.ScopeEmailsSend), string(auth.ScopeEmailsRead), string(auth.ScopeDomainsRead), string(auth.ScopeDomainsWrite)}, nil)
+		[]string{string(auth.ScopeEmailsSend), string(auth.ScopeEmailsRead), string(auth.ScopeDomainsRead), string(auth.ScopeDomainsWrite), string(auth.ScopeWebhooksRead), string(auth.ScopeWebhooksWrite)}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

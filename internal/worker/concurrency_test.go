@@ -242,6 +242,7 @@ func TestShutdownWithInFlightAttemptCompletesAckCleanly(t *testing.T) {
 	l.put("m1", envelopeFor("<a@x>", "<b@y>"), "x\r\n")
 	c := newScriptedCoordinator()
 	c.barrier = make(chan struct{})
+	c.entered = make(chan struct{}, 1)
 	c.script("<a@x>", coordOutcome{outcome: retry.Outcome{Status: retry.StatusSucceeded, Result: delivery.Result{Accepted: true}}})
 
 	p := mustPool(t, q, l, c, Config{Workers: 1})
@@ -253,13 +254,14 @@ func TestShutdownWithInFlightAttemptCompletesAckCleanly(t *testing.T) {
 	done := make(chan struct{})
 	go func() { p.Run(ctx); close(done) }()
 
-	// Wait until the loader has been called (proves the worker claimed
-	// and started processing) before cancelling — deterministic via the
-	// loader's own notify channel.
+	// Wait until Attempt itself is in flight. Waiting only for Load was a
+	// race: cancel() could land before Attempt started, and the real
+	// coordinator (and this fake) then short-circuit on the canceled
+	// context, releasing the job instead of acking it.
 	select {
-	case <-l.notify:
-	case <-time.After(2 * time.Second):
-		t.Fatal("worker never reached Load")
+	case <-c.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker never reached Attempt")
 	}
 	cancel() // shutdown requested WHILE Attempt is blocked on the barrier
 

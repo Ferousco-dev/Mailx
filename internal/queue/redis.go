@@ -3,7 +3,7 @@
 // State machine: a job is at all times represented by a HASH
 // (mailx:queue:<ns>:job:<id>, the Job fields + owning token) and exactly one
 // membership in one of two ZSETs: "available" (score = AvailableAt) or
-// "claimed" (score = lease expiry). Enqueue/Claim/Ack/Release are each one
+// "claimed" (score = lease expiry). Enqueue/Claim/Renew/Ack/Release are each one
 // Lua script (redis_scripts.go) so the read-then-write transition is atomic
 // across every process sharing the namespace — see STEP 1-9 of the v0.16
 // design notes in the PR description for the full rationale.
@@ -16,10 +16,9 @@
 // reclaimed and delivered twice; callers must size ClaimLease above the
 // slowest realistic delivery attempt. This is documented, not solved, here.
 //
-// retry.State (attempt history/backoff position) is NOT stored in Redis:
-// it remains worker.Pool-owned, in-memory, per the existing v0.14 contract.
-// A worker process restart still loses retry.State exactly as it does
-// today; RedisQueue surviving the restart does not change that.
+// retry.State is not stored in Redis. The worker's outcome store persists
+// completed attempts in PostgreSQL and reconstructs retry state on reclaim;
+// Redis remains responsible only for scheduling and claim ownership.
 package queue
 
 import (
@@ -99,6 +98,10 @@ type RedisQueue struct {
 }
 
 var _ Queue = (*RedisQueue)(nil)
+
+// ClaimLease reports the configured lease so bounded worker bookkeeping can
+// choose a database timeout that cannot outlive ownership after a renewal.
+func (q *RedisQueue) ClaimLease() time.Duration { return q.lease }
 
 func NewRedisQueue(cfg RedisConfig) (*RedisQueue, error) {
 	normalized, err := cfg.normalized()
@@ -219,6 +222,29 @@ func (q *RedisQueue) Ack(ctx context.Context, id string, token uint64) error {
 	}
 }
 
+func (q *RedisQueue) Renew(ctx context.Context, id string, token uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	expiresAt := q.now().Add(q.lease)
+	res, err := renewScript.Run(ctx, q.client, []string{q.keys.claimed},
+		id, strconv.FormatUint(token, 10), toMillis(expiresAt), q.keys.jobPrefix,
+	).Result()
+	if err != nil {
+		return fmt.Errorf("queue: redis renew: %w", err)
+	}
+	switch res.(int64) {
+	case 1:
+		return nil
+	case -1:
+		return ErrUnknownJob
+	case -2:
+		return ErrJobNotClaimed
+	default:
+		return fmt.Errorf("queue: redis renew: unexpected script result %v", res)
+	}
+}
+
 func (q *RedisQueue) Release(ctx context.Context, id string, token uint64, availableAt time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -326,3 +352,20 @@ func parseClaim(fields []interface{}) (Claim, error) {
 
 func toMillis(t time.Time) int64    { return t.UTC().UnixMilli() }
 func fromMillis(ms int64) time.Time { return time.UnixMilli(ms).UTC() }
+
+// Ping checks that Redis answers. It is read-only and used for readiness.
+func (q *RedisQueue) Ping(ctx context.Context) error {
+	return q.client.Ping(ctx).Err()
+}
+
+// Depth returns available plus claimed jobs (a job is in exactly one set).
+// It is read-only and never alters queue state.
+func (q *RedisQueue) Depth(ctx context.Context) (int64, error) {
+	pipe := q.client.Pipeline()
+	avail := pipe.ZCard(ctx, q.keys.available)
+	claimed := pipe.ZCard(ctx, q.keys.claimed)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, err
+	}
+	return avail.Val() + claimed.Val(), nil
+}

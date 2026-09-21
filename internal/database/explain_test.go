@@ -135,12 +135,64 @@ func TestRecipientsLookupUsesForeignKeyIndex(t *testing.T) {
 	}
 }
 
+func TestDeliveryOutcomeEventLookupUsesUniqueIndex(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tenant := newTestTenant(t, db)
+	var targetID string
+	for i := 0; i < 300; i++ {
+		msg, err := db.InsertMessage(ctx, sampleNewMessage(t, tenant.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		attempt := sampleAttempt(msg.ID, 1, DecisionRetry)
+		if err := db.PersistDeliveryOutcome(ctx, attempt, false, nil); err != nil {
+			t.Fatal(err)
+		}
+		if i == 150 {
+			targetID = msg.ID
+		}
+	}
+	if _, err := db.pool.Exec(ctx, `ANALYZE events`); err != nil {
+		t.Fatal(err)
+	}
+	plan := explainAnalyze(t, db, `
+		SELECT id FROM events
+		WHERE message_id = $1 AND delivery_attempt_number = 1`, targetID)
+	t.Logf("query plan:\n%s", plan)
+	if !strings.Contains(plan, "uq_events_message_delivery_attempt") {
+		t.Fatalf("expected delivery-outcome uniqueness index, got:\n%s", plan)
+	}
+}
+
 // explain runs EXPLAIN (without ANALYZE, to keep this deterministic and
 // side-effect-free for read-only planning inspection) and returns the plan
 // text.
 func explain(t *testing.T, db *DB, query string, args ...any) string {
 	t.Helper()
 	rows, err := db.pool.Query(context.Background(), "EXPLAIN "+query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var b strings.Builder
+	for rows.Next() {
+		var line string
+		if err := rows.Scan(&line); err != nil {
+			t.Fatal(err)
+		}
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+func explainAnalyze(t *testing.T, db *DB, query string, args ...any) string {
+	t.Helper()
+	rows, err := db.pool.Query(context.Background(), "EXPLAIN (ANALYZE, BUFFERS) "+query, args...)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -61,15 +61,20 @@ var ErrMalformedKey = errors.New("auth: malformed api key")
 type Scope string
 
 const (
-	ScopeEmailsSend   Scope = "emails:send"
-	ScopeEmailsRead   Scope = "emails:read"
-	ScopeDomainsRead  Scope = "domains:read"
-	ScopeDomainsWrite Scope = "domains:write"
+	ScopeEmailsSend    Scope = "emails:send"
+	ScopeEmailsRead    Scope = "emails:read"
+	ScopeDomainsRead   Scope = "domains:read"
+	ScopeDomainsWrite  Scope = "domains:write"
+	ScopeWebhooksRead  Scope = "webhooks:read"
+	ScopeWebhooksWrite Scope = "webhooks:write"
 )
 
 // ValidScopes lists every scope MailX currently understands - grown only
 // when a real route needs a new permission, never speculatively.
-var ValidScopes = []Scope{ScopeEmailsSend, ScopeEmailsRead, ScopeDomainsRead, ScopeDomainsWrite}
+var ValidScopes = []Scope{
+	ScopeEmailsSend, ScopeEmailsRead, ScopeDomainsRead, ScopeDomainsWrite,
+	ScopeWebhooksRead, ScopeWebhooksWrite,
+}
 
 func ValidScope(s string) bool {
 	for _, v := range ValidScopes {

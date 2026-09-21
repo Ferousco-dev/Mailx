@@ -46,7 +46,7 @@ func setupDomainAPI(t *testing.T, scopes []string, resolver *domainTXTResolver) 
 	}
 	h := newEmailHandler(db, mustStore(t))
 	service := maildomain.NewService(db, resolver)
-	mux := newMux(h, authSvc, func() error { return nil }, service)
+	mux := newMux(h, authSvc, func() error { return nil }, routeServices{domains: service})
 	return authInjector{next: mux, token: key.Raw}, db, tenant, key.Raw
 }
 
@@ -199,7 +199,7 @@ func TestCrossTenantPendingClaimAndIsolation(t *testing.T) {
 	keyA, _, _ := authSvc.Create(context.Background(), a.ID, "a", scopes, nil)
 	keyB, _, _ := authSvc.Create(context.Background(), b.ID, "b", scopes, nil)
 	h := newEmailHandler(db, mustStore(t))
-	mux := newMux(h, authSvc, func() error { return nil }, maildomain.NewService(db, resolver))
+	mux := newMux(h, authSvc, func() error { return nil }, routeServices{domains: maildomain.NewService(db, resolver)})
 	aMux := authInjector{next: mux, token: keyA.Raw}
 	bMux := authInjector{next: mux, token: keyB.Raw}
 	da := createDomain(t, aMux, "example.com")
