@@ -54,3 +54,7 @@ DEF-004 found and fixed during e2e (below).
 
 ## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
 v0.23 complete pending commit. Not pushed. Known limits recorded in `architecture.md`. README redesign and `assets/readme/` were pre-existing user edits and are not part of this change.
+
+## 2026-09-21 | REVIEW | constructor | CR-004
+Greptile reviewed PR #14 (3 findings, DEF-005..DEF-007), all fixed with regression tests; `go vet`, `go build` (darwin, linux), `go test -race -count=1 ./...` with explicit DSN pass.
+Note: architecture.md limitation 6 remains accurate; the SMTP-only mode now also serves the operator listener.

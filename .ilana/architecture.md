@@ -113,6 +113,8 @@ Tests: `MAILX_TEST_DATABASE_URL` (PostgreSQL DSN; if unset, a local default is t
 - HTTP: request-ID middleware is OUTERMOST (recover is inside it) so panics still produce one access log + metric; route label is the matched mux pattern or `unmatched`.
 - Components take optional `WithLogger`/`WithMetrics` (default discard/nil); `smtp.Config.Observer` for SMTP; `RedisQueue.Ping/Depth` are concrete read-only methods (`queue.Queue` unchanged).
 - Metrics (namespace `mailx`, <=3 labels, allowlisted values else `other`): `build_info{version,commit}`, `http_requests_total{method,route,status_class}`, `http_request_duration_seconds{method,route}`, `smtp_sessions_total{result}`, `smtp_active_sessions`, `smtp_messages_total{result}`, `delivery_attempts_total{kind,decision}`, `delivery_attempt_duration_seconds{decision}`, `queue_operations_total{operation,result}`, `queue_depth`, `queue_depth_errors_total`, `webhook_attempts_total{outcome}`, `webhook_attempt_duration_seconds{outcome}`, plus Go/process collectors.
+- The operator listener also runs in SMTP-only mode (no `DATABASE_URL`); readiness there has no dependencies to check.
+- Webhook claim: one active claim per tenant is enforced with a per-tenant advisory lock plus a re-check after the lock (READ COMMITTED), not just a NOT EXISTS guard. Webhook creation maps resolver failures to a stable 503 and never returns resolver detail.
 - Invariants: metrics/logging failure never alters SMTP, queue, DB, event, or webhook behavior; no logs table, no migrations (still 11).
 - Worker errors passed to `WithOnError` are internal-infrastructure errors only; the recipient address was removed from the worker's "not addressable" error text.
 

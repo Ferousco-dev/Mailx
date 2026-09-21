@@ -11,6 +11,11 @@ import (
 
 var ErrInvalidURL = errors.New("webhook: invalid destination URL")
 
+// ErrDNSUnavailable means the destination could not be checked because DNS
+// failed (not because the destination is invalid). Callers report it as a
+// temporary condition and never expose resolver detail.
+var ErrDNSUnavailable = errors.New("webhook: destination DNS lookup unavailable")
+
 type Service struct {
 	db     *database.DB
 	box    *SecretBox
@@ -49,6 +54,9 @@ func NewService(db *database.DB, box *SecretBox, policy URLPolicy) (*Service, er
 func (s *Service) Create(ctx context.Context, tenantID, rawURL string, eventTypes []string) (CreatedSubscription, error) {
 	canonical, err := s.policy.Validate(ctx, rawURL)
 	if err != nil {
+		if errors.Is(err, ErrDNSUnavailable) {
+			return CreatedSubscription{}, err
+		}
 		return CreatedSubscription{}, errors.Join(ErrInvalidURL, err)
 	}
 	types, err := normalizeEventTypes(eventTypes)

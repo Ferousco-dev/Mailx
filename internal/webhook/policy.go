@@ -71,7 +71,12 @@ func (p URLPolicy) resolveAndValidate(ctx context.Context, host string) ([]netip
 	}
 	addrs, err := p.resolver().LookupNetIP(ctx, "ip", host)
 	if err != nil {
-		return nil, fmt.Errorf("resolve destination: %w", err)
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			return nil, errors.New("destination hostname does not resolve")
+		}
+		// Resolver detail (server addresses, timeouts) stays internal.
+		return nil, ErrDNSUnavailable
 	}
 	if len(addrs) == 0 {
 		return nil, errors.New("destination has no IP addresses")

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/smtp"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 )
@@ -138,9 +140,21 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	slog.SetDefault(o.log)
 	ctx, stop := notifyShutdown()
 	defer stop()
-	return runSMTPReceiver(ctx, store, o)
+	o.log.Info("mailx_start", "mode", "smtp-only", "smtp_addr", smtpAddr(), "observability_addr", observabilityAddr())
+	defer o.log.Info("mailx_stop")
+	components := []component{
+		o.logged("smtp", func(ctx context.Context) error { return runSMTPReceiver(ctx, store, o) }),
+	}
+	// SMTP-only mode has no PostgreSQL or Redis, so readiness has nothing to
+	// check; the operator listener still serves metrics and liveness.
+	if addr := observabilityAddr(); addr != "" {
+		op := observability.NewServer(addr, observability.OperatorMux(o.metrics, observability.NewReadiness(nil)))
+		components = append(components, o.logged("observability", op.Run))
+	}
+	return runComponents(ctx, components...)
 }
 
 // runSMTPReceiver blocks until ctx is canceled, at which point it closes

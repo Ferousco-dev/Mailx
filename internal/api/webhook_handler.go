@@ -74,6 +74,10 @@ func (h *webhookHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	created, err := h.service.Create(r.Context(), tenantFromContext(r.Context()), req.URL, req.Events)
 	if err != nil {
+		if errors.Is(err, webhook.ErrDNSUnavailable) {
+			writeError(w, r, newError(ErrTemporarilyUnavailable, "destination_dns_unavailable", "the destination could not be resolved right now; retry shortly"))
+			return
+		}
 		if errors.Is(err, webhook.ErrInvalidURL) || strings.Contains(err.Error(), "event type") {
 			writeError(w, r, newError(ErrValidation, "invalid_webhook", err.Error()))
 			return

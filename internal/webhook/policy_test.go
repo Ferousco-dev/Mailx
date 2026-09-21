@@ -3,7 +3,9 @@ package webhook
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
+	"strings"
 	"testing"
 )
 
@@ -76,4 +78,24 @@ func (r *sequenceResolver) LookupNetIP(context.Context, string, string) ([]netip
 	answer := r.answers[r.index]
 	r.index++
 	return answer, nil
+}
+
+type failingResolver struct{ err error }
+
+func (f failingResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return nil, f.err
+}
+
+func TestValidateDoesNotExposeResolverDetail(t *testing.T) {
+	secretDetail := "lookup internal.example on 10.9.8.7:53: server misbehaving"
+	p := URLPolicy{Resolver: failingResolver{&net.DNSError{Err: secretDetail, Server: "10.9.8.7:53"}}}
+	_, err := p.Validate(context.Background(), "https://hooks.example.com/x")
+	if !errors.Is(err, ErrDNSUnavailable) || strings.Contains(err.Error(), "10.9.8.7") || strings.Contains(err.Error(), "misbehaving") {
+		t.Fatalf("resolver failure must map to a stable public error, got %v", err)
+	}
+	notFound := URLPolicy{Resolver: failingResolver{&net.DNSError{Err: "no such host", Name: "nope.invalid", Server: "10.9.8.7:53", IsNotFound: true}}}
+	_, err = notFound.Validate(context.Background(), "https://nope.invalid/x")
+	if err == nil || errors.Is(err, ErrDNSUnavailable) || strings.Contains(err.Error(), "10.9.8.7") {
+		t.Fatalf("NXDOMAIN is a validation failure without resolver detail, got %v", err)
+	}
 }

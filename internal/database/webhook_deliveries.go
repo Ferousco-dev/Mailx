@@ -58,9 +58,31 @@ func (db *DB) ClaimWebhookDelivery(ctx context.Context, now time.Time, lease tim
 	if lease <= 0 {
 		return ClaimedWebhookDelivery{}, errors.New("database: webhook lease must be positive")
 	}
+	// A tenant found busy after taking its claim lock is skipped so other
+	// tenants' due work is still claimed in the same call.
+	var busy []string
+	for range maxBusyTenantSkips {
+		claim, busyTenant, err := db.claimWebhookOnce(ctx, now, lease, busy)
+		if busyTenant == "" {
+			return claim, err
+		}
+		busy = append(busy, busyTenant)
+	}
+	return ClaimedWebhookDelivery{}, ErrNotFound
+}
+
+const maxBusyTenantSkips = 8
+
+// claimWebhookOnce claims at most one delivery. It returns a non-empty
+// busyTenant when the candidate's tenant already has an active claim that was
+// committed while this transaction waited for the tenant lock.
+func (db *DB) claimWebhookOnce(ctx context.Context, now time.Time, lease time.Duration, skipTenants []string) (ClaimedWebhookDelivery, string, error) {
+	if skipTenants == nil {
+		skipTenants = []string{}
+	}
 	tx, err := db.pool.Begin(ctx)
 	if err != nil {
-		return ClaimedWebhookDelivery{}, fmt.Errorf("database: begin webhook claim: %w", normalizeErr(err))
+		return ClaimedWebhookDelivery{}, "", fmt.Errorf("database: begin webhook claim: %w", normalizeErr(err))
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -79,6 +101,7 @@ func (db *DB) ClaimWebhookDelivery(ctx context.Context, now time.Time, lease tim
 		WHERE s.disabled_at IS NULL
 		  AND ((d.status = 'pending' AND d.next_attempt_at <= $1)
 		       OR (d.status = 'delivering' AND d.lease_expires_at <= $1))
+		  AND d.tenant_id <> ALL($2::text[])
 		  AND NOT EXISTS (
 		      SELECT 1 FROM webhook_deliveries active
 		      WHERE active.tenant_id = d.tenant_id
@@ -88,7 +111,7 @@ func (db *DB) ClaimWebhookDelivery(ctx context.Context, now time.Time, lease tim
 		  )
 		ORDER BY d.next_attempt_at, d.created_at, d.id
 		LIMIT 1
-		FOR UPDATE OF d SKIP LOCKED`, now,
+		FOR UPDATE OF d SKIP LOCKED`, now, skipTenants,
 	).Scan(&out.ID, &out.TenantID, &out.SubscriptionID, &out.EventID, &out.Status,
 		&out.AttemptCount, &out.NextAttemptAt, &out.LastErrorCategory, &out.LastResponseCode,
 		&out.CreatedAt, &out.UpdatedAt, &out.DeliveredAt, &out.FailedAt,
@@ -96,10 +119,28 @@ func (db *DB) ClaimWebhookDelivery(ctx context.Context, now time.Time, lease tim
 		&out.Event.ID, &out.Event.TenantID, &out.Event.MessageID, &out.Event.Type,
 		&out.Event.OccurredAt, &metaRaw, &out.Event.DeliveryAttemptNumber)
 	if err != nil {
-		return ClaimedWebhookDelivery{}, normalizeErr(err)
+		return ClaimedWebhookDelivery{}, "", normalizeErr(err)
+	}
+	// Serialize per tenant: the NOT EXISTS guard above cannot see claims that
+	// concurrent transactions have not committed yet. Take the tenant lock,
+	// then re-check with a fresh statement, which sees anything committed
+	// while we waited (READ COMMITTED).
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "mailx:webhook-claim:"+out.TenantID); err != nil {
+		return ClaimedWebhookDelivery{}, "", fmt.Errorf("database: lock webhook tenant claim: %w", normalizeErr(err))
+	}
+	var tenantBusy bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+		    SELECT 1 FROM webhook_deliveries
+		    WHERE tenant_id = $1 AND id <> $2 AND status = 'delivering' AND lease_expires_at > $3)`,
+		out.TenantID, out.ID, now).Scan(&tenantBusy); err != nil {
+		return ClaimedWebhookDelivery{}, "", fmt.Errorf("database: recheck webhook tenant claim: %w", normalizeErr(err))
+	}
+	if tenantBusy {
+		return ClaimedWebhookDelivery{}, out.TenantID, nil
 	}
 	if err := json.Unmarshal(metaRaw, &out.Event.Metadata); err != nil {
-		return ClaimedWebhookDelivery{}, fmt.Errorf("database: decode webhook event metadata: %w", err)
+		return ClaimedWebhookDelivery{}, "", fmt.Errorf("database: decode webhook event metadata: %w", err)
 	}
 	if out.Status == "delivering" {
 		if _, err := tx.Exec(ctx, `
@@ -108,16 +149,16 @@ func (db *DB) ClaimWebhookDelivery(ctx context.Context, now time.Time, lease tim
 			    next_retry_at=$2
 			WHERE delivery_id=$1 AND attempt_number=$3 AND status='in_progress'`,
 			out.ID, now, out.AttemptCount); err != nil {
-			return ClaimedWebhookDelivery{}, fmt.Errorf("database: close expired webhook attempt: %w", normalizeErr(err))
+			return ClaimedWebhookDelivery{}, "", fmt.Errorf("database: close expired webhook attempt: %w", normalizeErr(err))
 		}
 	}
 	token, err := newID()
 	if err != nil {
-		return ClaimedWebhookDelivery{}, err
+		return ClaimedWebhookDelivery{}, "", err
 	}
 	attemptID, err := newID()
 	if err != nil {
-		return ClaimedWebhookDelivery{}, err
+		return ClaimedWebhookDelivery{}, "", err
 	}
 	out.AttemptCount++
 	out.LeaseToken = token
@@ -126,18 +167,18 @@ func (db *DB) ClaimWebhookDelivery(ctx context.Context, now time.Time, lease tim
 		SET status = 'delivering', attempt_count = $2, lease_token = $3,
 		    lease_expires_at = $4, updated_at = now()
 		WHERE id = $1`, out.ID, out.AttemptCount, token, now.Add(lease)); err != nil {
-		return ClaimedWebhookDelivery{}, fmt.Errorf("database: claim webhook delivery: %w", normalizeErr(err))
+		return ClaimedWebhookDelivery{}, "", fmt.Errorf("database: claim webhook delivery: %w", normalizeErr(err))
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO webhook_delivery_attempts
 			(id, delivery_id, attempt_number, status, attempted_at)
 		VALUES ($1,$2,$3,'in_progress',$4)`, attemptID, out.ID, out.AttemptCount, now); err != nil {
-		return ClaimedWebhookDelivery{}, fmt.Errorf("database: start webhook attempt: %w", normalizeErr(err))
+		return ClaimedWebhookDelivery{}, "", fmt.Errorf("database: start webhook attempt: %w", normalizeErr(err))
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return ClaimedWebhookDelivery{}, fmt.Errorf("database: commit webhook claim: %w", normalizeErr(err))
+		return ClaimedWebhookDelivery{}, "", fmt.Errorf("database: commit webhook claim: %w", normalizeErr(err))
 	}
-	return out, nil
+	return out, "", nil
 }
 
 // CompleteWebhookAttempt atomically records the HTTP result and transitions

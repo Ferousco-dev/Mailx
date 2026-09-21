@@ -4,7 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"testing"
 
@@ -121,5 +124,26 @@ func TestWebhookValidationAndDelete(t *testing.T) {
 	}
 	if rec := doJSON(t, mux, "GET", "/v1/webhooks/"+resource.ID, nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("deleted webhook remains visible: %d", rec.Code)
+	}
+}
+
+type dnsFailResolver struct{}
+
+func (dnsFailResolver) LookupNetIP(context.Context, string, string) ([]netip.Addr, error) {
+	return nil, &net.DNSError{Err: "read udp 10.9.8.7:53: i/o timeout", Server: "10.9.8.7:53"}
+}
+
+func TestCreateWebhookDNSFailureIsTemporaryAndDoesNotLeakResolverDetail(t *testing.T) {
+	_, db, _, _, raw := setupMuxNoAuth(t)
+	box, _ := webhook.NewSecretBox(make([]byte, 32))
+	svc, _ := webhook.NewService(db, box, webhook.URLPolicy{Resolver: dnsFailResolver{}})
+	router := newMux(newEmailHandler(db, nil), auth.NewService(db, nil), func() error { return nil }, routeServices{webhooks: svc})
+	req := httptest.NewRequest("POST", "/v1/webhooks", strings.NewReader(`{"url":"https://hooks.example.com/x","events":["email.queued"]}`))
+	req.Header.Set("Authorization", "Bearer "+raw)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || strings.Contains(rec.Body.String(), "10.9.8.7") || strings.Contains(rec.Body.String(), "timeout") {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
 	}
 }

@@ -4,10 +4,15 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/mail"
 	"github.com/Ferousco-dev/mailx/internal/observability"
@@ -110,5 +115,60 @@ func TestErrLoggerAndComponentLoggingDoNotChangeResults(t *testing.T) {
 	c := o.logged("api", func(context.Context) error { return errors.New("bind failed") })
 	if err := c.run(nil); err == nil || err.Error() != "bind failed" {
 		t.Fatalf("component result changed: %v", err)
+	}
+}
+
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	return l.Addr().String()
+}
+
+// SMTP-only mode (no DATABASE_URL) must still serve the operator listener.
+func TestSMTPOnlyModeServesOperatorEndpoints(t *testing.T) {
+	obsAddr, smtpAddr := freeAddr(t), freeAddr(t)
+	t.Setenv("DATABASE_URL", "")
+	t.Setenv("MAILX_STORAGE_ROOT", t.TempDir())
+	t.Setenv("MAILX_SMTP_ADDR", smtpAddr)
+	t.Setenv("MAILX_OBSERVABILITY_ADDR", obsAddr)
+	done := make(chan error, 1)
+	go func() { done <- serve() }()
+	get := func(path string) (int, string) {
+		resp, err := http.Get("http://" + obsAddr + path)
+		if err != nil {
+			return 0, ""
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(b)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if code, _ := get("/health/live"); code == 200 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("operator listener never came up in SMTP-only mode")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if code, body := get("/metrics"); code != 200 || !strings.Contains(body, "mailx_build_info") {
+		t.Fatalf("/metrics = %d", code)
+	}
+	if code, _ := get("/health/ready"); code != 200 {
+		t.Fatalf("readiness with no dependencies must be ready, got %d", code)
+	}
+	_ = syscall.Kill(os.Getpid(), syscall.SIGINT)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serve returned %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("serve did not stop on SIGINT")
 	}
 }

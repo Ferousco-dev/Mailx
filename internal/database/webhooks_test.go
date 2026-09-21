@@ -335,3 +335,65 @@ func TestWebhookSubscriptionTenantIsolation(t *testing.T) {
 		t.Fatalf("cross-tenant delete = %v", err)
 	}
 }
+
+func TestWebhookOneActiveClaimPerTenantUnderConcurrency(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tenant := newTestTenant(t, db)
+	insertTestWebhook(t, db, tenant.ID, "email.queued")
+	for range 6 {
+		if _, err := db.InsertMessage(ctx, sampleNewMessage(t, tenant.ID)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res, err := db.FanOutWebhookEvents(ctx, 100); err != nil || res.Deliveries != 6 {
+		t.Fatalf("fan-out: %+v %v", res, err)
+	}
+	// A second tenant's work must still be claimable while the first is busy.
+	other := newTestTenant(t, db)
+	insertTestWebhook(t, db, other.ID, "email.queued")
+	if _, err := db.InsertMessage(ctx, sampleNewMessage(t, other.ID)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.FanOutWebhookEvents(ctx, 100); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	type result struct {
+		tenant string
+		err    error
+	}
+	results := make(chan result, 12)
+	var wg sync.WaitGroup
+	for range 12 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			claim, err := db.ClaimWebhookDelivery(ctx, time.Now().Add(time.Second), time.Minute)
+			results <- result{claim.TenantID, err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	perTenant := map[string]int{}
+	for r := range results {
+		switch {
+		case r.err == nil:
+			perTenant[r.tenant]++
+		case errors.Is(r.err, ErrNotFound):
+		default:
+			t.Fatal(r.err)
+		}
+	}
+	for tenantID, n := range perTenant {
+		if n != 1 {
+			t.Fatalf("tenant %s has %d simultaneously active claims, want 1", tenantID, n)
+		}
+	}
+	if len(perTenant) != 2 {
+		t.Fatalf("both tenants should each hold one claim, got %v", perTenant)
+	}
+}
