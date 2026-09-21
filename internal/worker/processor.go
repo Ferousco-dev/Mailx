@@ -241,5 +241,25 @@ func (p *Pool) observeOutcome(c queue.Claim, a retry.DeliveryAttempt) {
 	if r.FinalCode != 0 {
 		attrs = append(attrs, "smtp_code", r.FinalCode)
 	}
+	if r.Transport != "" {
+		attrs = append(attrs, "transport", r.Transport)
+	}
+	// Bounded TLS facts from the last MX tried: category and version only,
+	// never host names, certificates or raw TLS errors.
+	if n := len(r.Attempts); n > 0 {
+		if tls := r.Attempts[n-1].Transfer.TLS; tls.Outcome != "" {
+			attrs = append(attrs, "tls_policy", tls.Policy.String(), "tls_outcome", string(tls.Outcome))
+			if tls.Version != "" {
+				attrs = append(attrs, "tls_version", tls.Version)
+			}
+		}
+		// AUTH facts: mechanism category and outcome only, never credential data.
+		if au := r.Attempts[n-1].Transfer.Auth; au.Outcome != "" {
+			attrs = append(attrs, "auth_outcome", string(au.Outcome))
+			if au.Mechanism != "" {
+				attrs = append(attrs, "auth_mechanism", au.Mechanism)
+			}
+		}
+	}
 	p.log.Info("delivery_outcome", attrs...)
 }

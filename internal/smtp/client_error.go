@@ -15,6 +15,10 @@ const (
 	StageGreeting     Stage = "greeting"
 	StageEHLO         Stage = "ehlo"
 	StageHELO         Stage = "helo"
+	StageStartTLS     Stage = "starttls"      // STARTTLS unavailable (required), refused, or its reply failed
+	StageTLS          Stage = "tls_handshake" // the TLS handshake itself
+	StageAuth         Stage = "auth"          // SMTP AUTH to a trusted relay
+	StageEHLOTLS      Stage = "ehlo_tls"      // the mandatory EHLO after a successful handshake
 	StageMailFrom     Stage = "mail_from"
 	StageRcptTo       Stage = "rcpt_to"
 	StageData         Stage = "data"

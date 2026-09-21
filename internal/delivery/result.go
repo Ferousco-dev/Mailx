@@ -41,6 +41,11 @@ type Attempt struct {
 type Result struct {
 	DeliveryID string
 	Domain     string
+	// Transport is "direct" (MX lookup, no credentials) or "relay" (the one
+	// configured trusted relay, TLS then AUTH). It is fixed by configuration and
+	// never changes during a delivery: a relay failure never becomes a direct
+	// attempt.
+	Transport  string
 	StartedAt  time.Time
 	FinishedAt time.Time
 	Kind       Kind

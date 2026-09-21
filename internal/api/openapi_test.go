@@ -18,7 +18,7 @@ func TestOpenAPISpecParses(t *testing.T) {
 		t.Fatal("missing paths object")
 	}
 	for _, want := range []string{
-		"/emails", "/emails/{id}", "/domains", "/domains/{id}", "/domains/{id}/verify",
+		"/emails", "/emails/{id}", "/domains", "/domains/{id}", "/domains/{id}/verify", "/domains/{id}/dkim", "/domains/{id}/dkim/verify",
 		"/events", "/webhooks", "/webhooks/{id}", "/webhooks/{id}/rotate-secret", "/webhooks/{id}/deliveries",
 	} {
 		if _, ok := paths[want]; !ok {
@@ -29,7 +29,7 @@ func TestOpenAPISpecParses(t *testing.T) {
 	for _, want := range []string{
 		"SendEmailRequest", "Email", "EmailList", "CreateDomainRequest", "DNSRecord", "Domain", "DomainList",
 		"CreateWebhookRequest", "Webhook", "WebhookCreated", "WebhookList", "Event", "EventList", "APIError",
-		"WebhookDelivery", "WebhookDeliveryList",
+		"WebhookDelivery", "WebhookDeliveryList", "DkimKey", "DkimStatus", "DkimVerifyResult",
 	} {
 		if _, ok := schemas[want]; !ok {
 			t.Errorf("documented spec is missing schema %q", want)
@@ -85,6 +85,9 @@ func TestOpenAPIRoutesMatchRuntime(t *testing.T) {
 		{"POST", "/v1/domains"},
 		{"GET", "/v1/domains"},
 		{"GET", "/v1/domains/some-id"},
+		{"GET", "/v1/domains/some-id/dkim"},
+		{"POST", "/v1/domains/some-id/dkim"},
+		{"POST", "/v1/domains/some-id/dkim/verify"},
 		{"DELETE", "/v1/domains/some-id"},
 		{"POST", "/v1/domains/some-id/verify"},
 		{"GET", "/v1/events"},

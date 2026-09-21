@@ -77,3 +77,19 @@ func newTestTenant(t testing.TB, db *database.DB) database.Tenant {
 	}
 	return tenant
 }
+
+// verifyTestDomain gives a tenant a verified domain, as ownership verification
+// would, so tests that send mail satisfy verified-From enforcement.
+func verifyTestDomain(t testing.TB, db *database.DB, tenantID, name string) database.Domain {
+	t.Helper()
+	ctx := context.Background()
+	d, err := db.CreateDomain(ctx, tenantID, name, "test-token-"+name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err = db.RecordDomainCheck(ctx, tenantID, d.ID, true, time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}

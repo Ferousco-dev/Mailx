@@ -15,6 +15,8 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/queue"
 	"github.com/Ferousco-dev/mailx/internal/retry"
+	"github.com/Ferousco-dev/mailx/internal/smtp"
+	"github.com/Ferousco-dev/mailx/internal/transfer"
 )
 
 type syncBuf struct {
@@ -256,3 +258,34 @@ func TestWorkerSurvivesTransientQueueClaimFailureAndRecovers(t *testing.T) {
 		t.Fatal("claim error text must not reach the structured log")
 	}
 }
+
+func TestWorkerLogsTLSFactsWithoutPeerData(t *testing.T) {
+	q := mustQ(t, 4)
+	l := newFakeLoader()
+	l.put("m1", envelopeFor("<a@x>", "<b@y>"), "x\r\n")
+	c := newScriptedCoordinator()
+	c.script("<a@x>", coordOutcome{outcome: retry.Outcome{Status: retry.StatusRetryable,
+		Schedule: &retry.Schedule{Attempt: 1, NextRetryAt: time.Now().Add(time.Hour)},
+		Result: delivery.Result{Kind: delivery.KindTransferTemporary, Attempts: []delivery.Attempt{{
+			Destination: "mx." + privDomain + ":25",
+			Transfer: transfer.Result{
+				RemoteMessage: privRemote, FailureMessage: "x509: certificate is valid for " + privDomain,
+				TLS: smtp.TLSInfo{Policy: smtp.TLSRequired, Attempted: true, Outcome: smtp.OutcomeVerifyFailed},
+			},
+		}}}}})
+	p, buf, _ := obsPool(t, q, l, c, newFakeOutcomeStore())
+	_ = q.Enqueue(context.Background(), queue.Job{ID: "j1", MessageID: "m1"})
+	runPoolForAttempts(t, p, q, 1, 2*time.Second)
+	out := buf.String()
+	for _, want := range []string{`"tls_policy":"required"`, `"tls_outcome":"verify_failed"`, `"job_id":"j1"`, `"message_id":"m1"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("log missing %s:\n%s", want, out)
+		}
+	}
+	assertNoPrivateMarkers(t, out)
+	if strings.Contains(out, "x509") || strings.Contains(out, "mx.") {
+		t.Fatalf("peer-derived text reached the log:\n%s", out)
+	}
+}
+
+func buildinfoForTest() buildinfo.Info { return buildinfo.Info{Version: "t", Commit: "t"} }

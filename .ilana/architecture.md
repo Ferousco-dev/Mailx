@@ -1,4 +1,4 @@
-# MailX Architecture, Invariants, Security, Limitations (current through v0.23)
+# MailX Architecture, Invariants, Security, Limitations (current through v0.26)
 
 Verified against HEAD `481da4a` on 2026-09-21. This file states CURRENT truth. Superseded designs are kept only
 under "Superseded" so they are never read as current. History lives in `milestones.md`; rationale IDs in `decisions.md`.
@@ -118,6 +118,37 @@ Tests: `MAILX_TEST_DATABASE_URL` (PostgreSQL DSN; if unset, a local default is t
 - Invariants: metrics/logging failure never alters SMTP, queue, DB, event, or webhook behavior; no logs table, no migrations (still 11).
 - Worker errors passed to `WithOnError` are internal-infrastructure errors only; the recipient address was removed from the worker's "not addressable" error text.
 
+## Outbound SMTP TLS (v0.24; design: `docs/design-v0.24.md`)
+
+- Flow: 220 -> EHLO (HELO fallback on 5xx) -> capabilities -> policy -> `STARTTLS` (must be 220) -> reject if bytes follow the 220 -> `s.caps = nil` -> `tls.Client(raw).HandshakeContext` (bounded) -> swap I/O to TLS conn -> EHLO again (no HELO fallback) -> new capabilities -> MAIL/RCPT/DATA. `raw` never changes (deadline watcher race-free); `conn` is the I/O conn.
+- Policy `MAILX_SMTP_TLS_POLICY`: `opportunistic` (default: TLS if advertised, plaintext only when NOT advertised) or `required` (never sends a message without verified TLS; fails before MAIL FROM). No silent downgrade: refusal (even 5xx), malformed reply, handshake or verification failure, or post-TLS EHLO failure fails the attempt; no plaintext retry on that connection or by reconnecting.
+- Verification always on: system roots (+ `MAILX_SMTP_TLS_CA_FILE` extra roots), validity, server-auth EKU, MX host name (`ServerName` = host of the MX address). NOT verified: that the MX is the right MX for the recipient domain (unauthenticated DNS; no DANE/MTA-STS). No `InsecureSkipVerify` in production code. TLS min 1.2 (equals Go default).
+- Bounds: `DialTimeout`, per-read `ReadTimeout`, `TLS.HandshakeTimeout` (30 s default), caller context (cancel sets a past deadline on the raw conn; close_notify write bounded to 1 s).
+- Errors: stages `starttls`, `tls_handshake`, `ehlo_tls`; always `Temporary`; `TLSFailure.Error()` is a bounded category (raw x509/TLS text only via Unwrap). Delivery engine `decideFallback` returns `tryNext` for these stages (all before MAIL FROM); if all MX fail, kind is `KindTransferTemporary` and the existing retry engine reschedules.
+- Observability: `mailx_smtp_tls_sessions_total{policy,outcome,version}` (allowlisted; 11 outcomes: established, not_offered, required_unavailable, rejected, handshake_timeout, verify_failed, handshake_failed, connection_lost, ehlo_failed, canceled, protocol_error; versions 1.2/1.3/other/none); worker `delivery_outcome` adds `tls_policy`, `tls_outcome`, `tls_version` from the last MX tried.
+- Invariants added: capabilities from before a handshake are never used after it; `Accepted=true` over TLS is never retransmitted even if QUIT/teardown fails (tested at client and worker-pipeline level); liveness/readiness never depend on remote SMTP/TLS; the inbound listener does not advertise STARTTLS (tested).
+- Deployment: the Docker runtime image installs `ca-certificates` (alpine ships none, which would have broken all peer verification including HTTPS webhooks).
+
+## Outbound SMTP AUTH / trusted relay (v0.25; design: `docs/design-v0.25.md`)
+
+- Flow: ... EHLO again (post-TLS) -> AUTH advertised in THAT reply? -> PLAIN (preferred) or LOGIN -> 235 -> MAIL FROM. Credentials imply TLS-required regardless of `MAILX_SMTP_TLS_POLICY`; no STARTTLS, refused STARTTLS, handshake or certificate failure all end the attempt before any AUTH byte. Mechanism chosen only from post-TLS capabilities (both `AUTH x y` and legacy `AUTH=x y` spellings). PLAIN uses the initial response unless the command would exceed the line limit, then the challenge form. CRAM-MD5, DIGEST-MD5, XOAUTH2/OAUTHBEARER, SCRAM unsupported.
+- Routing: `delivery.Config.Relay` (nil = direct). Relay mode routes every delivery to the one configured relay (no MX lookup, no credentials-bearing path anywhere else, no fallback to direct on any failure). Direct mode resolves MX hosts and carries no credentials. `delivery.Result.Transport` = direct|relay. Config: `MAILX_RELAY_HOST` (enables), `MAILX_RELAY_PORT` (587), `MAILX_RELAY_USERNAME`, `MAILX_RELAY_PASSWORD`; invalid combinations are startup errors that name variables, never values. Compose and `.env.example` carry no credentials.
+- Errors/retry: stage `auth`; SMTP semantics kept on the DeliveryError (454 temporary, 535/534 permanent, transport failures temporary); the engine treats every auth failure as temporary (`stopTemporary`, never another MX) because it describes relay configuration, not the message; existing backoff (30m..4h, 5 operations) bounds retries (tested: 20 jobs with wrong credentials = one AUTH attempt each, retries >= 20 minutes out). No separate AUTH retry system.
+- Secrets: `smtp.Credentials` redacts under every fmt verb and slog; remote AUTH reply text is discarded (codes only); per-Send and per-engine copies; value-free validation errors (255-byte limit, no CR/LF/NUL). Base64 payloads are treated as secrets and searched for in logs, metrics, errors and persisted results in tests.
+- Observability: `mailx_smtp_auth_attempts_total{mechanism (plain|login|none), outcome (success|rejected|temporary|no_tls|not_advertised|no_mechanism|protocol_error|connection_lost|timeout|canceled)}`; worker `delivery_outcome` adds `transport`, `auth_mechanism`, `auth_outcome`. Liveness/readiness never touch the relay.
+- Invariants added: credentials never sent over plaintext or on stale pre-TLS capabilities; MAIL FROM unreachable before 235; direct MX delivery never authenticates (tested with a real MX that offers AUTH); relay failure never becomes direct delivery; AUTH success is not delivery (Accepted still needs final DATA 2xx; QUIT failure after acceptance keeps Accepted=true through the relay path).
+
+## DKIM and verified-From (v0.26; design: `docs/design-v0.26.md`)
+
+- Verified-From: `POST /v1/emails` requires the RFC 5322 From domain (parsed with `net/mail`, canonicalized by `domain.Normalize` via `domain.FromDomain`) to EXACTLY equal a verified, non-deleted domain of the authenticated tenant (`db.VerifiedSenderDomain`). No suffix or parent/subdomain inference; another tenant's or an unverified domain gives 403 `from_domain_not_authorized`. Runs before the idempotency claim, the FileStore write and every insert; `InsertMessage(SenderDomain)` re-checks FOR SHARE in its transaction. MAIL FROM is still the From address (bounce architecture unchanged). The API is the only outbound creator.
+- Signing: `dkim.Sign` = rsa-sha256, 2048-bit, relaxed/relaxed, d=From domain (must equal the message From domain, exactly one From), signed headers from,to,cc,subject,date,message-id,mime-version,content-type,content-transfer-encoding,reply-to (present ones), tags v,a,c,d,s,t,h,bh,b only. Done at acceptance in the API after MIME is final and before storage: stored bytes = queued bytes = transmitted bytes (tested at a capturing MX for direct and relay, plus independent verification with go-msgauth). Retries resend the stored bytes; a message keeps its acceptance-time signature across key rotation.
+- Keys: `dkim_keys` (migration 000012; FK to `domains(tenant_id,id)`; CHECK algorithm/size/selector/lifecycle; `uq_dkim_one_active`, `uq_dkim_one_pending`; `UNIQUE(domain_id,selector)`). Lifecycle pending (does not sign) -> active (after DNS TXT publication is verified by `POST .../dkim/verify`) -> retired (private ciphertext destroyed). Rotation = create a new pending key, publish, verify; the old key signs until activation. Selector `mx`+YYYYMMDD+4 hex. Domain deletion deletes keys in the same transaction; a re-claimed name starts with no keys.
+- Storage/crypto: private key PKCS#8 DER -> AES-256-GCM (`internal/secretbox`, fresh nonce, AAD `mailx-dkim-v1|tenant|domain|selector`). `MAILX_DKIM_MASTER_KEY` (required, base64 32 bytes) must differ from `MAILX_WEBHOOK_MASTER_KEY` (enforced at startup); errors name variables not values. Webhook `SecretBox` now wraps the shared `secretbox`. Private keys are never in any API response, log, metric or error; keys live in process memory while used (Go cannot zeroize).
+- Key creation is guarded: a domain with a pending key returns 409 before any RSA generation, and at most 2 generations run concurrently (cancellable wait).
+- Failure behavior: a domain with an ACTIVE key always signs; missing/undecryptable/corrupt/mismatched key or signing failure => 503 `dkim_signing_unavailable`, nothing accepted or stored, never unsigned. A domain with no active key sends unsigned (DKIM not set up).
+- API: `GET|POST /v1/domains/{id}/dkim`, `POST /v1/domains/{id}/dkim/verify` (domains:read/write, tenant-scoped 404); OpenAPI updated (drift test).
+- Observability: `mailx_dkim_signatures_total{algorithm (rsa-sha256), outcome (signed|unsigned_no_key|key_unavailable|key_decrypt_failed|key_invalid|sign_failed|domain_mismatch)}`; nothing domain-, selector- or key-derived is logged or labelled.
+
 ## Security decisions (verified)
 
 - API secrets never stored raw: only `key_id` + HMAC-SHA256(pepper, secret); 256-bit random secret makes slow password hashing pointless; unkeyed SHA-256 fallback without pepper is a documented dev-only choice. All auth failures collapse to one generic 401; DB error on auth fails closed. No public key-creation endpoint (CLI bootstrap).
@@ -140,10 +171,10 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 2. **DSNs are generated but never transmitted** (`worker.handleTerminalFailure` builds/serializes then discards). A terminal failure emits a `failed`/`bounced` event, but the sender gets no bounce email. Also `handleTerminalFailure` runs after outcome persistence and is not itself durable.
 3. **Webhook delivery is at-least-once, no manual replay** (deferred), no global ordering guarantee across events/endpoints.
 4. **Process-local retry state** (`stateStore`) survives only as a cache; durable state is authoritative on every job (v0.20-era note about memory-only state is superseded by `57ee1d0`).
-5. **Domain verification is not enforced on send:** `POST /v1/emails` does not check the sender/From domain against verified `domains`. Ownership exists as a resource only.
+5. (Resolved in v0.26) Verified-From is enforced at the API boundary. Remaining: no per-domain "require DKIM" flag (a domain requires DKIM exactly when it has an active key); no automatic key expiry or scheduled rotation; no explicit key deletion endpoint; Ed25519 and header oversigning deferred; no DKIM DNS re-check after activation.
 6. (Resolved in v0.23) Readiness now checks PostgreSQL and Redis; metrics and structured logs exist. Remaining: no tracing, no log/metric shipping, metrics endpoint unauthenticated (bind to loopback/private network only), `queue_depth` is scraped live from Redis each scrape.
 7. **Mixed-domain recipients rejected** (one delivery domain per message); recipient-level partial success is not modeled (RCPT is all-or-error).
-8. **No TLS/STARTTLS** on SMTP receive or (verified: not implemented) outbound; IDN/A-label domains unsupported in DNS and domain ownership.
+8. **No inbound STARTTLS and no inbound SMTP AUTH** (outbound STARTTLS exists since v0.24); IDN/A-label domains unsupported in DNS and domain ownership. Outbound TLS gaps: no DANE/MTA-STS, so MX-to-domain binding relies on DNS; default opportunistic policy fails closed on a peer that advertises STARTTLS with an untrusted or mismatched certificate (no unverified-encryption mode); TLS facts are logs/metrics only, not persisted per attempt.
 9. **FileStore write precedes DB commit** in the API path: a failed tx can leave an orphan message directory (deliberate and documented as harmless in `email_handler.go`: the reverse, a DB row without bytes, cannot happen; no reaper exists). Raw MIME lives on local disk (single-node storage).
 10. **SMTP receiver is not wired to the outbox/queue**: inbound mail is stored, not relayed.
 11. Attempt limits/backoff are fixed defaults (5 ops, 30m/4h), not configurable via env.
@@ -153,9 +184,13 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 
 ## Superseded (do not treat as current)
 
+- Pre-v0.26: outbound mail from any From domain was accepted (v0.21 recorded ownership but did not enforce it) and every message was sent unsigned.
+- Pre-v0.24: outbound SMTP was always plaintext; the client sent MAIL FROM straight after the first EHLO and its context watcher set deadlines on the (single) connection field.
 - Pre-v0.23: ad-hoc `log.Printf` logging (including full inbound message bodies/addresses in the SMTP sink), PostgreSQL-only readiness with raw error text in the 503 body, and `withRecoverMiddleware` outside the request-ID middleware.
 - v0.18 worker "best-effort status reporter after Ack/Release" -> replaced in `57ee1d0` by transactional `OutcomeStore` persisted before finalization.
 - v0.18 temporary `devTenantMiddleware` -> replaced by API-key `authenticateMiddleware` in v0.19.
 - v0.15 `recipients UNIQUE(message_id, address)` -> `(message_id, address, header_kind)` (migration 000003).
 - v0.19 partial index `idx_api_keys_tenant_active` -> superseded by 000008 tenant/created_at index.
 - v0.16/v0.20 statements that retry state is process memory -> superseded by durable reconstruction (`57ee1d0`).
+15. Relay credentials live in the process environment and memory for the process lifetime (Go strings cannot be zeroed); no `_FILE` secret input, no rotation without restart. Implicit-TLS relays (port 465), OAuth/XOAUTH2 and SCRAM are unsupported; one relay for all domains and tenants.
+16. DKIM master key lives in the environment like the webhook key (no `_FILE` input, no re-encryption tooling for master-key rotation); losing it makes stored DKIM keys undecryptable and domains with an active key refuse to send until rekeyed.

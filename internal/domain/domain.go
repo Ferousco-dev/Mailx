@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -64,6 +65,23 @@ func Normalize(raw string) (string, error) {
 		return "", ErrInvalidName
 	}
 	return name, nil
+}
+
+// FromDomain extracts the canonical domain of an RFC 5322 mailbox ("Name
+// <user@host>", "<user@host>" or "user@host") using the standard-library
+// address parser and the SAME Normalize used for domain ownership, so sender
+// authorization and ownership can never disagree about what a domain is. It
+// never matches by suffix: only the parsed domain of the actual mailbox counts.
+func FromDomain(mailbox string) (string, error) {
+	addr, err := mail.ParseAddress(strings.TrimSpace(mailbox))
+	if err != nil {
+		return "", ErrInvalidName
+	}
+	at := strings.LastIndexByte(addr.Address, '@')
+	if at <= 0 || at == len(addr.Address)-1 {
+		return "", ErrInvalidName
+	}
+	return Normalize(addr.Address[at+1:])
 }
 
 func generateToken() (string, error) {

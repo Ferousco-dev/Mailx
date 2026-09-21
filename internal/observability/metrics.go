@@ -23,10 +23,20 @@ var (
 	messageResults = []string{"accepted", "rejected", "temporary_failure"}
 	kinds          = []string{"accepted", "invalid_request", "dns_not_found", "dns_null_mx", "dns_temporary",
 		"dns_failure", "transfer_temporary", "transfer_permanent", "context"}
-	decisions  = []string{"retry", "terminal_success", "terminal_failure"}
-	queueOps   = []string{"enqueue", "claim", "ack", "release", "renew", "persist"}
-	okErr      = []string{"ok", "error"}
-	whOutcomes = []string{"succeeded", "retrying", "failed"}
+	decisions   = []string{"retry", "terminal_success", "terminal_failure"}
+	queueOps    = []string{"enqueue", "claim", "ack", "release", "renew", "persist"}
+	okErr       = []string{"ok", "error"}
+	whOutcomes  = []string{"succeeded", "retrying", "failed"}
+	tlsPolicies = []string{"opportunistic", "required"}
+	tlsOutcomes = []string{"established", "not_offered", "required_unavailable", "rejected", "handshake_timeout",
+		"verify_failed", "handshake_failed", "connection_lost", "ehlo_failed", "canceled", "protocol_error"}
+	tlsVersions  = []string{"1.2", "1.3", "other", "none"}
+	dkimAlgs     = []string{"rsa-sha256"}
+	dkimOutcomes = []string{"signed", "unsigned_no_key", "key_unavailable", "key_decrypt_failed", "key_invalid",
+		"sign_failed", "domain_mismatch"}
+	authMechs    = []string{"plain", "login", "none"}
+	authOutcomes = []string{"success", "rejected", "temporary", "no_tls", "not_advertised", "no_mechanism",
+		"protocol_error", "connection_lost", "timeout", "canceled"}
 )
 
 func pick(v string, allowed []string) string {
@@ -57,6 +67,9 @@ type Metrics struct {
 	depthErrDesc *prometheus.Desc
 	webhooks     *prometheus.CounterVec
 	webhookDur   *prometheus.HistogramVec
+	tlsSessions  *prometheus.CounterVec
+	authAttempts *prometheus.CounterVec
+	dkimSigs     *prometheus.CounterVec
 	depthFn      DepthFunc
 	depthDesc    *prometheus.Desc
 }
@@ -85,13 +98,20 @@ func NewMetrics(info buildinfo.Info) (*Metrics, error) {
 		Help: "Webhook delivery attempts by outcome."}, []string{"outcome"})
 	m.webhookDur = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: ns, Name: "webhook_attempt_duration_seconds",
 		Help: "Webhook attempt duration.", Buckets: []float64{.05, .1, .25, .5, 1, 2.5, 5, 10}}, []string{"outcome"})
+	m.tlsSessions = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "smtp_tls_sessions_total",
+		Help: "Outbound SMTP TLS decisions by policy, bounded outcome and negotiated version."},
+		[]string{"policy", "outcome", "version"})
+	m.authAttempts = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "smtp_auth_attempts_total",
+		Help: "Outbound SMTP AUTH results by bounded mechanism and outcome."}, []string{"mechanism", "outcome"})
+	m.dkimSigs = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "dkim_signatures_total",
+		Help: "DKIM signing attempts by bounded algorithm and outcome."}, []string{"algorithm", "outcome"})
 	m.depthDesc = prometheus.NewDesc(ns+"_queue_depth", "Queue jobs available plus claimed.", nil, nil)
 	build := prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "build_info",
 		Help: "Build identity; value is always 1."}, []string{"version", "commit"})
 	build.WithLabelValues(info.Version, info.Commit).Set(1)
 
 	for _, c := range []prometheus.Collector{m.httpTotal, m.httpDuration, m.smtpSessions, m.smtpActive, m.smtpMessages,
-		m.deliveries, m.deliveryDur, m.queueOps, m.webhooks, m.webhookDur, build, m,
+		m.deliveries, m.deliveryDur, m.queueOps, m.tlsSessions, m.authAttempts, m.dkimSigs, m.webhooks, m.webhookDur, build, m,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})} {
 		if err := m.reg.Register(c); err != nil {
 			return nil, err
@@ -216,5 +236,35 @@ func (m *Metrics) WebhookAttempt(outcome string, d time.Duration) {
 		defer guard()
 		m.webhooks.WithLabelValues(pick(outcome, whOutcomes)).Inc()
 		m.webhookDur.WithLabelValues(pick(outcome, whOutcomes)).Observe(d.Seconds())
+	}
+}
+
+// TLSResult records one outbound SMTP TLS decision. It satisfies
+// smtp.TLSObserver. Every value is allowlisted; no host, address or error text
+// can become a label.
+func (m *Metrics) TLSResult(policy, outcome, version string) {
+	if m != nil {
+		defer guard()
+		m.tlsSessions.WithLabelValues(pick(policy, tlsPolicies), pick(outcome, tlsOutcomes), pick(version, tlsVersions)).Inc()
+	}
+}
+
+// AuthResult records one outbound SMTP AUTH result. It satisfies
+// smtp.AuthObserver. Labels are allowlisted: no user name, host or error text
+// can ever become a label.
+func (m *Metrics) AuthResult(mechanism, outcome string) {
+	if m != nil {
+		defer guard()
+		m.authAttempts.WithLabelValues(pick(mechanism, authMechs), pick(outcome, authOutcomes)).Inc()
+	}
+}
+
+// SignResult records one DKIM signing attempt. It satisfies dkim.Observer.
+// Labels are allowlisted: no domain, selector, key data or error text can ever
+// become a label.
+func (m *Metrics) SignResult(algorithm, outcome string) {
+	if m != nil {
+		defer guard()
+		m.dkimSigs.WithLabelValues(pick(algorithm, dkimAlgs), pick(outcome, dkimOutcomes)).Inc()
 	}
 }

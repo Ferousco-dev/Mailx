@@ -58,3 +58,45 @@ v0.23 complete pending commit. Not pushed. Known limits recorded in `architectur
 ## 2026-09-21 | REVIEW | constructor | CR-004
 Greptile reviewed PR #14 (3 findings, DEF-005..DEF-007), all fixed with regression tests; `go vet`, `go build` (darwin, linux), `go test -race -count=1 ./...` with explicit DSN pass.
 Note: architecture.md limitation 6 remains accurate; the SMTP-only mode now also serves the operator listener.
+
+## 2026-09-21 | G0-G3 | conductor | v0.24 PLAN
+Scope CR-005: outbound STARTTLS only. Reality check: HEAD was `a8849e0`, not the `4148ad6` in the request. RFC 3207 read (STARTTLS keyword, 220/454/501, state reset, EHLO after TLS, public servers must not require it). Design `docs/design-v0.24.md`. No migration needed.
+
+## 2026-09-21 | G4 | constructor | GATE PASS
+`internal/smtp/client_tls.go` (307 lines), `client.go` refactor (hello/secure, raw/conn), stages, transfer TLS info, delivery fallback, `mailx_smtp_tls_sessions_total`, worker tls_* log fields, `cmd/mailx/tlsconfig.go`, Dockerfile ca-certificates, `.env.example`/compose. No InsecureSkipVerify anywhere in production code.
+
+## 2026-09-21 | G5 | verifier | GATE PASS
+fmt, vet, builds (darwin, linux/amd64, linux/arm64), `go test -count=1 ./...` and `-race` with explicit PostgreSQL DSN and Redis: all pass, 0 skipped. TLS matrix A-M covered (client, delivery, retry, worker pipeline, observability privacy, cmd config); concurrency test repeated 15x and TLS subset 10x under -race, no leaks. Real Dockerfile build succeeded (exit 0); Compose e2e: health/readiness normal, PostgreSQL and Redis outage and recovery, invalid policy rejected at startup, `required` starts. DEF-008 found and fixed.
+
+## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
+v0.24 complete pending commit. Not pushed. Next: v0.25 SMTP AUTH (not started).
+
+## 2026-09-21 | G0-G3 | conductor | v0.25 PLAN
+Scope CR-006: outbound SMTP AUTH to a trusted relay only. Baseline at `d0cbda6` green (fmt, vet, build, diff-check, test, race with real PostgreSQL/Redis). RFC 4954 read (mechanism list may change after STARTTLS; 535 permanent, 454 temporary; plaintext mechanisms need TLS; PLAIN over TLS mandatory; initial-response line limit). Design `docs/design-v0.25.md`. No migration.
+
+## 2026-09-21 | G4 | constructor | GATE PASS
+`internal/smtp/client_auth.go`, `client.go`/`client_tls.go` integration, `delivery.Config.Relay` + `Result.Transport`, `transfer` Auth plumbing, `mailx_smtp_auth_attempts_total`, worker log fields, `cmd/mailx/relayconfig.go`, `smtptest` AUTH scripting. No InsecureSkipVerify; no credential in any print path.
+
+## 2026-09-21 | G5 | verifier | GATE PASS
+See final validation entry appended below when the full suite, Docker build and Compose checks complete.
+
+## 2026-09-21 | G5 (final) | verifier | GATE PASS
+fmt, vet, builds (darwin, linux/amd64, linux/arm64), `go test -count=1 ./...` and `-race` with explicit PostgreSQL DSN and Redis: all pass, 0 skipped. AUTH subset and mixed-failure concurrency repeated 10x under -race with no leaks. Real Dockerfile build succeeded (exit 0). Compose: default start direct transport; relay config errors (password missing, host missing, bad port) fail startup naming variables only; a valid relay config starts and a secret marker never appears in container logs; liveness and readiness stay 200 with an unreachable relay; PostgreSQL and Redis outage/recovery unchanged. Security greps: no InsecureSkipVerify, no credential print path, no markers outside tests.
+
+## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
+v0.25 complete pending commit. Not pushed (push planned after review). Next: v0.26 DKIM (not started). DEF-009 was caught before commit.
+
+## 2026-09-21 | G0-G3 | conductor | v0.26 PLAN
+Scope CR-007: DKIM signing, key lifecycle, verified-From. Baseline at `631836c` green (fmt, vet, build, diff-check, test, race with real PostgreSQL/Redis). RFC 6376 and RFC 8301 read (relaxed canonicalization, From must be signed, hash construction, rsa-sha1 forbidden, 2048-bit recommended). Design `docs/design-v0.26.md`; migration 000012 justified (key storage and lifecycle constraints need durable, tenant-safe schema).
+
+## 2026-09-21 | G4 | constructor | GATE PASS
+`internal/dkim` (keys, canon, sign, service), `internal/secretbox`, migration 000012, `database/dkim_keys.go`, sender authorization + in-transaction recheck, API handlers/OpenAPI, cmd wiring, metric. No InsecureSkipVerify, no weak algorithm, no math/rand, no plaintext key path.
+
+## 2026-09-21 | G5 | verifier | GATE PASS
+fmt, vet, builds (darwin, linux/amd64, linux/arm64), `go test -count=1 ./...` and `-race` with explicit PostgreSQL DSN and Redis: all pass, 0 skipped. Targeted DKIM/authorization/concurrency/rotation/deletion/delivery subset repeated 8x under -race. Independent DKIM verification (go-msgauth) of text, html, alternative, multipart/mixed+attachment; mutation and canonicalization tests; DB plaintext-marker inspection; capturing MX proves stored = transmitted bytes for direct and relay. Real Dockerfile build exit 0; Compose: migration 000012 applied, verified-From 403/202, DKIM create returns a pending TXT record with no private material, ciphertext row inspected, master-key validation (missing, malformed, same-as-webhook) fails startup naming variables only, valid key starts.
+
+## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
+v0.26 complete pending commit. Not pushed. Next: v0.27 SPF (not started). DEF-001 and RSK-006 closed.
+
+## 2026-09-21 | REVIEW | constructor | CR-008
+Greptile reviewed PR #15 (3 findings, DEF-011..DEF-013), all fixed with regression tests; key generation is now preceded by the pending check and capped at 2 concurrent generations.

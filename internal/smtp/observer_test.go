@@ -111,3 +111,31 @@ func TestSessionIDsAreUniquePerConnection(t *testing.T) {
 		t.Fatalf("ids %q %q", a, b)
 	}
 }
+
+// Inbound STARTTLS is deferred (v0.24 scope is outbound). The listener must not
+// advertise an extension it cannot complete, and must refuse the command.
+func TestInboundServerDoesNotAdvertiseOrAcceptSTARTTLS(t *testing.T) {
+	srv, cli := net.Pipe()
+	defer cli.Close()
+	go HandleConnection(srv, nil)
+	r := bufio.NewReader(cli)
+	expect(t, r, "220")
+	_, _ = cli.Write([]byte("EHLO client.test\r\n"))
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToUpper(line), "STARTTLS") {
+			t.Fatalf("inbound EHLO advertises STARTTLS: %q", line)
+		}
+		if line[3] == ' ' {
+			break
+		}
+	}
+	_, _ = cli.Write([]byte("STARTTLS\r\n"))
+	line, _ := r.ReadString('\n')
+	if strings.HasPrefix(line, "220") {
+		t.Fatalf("inbound server accepted STARTTLS: %q", line)
+	}
+}

@@ -113,13 +113,26 @@ func (db *DB) RecordDomainCheck(ctx context.Context, tenantID, id string, verifi
 }
 
 func (db *DB) DeleteDomain(ctx context.Context, tenantID, id string, deletedAt time.Time) error {
-	tag, err := db.pool.Exec(ctx, `UPDATE domains SET deleted_at = $3, updated_at = $3
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("database: begin delete domain: %w", normalizeErr(err))
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `UPDATE domains SET deleted_at = $3, updated_at = $3
 		WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL`, tenantID, id, deletedAt)
 	if err != nil {
 		return fmt.Errorf("database: delete domain: %w", normalizeErr(err))
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrNotFound
+	}
+	// A deleted domain must stop signing at once, and its private keys must not
+	// survive to be reachable by whoever claims the name next.
+	if _, err := tx.Exec(ctx, `DELETE FROM dkim_keys WHERE tenant_id = $1 AND domain_id = $2`, tenantID, id); err != nil {
+		return fmt.Errorf("database: delete domain DKIM keys: %w", normalizeErr(err))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("database: commit delete domain: %w", normalizeErr(err))
 	}
 	return nil
 }

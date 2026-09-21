@@ -1,4 +1,4 @@
-# MailX Milestone History (v0.1 -> v0.23)
+# MailX Milestone History (v0.1 -> v0.26)
 
 Recovered 2026-09-21 from Git history (50 commits, `1218cf8`..`481da4a`) and the code at HEAD `481da4a`.
 Method: commit diffs, package doc comments, migrations, and in-code `vX.Y` labels. No git tags exist.
@@ -41,12 +41,18 @@ commit dates (all v0.1-v0.15 work is dated 2026-09-13..15).
 | v0.21/v0.22 boundary | Durable delivery outcomes | `57ee1d0` | INFERRED (unlabeled; sits between the v0.21 and v0.22 commits; part of the v0.22 event-truth foundation) | Replaced best-effort post-Ack status reporter with `OutcomeStore`: attempt row + message status + immutable event persisted in ONE transaction (`PersistDeliveryOutcome`), *before* queue Ack/Release; worker loads durable state before SMTP so a reclaimed job never knowingly retransmits; queue gained `Renew` (lease refresh during DB outage); migration 000010 (`events.delivery_attempt_number`, unique per message+attempt). Retry state is now rebuilt from PostgreSQL on reclaim. |
 | v0.22 | Webhooks / events | `481da4a` | LABELED (migration 000011, OpenAPI) | Migration 000011 (subscriptions, deliveries, delivery attempts, `events.fanned_out_at`, scopes `webhooks:read/write`); `/v1/webhooks` CRUD, `rotate-secret`, `/deliveries`, `/v1/events`; fan-out worker + delivery worker pool inside the same binary; signed HTTP POST (HMAC-SHA256, `MailX-Webhook-*` headers); AES-256-GCM encrypted signing secrets (`MAILX_WEBHOOK_MASTER_KEY`); SSRF/DNS-rebinding defence at dial time; at-least-once with stable event ID. **COMPLETE.** |
 | v0.23 | Logs / observability | `feat: add operational observability` (after `481da4a`) | LABELED (SRS/design) | Also DEF-004: worker survives Redis claim failures. slog structured logs with correlation IDs; SMTP session IDs; private-content removal from SMTP sink log; Prometheus metrics on a separate operator listener with `/health/live` + `/health/ready` (PostgreSQL+Redis, 2 s bound); `RedisQueue.Ping/Depth`; build info via ldflags; 3 new env vars; no migrations. |
+| v0.24 | Outbound SMTP STARTTLS | `feat: add SMTP STARTTLS transport security` (after `a8849e0`) | LABELED (design `docs/design-v0.24.md`) | `internal/smtp/client_tls.go`: explicit STARTTLS state machine (EHLO -> policy -> STARTTLS -> bounded handshake -> discard capabilities -> EHLO again); `opportunistic` (default) and `required` policies; certificate verification always on (system roots + optional extra roots, MX host name); new stages `starttls`/`tls_handshake`/`ehlo_tls` folded into existing delivery/retry classification (temporary; next MX tried); `mailx_smtp_tls_sessions_total{policy,outcome,version}`; worker `delivery_outcome` log gains tls_* fields; env `MAILX_SMTP_TLS_POLICY`, `MAILX_SMTP_TLS_CA_FILE`; `internal/smtp/smtptest` fake TLS MX; Dockerfile installs ca-certificates. Inbound STARTTLS deferred. |
+| v0.25 | SMTP AUTH / trusted relay submission | `feat: add authenticated SMTP relay submission` (after `d0cbda6`) | LABELED (design `docs/design-v0.25.md`) | `internal/smtp/client_auth.go` (AUTH PLAIN, LOGIN over verified TLS only, post-TLS capabilities only); `delivery.Config.Relay` routes ALL deliveries through one configured relay (no MX lookup, no fallback to direct); direct MX delivery never carries credentials; auth failures are temporary at the engine (existing backoff); env `MAILX_RELAY_HOST/PORT/USERNAME/PASSWORD`; `mailx_smtp_auth_attempts_total{mechanism,outcome}`; worker log gains transport/auth fields; `smtptest` AUTH scripting. Inbound AUTH, OAuth, SCRAM, port 465 deferred. |
+| v0.26 | DKIM signing, key lifecycle, verified-From | `feat: add DKIM signing and verified sender enforcement` (after `631836c`) | LABELED (design `docs/design-v0.26.md`) | `internal/dkim` (RSA-2048 rsa-sha256, relaxed/relaxed, own canonicalization + `crypto/*` primitives; verified by an independent verifier `go-msgauth`); migration 000012 `dkim_keys` (pending -> active -> retired, partial unique indexes); private keys AES-GCM encrypted (`internal/secretbox`, `MAILX_DKIM_MASTER_KEY` must differ from the webhook key); `/v1/domains/{id}/dkim` (+`/verify`); verified-From enforcement in `POST /v1/emails` (exact domain, before durable acceptance, re-checked in the insert transaction); signing at acceptance so stored = transmitted bytes; no unsigned fallback when a key exists; `mailx_dkim_signatures_total{algorithm,outcome}`. |
 
 ## Roadmap position (verified 2026-09-21)
 
 - v0.22 Webhooks / Events: **COMPLETE** (`481da4a`).
-- v0.23 Logs / Observability: **COMPLETE** (validated 2026-09-21: fmt, vet, build, `go test`, `go test -race`, Compose e2e; see `git log` for the `feat: add operational observability` commit).
-- v0.24 (STARTTLS/TLS per SRS out-of-scope note): NOT STARTED. The repository does not define a v0.24 scope beyond that SRS mention; UNAVAILABLE otherwise.
+- v0.23 Logs / Observability: **COMPLETE** (merged; `37b384d`).
+- v0.24 Outbound SMTP STARTTLS: **COMPLETE** (`d0cbda6`).
+- v0.25 SMTP AUTH / trusted relay: **COMPLETE** (`631836c`).
+- v0.26 DKIM / verified-From: **COMPLETE** once the feat commit lands (validated 2026-09-21; see `git log`).
+- v0.27 SPF: **NEXT, NOT STARTED.**
 
 ## Uncertain / unavailable
 

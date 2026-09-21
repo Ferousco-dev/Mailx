@@ -9,7 +9,8 @@
 // that case risks duplicate work and unusual DSNs.
 //
 // MailX therefore falls back to the next MX only when the failure was
-// pre-session: unable to connect, greeting failure, or EHLO/HELO refused.
+// pre-session: unable to connect, greeting failure, EHLO/HELO refused, or a
+// STARTTLS/TLS failure (all before MAIL FROM).
 // Once past EHLO, the message-level outcome (temp or perm) is the final
 // answer for this delivery operation.
 package delivery
@@ -48,6 +49,24 @@ func decideFallback(err error) fallbackDecision {
 		return stopPermanent
 	case smtp.StageDial:
 		// Never contacted this MX — try the next.
+		return tryNext
+	case smtp.StageAuth:
+		// Relay authentication problems (bad or expired credentials, missing or
+		// unsupported mechanism, server trouble) describe MailX's relay
+		// CONFIGURATION, not this message or its recipient. Failing the email
+		// permanently would bounce senders for an operator mistake, so the
+		// attempt is temporary and the existing backoff (30 minutes doubling to
+		// 4 hours, at most 5 operations) bounds the retry rate. Never a next MX:
+		// there is only one relay, and there is no fallback to direct delivery.
+		return stopTemporary
+	case smtp.StageStartTLS, smtp.StageTLS, smtp.StageEHLOTLS:
+		// TLS could not be established (or was required and unavailable) BEFORE
+		// MAIL FROM, so no message data reached this peer and another MX cannot
+		// duplicate anything. The next MX gets the same TLS policy and the same
+		// certificate verification, so this is not a downgrade path. If every
+		// candidate fails, the result is temporary and the retry engine
+		// schedules a later attempt; TLS trouble is never a permanent verdict
+		// on the recipient.
 		return tryNext
 	case smtp.StageGreeting, smtp.StageEHLO, smtp.StageHELO:
 		// Pre-session failure (bad greeting, EHLO refused, malformed reply).

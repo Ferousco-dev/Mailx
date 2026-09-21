@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/dkim"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
 	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/storage"
@@ -38,6 +39,10 @@ type Config struct {
 	// Nil selects the system resolver; tests inject a deterministic fake.
 	DomainResolver maildomain.TXTResolver
 	Webhooks       *webhook.Service
+	// DKIM signs outbound mail and manages DKIM keys. Required: without it
+	// the API would accept mail from a domain with an active key and send it
+	// unsigned.
+	DKIM *dkim.Service
 	// Logger and Metrics are optional; nil disables the corresponding
 	// observation without changing request handling.
 	Logger  *slog.Logger
@@ -63,6 +68,9 @@ func (c Config) validate() error {
 	}
 	if c.Webhooks == nil {
 		return errors.New("api: Webhooks is nil")
+	}
+	if c.DKIM == nil {
+		return errors.New("api: DKIM is nil")
 	}
 	if c.Ready == nil {
 		return errors.New("api: Ready is nil")
@@ -93,7 +101,7 @@ func NewServer(cfg Config) (*Server, error) {
 		defer cancel()
 		return cfg.Ready(ctx)
 	}
-	mux := newMux(h, cfg.Auth, readiness, routeServices{domains: domainService, webhooks: cfg.Webhooks})
+	mux := newMux(h, cfg.Auth, readiness, routeServices{domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM})
 	log := cfg.Logger
 	if log == nil {
 		log = observability.Discard()

@@ -56,13 +56,16 @@ func TestEveryMetricFamilyIsExposed(t *testing.T) {
 	m.DeliveryAttempt("accepted", "terminal_success", time.Second)
 	m.QueueOp("claim", nil)
 	m.WebhookAttempt("succeeded", time.Millisecond)
+	m.TLSResult("opportunistic", "established", "1.3")
+	m.AuthResult("plain", "success")
+	m.SignResult("rsa-sha256", "signed")
 	names := gather(t, m)
 	for _, want := range []string{
 		"mailx_build_info", "mailx_http_requests_total", "mailx_http_request_duration_seconds",
 		"mailx_smtp_sessions_total", "mailx_smtp_active_sessions", "mailx_smtp_messages_total",
 		"mailx_delivery_attempts_total", "mailx_delivery_attempt_duration_seconds",
 		"mailx_queue_operations_total", "mailx_queue_depth", "mailx_webhook_attempts_total",
-		"mailx_webhook_attempt_duration_seconds", "go_goroutines",
+		"mailx_webhook_attempt_duration_seconds", "mailx_smtp_tls_sessions_total", "mailx_smtp_auth_attempts_total", "mailx_dkim_signatures_total", "go_goroutines",
 	} {
 		if !names[want] {
 			t.Errorf("family %s missing", want)
@@ -175,4 +178,82 @@ func scrape(m *Metrics) string {
 	rec := httptest.NewRecorder()
 	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	return rec.Body.String()
+}
+
+func TestTLSMetricLabelsAreBounded(t *testing.T) {
+	m := newTestMetrics(t)
+	m.TLSResult("opportunistic", "established", "1.3")
+	m.TLSResult("required", "verify_failed", "none")
+	// Hostile values (host names, cert subjects, raw errors) must collapse.
+	m.TLSResult("mx.victim.example", "x509: certificate is valid for evil.example", "TLS 9.9")
+	out := scrape(m)
+	for _, want := range []string{
+		`mailx_smtp_tls_sessions_total{outcome="established",policy="opportunistic",version="1.3"} 1`,
+		`mailx_smtp_tls_sessions_total{outcome="verify_failed",policy="required",version="none"} 1`,
+		`mailx_smtp_tls_sessions_total{outcome="other",policy="other",version="other"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, banned := range []string{"victim", "evil.example", "x509", "TLS 9.9"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unbounded TLS label value %q reached exposition", banned)
+		}
+	}
+	gather(t, m)
+	var nilMetrics *Metrics
+	nilMetrics.TLSResult("required", "established", "1.2") // inert, no panic
+}
+
+func TestAuthMetricLabelsAreBounded(t *testing.T) {
+	m := newTestMetrics(t)
+	m.AuthResult("plain", "success")
+	m.AuthResult("none", "not_advertised")
+	// Hostile values (user names, hosts, server text) must collapse.
+	m.AuthResult("user@example.com", "535 5.7.8 bad password for alice")
+	out := scrape(m)
+	for _, want := range []string{
+		`mailx_smtp_auth_attempts_total{mechanism="plain",outcome="success"} 1`,
+		`mailx_smtp_auth_attempts_total{mechanism="none",outcome="not_advertised"} 1`,
+		`mailx_smtp_auth_attempts_total{mechanism="other",outcome="other"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, banned := range []string{"alice", "user@example.com", "535"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unbounded AUTH label value %q reached exposition", banned)
+		}
+	}
+	gather(t, m)
+	var nilMetrics *Metrics
+	nilMetrics.AuthResult("plain", "success")
+}
+
+func TestDKIMMetricLabelsAreBounded(t *testing.T) {
+	m := newTestMetrics(t)
+	m.SignResult("rsa-sha256", "signed")
+	m.SignResult("rsa-sha256", "key_decrypt_failed")
+	// Hostile values (domains, selectors, key data, raw errors) must collapse.
+	m.SignResult("example.com", "mx20260921ab12 key BEGIN PRIVATE KEY")
+	out := scrape(m)
+	for _, want := range []string{
+		`mailx_dkim_signatures_total{algorithm="rsa-sha256",outcome="signed"} 1`,
+		`mailx_dkim_signatures_total{algorithm="rsa-sha256",outcome="key_decrypt_failed"} 1`,
+		`mailx_dkim_signatures_total{algorithm="other",outcome="other"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, banned := range []string{"example.com", "mx2026", "PRIVATE"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unbounded DKIM label value %q reached exposition", banned)
+		}
+	}
+	gather(t, m)
+	var nilMetrics *Metrics
+	nilMetrics.SignResult("rsa-sha256", "signed")
 }

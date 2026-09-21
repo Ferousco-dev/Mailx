@@ -53,6 +53,8 @@ services:
       MAILX_LOG_LEVEL: ${MAILX_LOG_LEVEL:-info}
       MAILX_LOG_FORMAT: ${MAILX_LOG_FORMAT:-json}
       MAILX_OBSERVABILITY_ADDR: ":9090"
+      # v0.24 outbound SMTP TLS: opportunistic (default) or required.
+      MAILX_SMTP_TLS_POLICY: ${MAILX_SMTP_TLS_POLICY:-opportunistic}
       MAILX_STORAGE_ROOT: "/data"
       MAILX_HTTP_ADDR: ":8080"
       DATABASE_URL: postgres://${POSTGRES_USER:-mailx}:${POSTGRES_PASSWORD:-mailx-dev-only}@postgres:5432/${POSTGRES_DB:-mailx}?sslmode=disable
@@ -63,6 +65,9 @@ services:
       # Explicitly insecure local-development values. Production must provide
       # a random base64 32-byte key and leave private/HTTP destinations off.
       MAILX_WEBHOOK_MASTER_KEY: ${MAILX_WEBHOOK_MASTER_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      # DKIM private-key encryption key. Dev-only placeholder that differs from the
+      # webhook key; production must provide its own random base64 32-byte key.
+      MAILX_DKIM_MASTER_KEY: ${MAILX_DKIM_MASTER_KEY:-AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=}
       MAILX_WEBHOOK_ALLOW_INSECURE: ${MAILX_WEBHOOK_ALLOW_INSECURE:-true}
     volumes:
       - mailx-data:/data

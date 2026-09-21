@@ -49,6 +49,7 @@ func newObservedAPI(t *testing.T, readiness func() error) observedAPI {
 	t.Helper()
 	db := newTestDB(t)
 	tenant := newTestTenant(t, db)
+	verifyTestDomain(t, db, tenant.ID, "example.com")
 	store, err := storage.NewFileStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

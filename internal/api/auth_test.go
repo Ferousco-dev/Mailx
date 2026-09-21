@@ -130,6 +130,7 @@ func TestAuthRevokedKeyRejected(t *testing.T) {
 func TestAuthExpiredKeyRejected(t *testing.T) {
 	db := newTestDB(t)
 	tenant := newTestTenant(t, db)
+	verifyTestDomain(t, db, tenant.ID, "example.com")
 	authSvc := auth.NewService(db, nil)
 	pastTTL := -time.Hour
 	gen, _, err := authSvc.Create(context.Background(), tenant.ID, "y", []string{string(auth.ScopeEmailsRead)}, &pastTTL)
@@ -157,6 +158,7 @@ func TestAuthValidKeyWorks(t *testing.T) {
 func TestAuthorizationSendOnlyScope(t *testing.T) {
 	db := newTestDB(t)
 	tenant := newTestTenant(t, db)
+	verifyTestDomain(t, db, tenant.ID, "example.com")
 	authSvc := auth.NewService(db, nil)
 	gen, _, err := authSvc.Create(context.Background(), tenant.ID, "send-only", []string{string(auth.ScopeEmailsSend)}, nil)
 	if err != nil {
@@ -180,6 +182,7 @@ func TestAuthorizationSendOnlyScope(t *testing.T) {
 func TestAuthorizationReadOnlyScope(t *testing.T) {
 	db := newTestDB(t)
 	tenant := newTestTenant(t, db)
+	verifyTestDomain(t, db, tenant.ID, "example.com")
 	authSvc := auth.NewService(db, nil)
 	gen, _, err := authSvc.Create(context.Background(), tenant.ID, "read-only", []string{string(auth.ScopeEmailsRead)}, nil)
 	if err != nil {
@@ -204,7 +207,7 @@ func TestAuthorizationReadOnlyScope(t *testing.T) {
 }
 
 func TestAuthorizationBothScopesAllowEverything(t *testing.T) {
-	mux, _, _ := setupMux(t) // setupMux already grants both scopes
+	mux, _, _ := setupSendMux(t) // grants both scopes and a verified example.com
 	sendRec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "a@example.com", "to": []string{"b@example.com"}, "text": "x",
 	})
@@ -219,6 +222,7 @@ func TestAuthorizationBothScopesAllowEverything(t *testing.T) {
 func TestCreateAPIKeyRejectsUnknownScope(t *testing.T) {
 	db := newTestDB(t)
 	tenant := newTestTenant(t, db)
+	verifyTestDomain(t, db, tenant.ID, "example.com")
 	authSvc := auth.NewService(db, nil)
 	if _, _, err := authSvc.Create(context.Background(), tenant.ID, "x", []string{"emails:delete"}, nil); err == nil {
 		t.Fatal("expected an unknown scope to be rejected at creation")
