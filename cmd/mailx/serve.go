@@ -257,7 +257,12 @@ func openRedisQueue() (*queue.RedisQueue, error) {
 }
 
 func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o obs) (*worker.Pool, error) {
-	client, err := smtp.NewClient(smtp.ClientConfig{Identity: "mailx.local"})
+	tlsCfg, err := outboundTLS(o)
+	if err != nil {
+		return nil, err
+	}
+	o.log.Info("smtp_tls_configured", "policy", tlsCfg.Policy.String(), "extra_roots", tlsCfg.RootCAs != nil)
+	client, err := smtp.NewClient(smtp.ClientConfig{Identity: "mailx.local", TLS: tlsCfg})
 	if err != nil {
 		return nil, err
 	}

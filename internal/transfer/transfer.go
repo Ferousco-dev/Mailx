@@ -52,6 +52,10 @@ type Result struct {
 	RemoteMessage  string
 	Recipient      string
 	QuitError      string
+	// TLS records the STARTTLS decision for this attempt (policy, whether
+	// STARTTLS was advertised, whether TLS was established, a bounded outcome
+	// category). It carries no host names, addresses or certificate data.
+	TLS smtp.TLSInfo
 }
 
 // Duration reports how long this attempt took.
@@ -155,6 +159,7 @@ func (s *Service) Transfer(ctx context.Context, req Request) (Result, error) {
 	result.Accepted = sendResult.Accepted
 	result.FinalCode = sendResult.FinalCode
 	result.RemoteMessage = sendResult.FinalMessage
+	result.TLS = sendResult.TLS
 	if sendResult.QuitError != nil {
 		result.QuitError = sendResult.QuitError.Error()
 	}

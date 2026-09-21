@@ -15,15 +15,15 @@
     "DOM": 0,
     "DES": 8,
     "TC": 0,
-    "DEF": 7,
-    "CR": 4,
-    "RSK": 11,
-    "DEC": 36,
-    "MET": 9,
+    "DEF": 8,
+    "CR": 5,
+    "RSK": 13,
+    "DEC": 42,
+    "MET": 12,
     "ETH": 1
   },
   "attempts": {
-    "G0": 1,
+    "G0": 2,
     "G1": 1,
     "G2": 1,
     "G3": 1,
@@ -34,12 +34,12 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.23",
-    "ilana_current_through": "v0.23",
-    "current_milestone": "none (v0.24 not started)",
-    "current_milestone_status": "v0.23 complete",
-    "next_milestone": "v0.24 (not started)",
-    "recovered_from_head": "481da4a",
+    "last_completed_milestone": "v0.24",
+    "ilana_current_through": "v0.24",
+    "current_milestone": "none (v0.25 not started)",
+    "current_milestone_status": "v0.24 complete",
+    "next_milestone": "v0.25 SMTP AUTH (not started)",
+    "recovered_from_head": "a8849e0",
     "recovered_on": "2026-09-21"
   }
 }

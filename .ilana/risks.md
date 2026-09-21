@@ -14,3 +14,7 @@
 - RSK-009 [low]: webhook replay/ordering not provided; single master key without versioning.
 - RSK-010 [low]: PostgreSQL integration tests use `MAILX_TEST_DATABASE_URL` if set, else try a local default DSN and SKIP if unreachable (`internal/database/testdb_test.go`), so an unset DSN silently loses coverage; Redis tests FAIL when Redis is unreachable. CI provisions both. Set the DSN explicitly for real validation.
 - RSK-011 [low]: orphan FileStore directories after failed API transactions; no reaper.
+
+- RSK-012 [medium, v0.24]: MX host is verified, but MX-to-recipient-domain binding relies on unauthenticated DNS (no DANE/MTA-STS). Mitigation deferred to a later milestone.
+- RSK-013 [medium, v0.24]: fail-closed opportunistic policy means peers advertising STARTTLS with an untrusted/mismatched certificate receive no mail (retry, then exhaustion) until they fix it or an operator trusts their CA. Trade-off chosen over silent downgrade.
+- RSK-007 [superseded by v0.24]: outbound SMTP now supports STARTTLS; inbound STARTTLS still absent (see architecture limitation 8).

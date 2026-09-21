@@ -241,5 +241,15 @@ func (p *Pool) observeOutcome(c queue.Claim, a retry.DeliveryAttempt) {
 	if r.FinalCode != 0 {
 		attrs = append(attrs, "smtp_code", r.FinalCode)
 	}
+	// Bounded TLS facts from the last MX tried: category and version only,
+	// never host names, certificates or raw TLS errors.
+	if n := len(r.Attempts); n > 0 {
+		if tls := r.Attempts[n-1].Transfer.TLS; tls.Outcome != "" {
+			attrs = append(attrs, "tls_policy", tls.Policy.String(), "tls_outcome", string(tls.Outcome))
+			if tls.Version != "" {
+				attrs = append(attrs, "tls_version", tls.Version)
+			}
+		}
+	}
 	p.log.Info("delivery_outcome", attrs...)
 }

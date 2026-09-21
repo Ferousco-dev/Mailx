@@ -58,3 +58,15 @@ v0.23 complete pending commit. Not pushed. Known limits recorded in `architectur
 ## 2026-09-21 | REVIEW | constructor | CR-004
 Greptile reviewed PR #14 (3 findings, DEF-005..DEF-007), all fixed with regression tests; `go vet`, `go build` (darwin, linux), `go test -race -count=1 ./...` with explicit DSN pass.
 Note: architecture.md limitation 6 remains accurate; the SMTP-only mode now also serves the operator listener.
+
+## 2026-09-21 | G0-G3 | conductor | v0.24 PLAN
+Scope CR-005: outbound STARTTLS only. Reality check: HEAD was `a8849e0`, not the `4148ad6` in the request. RFC 3207 read (STARTTLS keyword, 220/454/501, state reset, EHLO after TLS, public servers must not require it). Design `docs/design-v0.24.md`. No migration needed.
+
+## 2026-09-21 | G4 | constructor | GATE PASS
+`internal/smtp/client_tls.go` (307 lines), `client.go` refactor (hello/secure, raw/conn), stages, transfer TLS info, delivery fallback, `mailx_smtp_tls_sessions_total`, worker tls_* log fields, `cmd/mailx/tlsconfig.go`, Dockerfile ca-certificates, `.env.example`/compose. No InsecureSkipVerify anywhere in production code.
+
+## 2026-09-21 | G5 | verifier | GATE PASS
+fmt, vet, builds (darwin, linux/amd64, linux/arm64), `go test -count=1 ./...` and `-race` with explicit PostgreSQL DSN and Redis: all pass, 0 skipped. TLS matrix A-M covered (client, delivery, retry, worker pipeline, observability privacy, cmd config); concurrency test repeated 15x and TLS subset 10x under -race, no leaks. Real Dockerfile build succeeded (exit 0); Compose e2e: health/readiness normal, PostgreSQL and Redis outage and recovery, invalid policy rejected at startup, `required` starts. DEF-008 found and fixed.
+
+## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
+v0.24 complete pending commit. Not pushed. Next: v0.25 SMTP AUTH (not started).

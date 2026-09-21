@@ -56,13 +56,14 @@ func TestEveryMetricFamilyIsExposed(t *testing.T) {
 	m.DeliveryAttempt("accepted", "terminal_success", time.Second)
 	m.QueueOp("claim", nil)
 	m.WebhookAttempt("succeeded", time.Millisecond)
+	m.TLSResult("opportunistic", "established", "1.3")
 	names := gather(t, m)
 	for _, want := range []string{
 		"mailx_build_info", "mailx_http_requests_total", "mailx_http_request_duration_seconds",
 		"mailx_smtp_sessions_total", "mailx_smtp_active_sessions", "mailx_smtp_messages_total",
 		"mailx_delivery_attempts_total", "mailx_delivery_attempt_duration_seconds",
 		"mailx_queue_operations_total", "mailx_queue_depth", "mailx_webhook_attempts_total",
-		"mailx_webhook_attempt_duration_seconds", "go_goroutines",
+		"mailx_webhook_attempt_duration_seconds", "mailx_smtp_tls_sessions_total", "go_goroutines",
 	} {
 		if !names[want] {
 			t.Errorf("family %s missing", want)
@@ -175,4 +176,30 @@ func scrape(m *Metrics) string {
 	rec := httptest.NewRecorder()
 	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	return rec.Body.String()
+}
+
+func TestTLSMetricLabelsAreBounded(t *testing.T) {
+	m := newTestMetrics(t)
+	m.TLSResult("opportunistic", "established", "1.3")
+	m.TLSResult("required", "verify_failed", "none")
+	// Hostile values (host names, cert subjects, raw errors) must collapse.
+	m.TLSResult("mx.victim.example", "x509: certificate is valid for evil.example", "TLS 9.9")
+	out := scrape(m)
+	for _, want := range []string{
+		`mailx_smtp_tls_sessions_total{outcome="established",policy="opportunistic",version="1.3"} 1`,
+		`mailx_smtp_tls_sessions_total{outcome="verify_failed",policy="required",version="none"} 1`,
+		`mailx_smtp_tls_sessions_total{outcome="other",policy="other",version="other"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, banned := range []string{"victim", "evil.example", "x509", "TLS 9.9"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unbounded TLS label value %q reached exposition", banned)
+		}
+	}
+	gather(t, m)
+	var nilMetrics *Metrics
+	nilMetrics.TLSResult("required", "established", "1.2") // inert, no panic
 }

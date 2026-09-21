@@ -47,6 +47,9 @@ type DeliveryResult struct {
 	FinalCode    int
 	FinalMessage string
 	QuitError    error
+	// TLS describes the TLS decision for this Send. It is populated on both
+	// success and failure and contains no host names or certificate data.
+	TLS TLSInfo
 }
 
 // Client delivers one message per Send call over a fresh TCP connection.
@@ -91,7 +94,10 @@ func (c *Client) Send(ctx context.Context, req DeliveryRequest) (DeliveryResult,
 	if err != nil {
 		return DeliveryResult{}, &DeliveryError{Stage: StageDial, Err: err}
 	}
-	session := &clientSession{conn: conn, config: c.config, reader: bufio.NewReaderSize(conn, c.config.MaxReplyLineBytes*2)}
+	session := &clientSession{
+		raw: conn, conn: conn, config: c.config, serverName: hostOf(req.Address),
+		reader: bufio.NewReaderSize(conn, c.config.MaxReplyLineBytes*2),
+	}
 	defer session.close()
 
 	// Propagate context cancellation to the socket so blocked reads/writes
@@ -99,18 +105,46 @@ func (c *Client) Send(ctx context.Context, req DeliveryRequest) (DeliveryResult,
 	stopWatch := session.watchContext(ctx)
 	defer stopWatch()
 
-	return session.run(req)
+	result, err := session.run(ctx, req)
+	result.TLS = session.tls
+	session.notifyTLS()
+	return result, err
+}
+
+// hostOf returns the host part of a host:port address; it is the identity
+// the peer certificate is verified against under STARTTLS.
+func hostOf(address string) string {
+	if h, _, err := net.SplitHostPort(address); err == nil {
+		return h
+	}
+	return address
 }
 
 // clientSession owns one outbound SMTP connection. Its reply-parsing methods
 // live in client_reply.go so this file stays focused on protocol flow.
 type clientSession struct {
-	conn   net.Conn
-	config ClientConfig
-	reader *bufio.Reader
+	// raw is the TCP connection for the whole session. It never changes, so the
+	// context watcher can set deadlines on it without racing the TLS upgrade.
+	raw net.Conn
+	// conn is what protocol I/O uses: raw before STARTTLS, the TLS conn after.
+	conn       net.Conn
+	config     ClientConfig
+	reader     *bufio.Reader
+	serverName string
+	// caps holds the extensions from the most recent EHLO only; it is cleared
+	// when a TLS handshake begins.
+	caps capabilities
+	tls  TLSInfo
 }
 
-func (s *clientSession) close() { _ = s.conn.Close() }
+func (s *clientSession) close() {
+	if s.conn != s.raw {
+		// Bound the close_notify write so a stalled peer cannot hold the worker.
+		_ = s.raw.SetWriteDeadline(time.Now().Add(time.Second))
+		_ = s.conn.Close()
+	}
+	_ = s.raw.Close()
+}
 
 // watchContext arranges for ctx cancellation to unblock the connection by
 // setting an immediate deadline. The returned func stops the watcher.
@@ -119,14 +153,14 @@ func (s *clientSession) watchContext(ctx context.Context) func() {
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = s.conn.SetDeadline(time.Unix(1, 0))
+			_ = s.raw.SetDeadline(time.Unix(1, 0))
 		case <-done:
 		}
 	}()
 	return func() { close(done) }
 }
 
-func (s *clientSession) run(req DeliveryRequest) (DeliveryResult, error) {
+func (s *clientSession) run(ctx context.Context, req DeliveryRequest) (DeliveryResult, error) {
 	// 1) Greeting.
 	code, _, msg, err := s.readReply()
 	if err != nil {
@@ -136,23 +170,14 @@ func (s *clientSession) run(req DeliveryRequest) (DeliveryResult, error) {
 		return DeliveryResult{}, replyError(StageGreeting, code, "", msg)
 	}
 
-	// 2) EHLO, with HELO fallback on 5xx per RFC 5321 §3.2.
-	code, _, msg, err = s.command("EHLO " + s.config.Identity)
-	if err != nil {
-		return DeliveryResult{}, deliveryErrorFromRead(StageEHLO, err)
+	// 2) EHLO (HELO fallback), then the TLS decision (client_tls.go). MAIL FROM
+	// below only ever runs on a connection whose security state is settled and
+	// whose capabilities come from the latest EHLO.
+	if derr := s.hello(); derr != nil {
+		return DeliveryResult{}, derr
 	}
-	if code != 250 {
-		if code >= 500 && code <= 599 {
-			code, _, msg, err = s.command("HELO " + s.config.Identity)
-			if err != nil {
-				return DeliveryResult{}, deliveryErrorFromRead(StageHELO, err)
-			}
-			if code != 250 {
-				return DeliveryResult{}, replyError(StageHELO, code, "", msg)
-			}
-		} else {
-			return DeliveryResult{}, replyError(StageEHLO, code, "", msg)
-		}
+	if derr := s.secure(ctx); derr != nil {
+		return DeliveryResult{}, derr
 	}
 
 	// 3) MAIL FROM.
@@ -209,6 +234,31 @@ func (s *clientSession) run(req DeliveryRequest) (DeliveryResult, error) {
 		result.QuitError = replyError(StageQuit, qCode, "", qMsg)
 	}
 	return result, nil
+}
+
+// hello sends EHLO, falling back to HELO on a 5xx per RFC 5321 section 3.2,
+// and records the advertised capabilities (none after HELO).
+func (s *clientSession) hello() *DeliveryError {
+	code, _, msg, err := s.command("EHLO " + s.config.Identity)
+	if err != nil {
+		return deliveryErrorFromRead(StageEHLO, err)
+	}
+	if code == 250 {
+		s.caps = parseCapabilities(msg)
+		return nil
+	}
+	if code < 500 || code > 599 {
+		return replyError(StageEHLO, code, "", msg)
+	}
+	code, _, msg, err = s.command("HELO " + s.config.Identity)
+	if err != nil {
+		return deliveryErrorFromRead(StageHELO, err)
+	}
+	if code != 250 {
+		return replyError(StageHELO, code, "", msg)
+	}
+	s.caps = capabilities{}
+	return nil
 }
 
 func (s *clientSession) command(line string) (int, string, string, error) {

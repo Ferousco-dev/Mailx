@@ -16,7 +16,10 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Ferousco-dev/
 # named volume mounts over it - Docker seeds a fresh named volume from
 # the image's existing content/permissions at that path.
 FROM alpine:3.20 AS runtime
-RUN addgroup -S mailx && adduser -S -G mailx mailx \
+# ca-certificates: outbound SMTP STARTTLS and HTTPS webhooks verify peers
+# against the system roots; alpine ships none by default.
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S mailx && adduser -S -G mailx mailx \
     && mkdir -p /data && chown mailx:mailx /data
 WORKDIR /app
 COPY --from=build /out/mailx /app/mailx

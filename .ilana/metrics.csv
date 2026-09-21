@@ -8,3 +8,6 @@ MET-006,2026-09-21,known_limitations_recorded,recovery,14,count,.ilana/architect
 MET-007,2026-09-21,new_env_vars,v0.23,3,count,cmd/mailx/observe.go
 MET-008,2026-09-21,metric_families_mailx,v0.23,13,count,internal/observability/metrics.go
 MET-009,2026-09-21,readiness_bound_seconds,v0.23,2,seconds,internal/observability/operator.go
+MET-010,2026-09-21,new_env_vars,v0.24,2,count,cmd/mailx/tlsconfig.go
+MET-011,2026-09-21,tls_outcome_categories,v0.24,11,count,internal/smtp/client_tls.go
+MET-012,2026-09-21,skipped_tests,v0.24,0,count,go test -v ./...

@@ -35,6 +35,9 @@ type ClientConfig struct {
 	// MaxReplyLines caps the number of continuation lines in one reply.
 	// Zero selects DefaultReplyLineCount.
 	MaxReplyLines int
+	// TLS configures outbound STARTTLS. The zero value is opportunistic TLS
+	// with certificate verification and a finite handshake timeout.
+	TLS TLSConfig
 }
 
 // DefaultClientConfig returns the finite default configuration.
@@ -64,6 +67,15 @@ func (c ClientConfig) normalized() (ClientConfig, error) {
 	}
 	if c.MaxReplyLines == 0 {
 		c.MaxReplyLines = DefaultReplyLineCount
+	}
+	if c.TLS.HandshakeTimeout == 0 {
+		c.TLS.HandshakeTimeout = defaultTLSHandshakeTimeout
+	}
+	if c.TLS.HandshakeTimeout < 0 {
+		return ClientConfig{}, fmt.Errorf("SMTP TLS handshake timeout must not be negative")
+	}
+	if c.TLS.Policy != TLSOpportunistic && c.TLS.Policy != TLSRequired {
+		return ClientConfig{}, fmt.Errorf("SMTP TLS policy is not recognized")
 	}
 	if c.DialTimeout < 0 || c.ReadTimeout < 0 || c.WriteTimeout < 0 {
 		return ClientConfig{}, fmt.Errorf("SMTP client timeouts must not be negative")

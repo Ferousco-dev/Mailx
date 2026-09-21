@@ -1,4 +1,4 @@
-# MailX Architecture, Invariants, Security, Limitations (current through v0.23)
+# MailX Architecture, Invariants, Security, Limitations (current through v0.24)
 
 Verified against HEAD `481da4a` on 2026-09-21. This file states CURRENT truth. Superseded designs are kept only
 under "Superseded" so they are never read as current. History lives in `milestones.md`; rationale IDs in `decisions.md`.
@@ -118,6 +118,17 @@ Tests: `MAILX_TEST_DATABASE_URL` (PostgreSQL DSN; if unset, a local default is t
 - Invariants: metrics/logging failure never alters SMTP, queue, DB, event, or webhook behavior; no logs table, no migrations (still 11).
 - Worker errors passed to `WithOnError` are internal-infrastructure errors only; the recipient address was removed from the worker's "not addressable" error text.
 
+## Outbound SMTP TLS (v0.24; design: `docs/design-v0.24.md`)
+
+- Flow: 220 -> EHLO (HELO fallback on 5xx) -> capabilities -> policy -> `STARTTLS` (must be 220) -> reject if bytes follow the 220 -> `s.caps = nil` -> `tls.Client(raw).HandshakeContext` (bounded) -> swap I/O to TLS conn -> EHLO again (no HELO fallback) -> new capabilities -> MAIL/RCPT/DATA. `raw` never changes (deadline watcher race-free); `conn` is the I/O conn.
+- Policy `MAILX_SMTP_TLS_POLICY`: `opportunistic` (default: TLS if advertised, plaintext only when NOT advertised) or `required` (never sends a message without verified TLS; fails before MAIL FROM). No silent downgrade: refusal (even 5xx), malformed reply, handshake or verification failure, or post-TLS EHLO failure fails the attempt; no plaintext retry on that connection or by reconnecting.
+- Verification always on: system roots (+ `MAILX_SMTP_TLS_CA_FILE` extra roots), validity, server-auth EKU, MX host name (`ServerName` = host of the MX address). NOT verified: that the MX is the right MX for the recipient domain (unauthenticated DNS; no DANE/MTA-STS). No `InsecureSkipVerify` in production code. TLS min 1.2 (equals Go default).
+- Bounds: `DialTimeout`, per-read `ReadTimeout`, `TLS.HandshakeTimeout` (30 s default), caller context (cancel sets a past deadline on the raw conn; close_notify write bounded to 1 s).
+- Errors: stages `starttls`, `tls_handshake`, `ehlo_tls`; always `Temporary`; `TLSFailure.Error()` is a bounded category (raw x509/TLS text only via Unwrap). Delivery engine `decideFallback` returns `tryNext` for these stages (all before MAIL FROM); if all MX fail, kind is `KindTransferTemporary` and the existing retry engine reschedules.
+- Observability: `mailx_smtp_tls_sessions_total{policy,outcome,version}` (allowlisted; 11 outcomes: established, not_offered, required_unavailable, rejected, handshake_timeout, verify_failed, handshake_failed, connection_lost, ehlo_failed, canceled, protocol_error; versions 1.2/1.3/other/none); worker `delivery_outcome` adds `tls_policy`, `tls_outcome`, `tls_version` from the last MX tried.
+- Invariants added: capabilities from before a handshake are never used after it; `Accepted=true` over TLS is never retransmitted even if QUIT/teardown fails (tested at client and worker-pipeline level); liveness/readiness never depend on remote SMTP/TLS; the inbound listener does not advertise STARTTLS (tested).
+- Deployment: the Docker runtime image installs `ca-certificates` (alpine ships none, which would have broken all peer verification including HTTPS webhooks).
+
 ## Security decisions (verified)
 
 - API secrets never stored raw: only `key_id` + HMAC-SHA256(pepper, secret); 256-bit random secret makes slow password hashing pointless; unkeyed SHA-256 fallback without pepper is a documented dev-only choice. All auth failures collapse to one generic 401; DB error on auth fails closed. No public key-creation endpoint (CLI bootstrap).
@@ -143,7 +154,7 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 5. **Domain verification is not enforced on send:** `POST /v1/emails` does not check the sender/From domain against verified `domains`. Ownership exists as a resource only.
 6. (Resolved in v0.23) Readiness now checks PostgreSQL and Redis; metrics and structured logs exist. Remaining: no tracing, no log/metric shipping, metrics endpoint unauthenticated (bind to loopback/private network only), `queue_depth` is scraped live from Redis each scrape.
 7. **Mixed-domain recipients rejected** (one delivery domain per message); recipient-level partial success is not modeled (RCPT is all-or-error).
-8. **No TLS/STARTTLS** on SMTP receive or (verified: not implemented) outbound; IDN/A-label domains unsupported in DNS and domain ownership.
+8. **No inbound STARTTLS** (outbound STARTTLS exists since v0.24); IDN/A-label domains unsupported in DNS and domain ownership. Outbound TLS gaps: no DANE/MTA-STS, so MX-to-domain binding relies on DNS; default opportunistic policy fails closed on a peer that advertises STARTTLS with an untrusted or mismatched certificate (no unverified-encryption mode); TLS facts are logs/metrics only, not persisted per attempt.
 9. **FileStore write precedes DB commit** in the API path: a failed tx can leave an orphan message directory (deliberate and documented as harmless in `email_handler.go`: the reverse, a DB row without bytes, cannot happen; no reaper exists). Raw MIME lives on local disk (single-node storage).
 10. **SMTP receiver is not wired to the outbox/queue**: inbound mail is stored, not relayed.
 11. Attempt limits/backoff are fixed defaults (5 ops, 30m/4h), not configurable via env.
@@ -153,6 +164,7 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 
 ## Superseded (do not treat as current)
 
+- Pre-v0.24: outbound SMTP was always plaintext; the client sent MAIL FROM straight after the first EHLO and its context watcher set deadlines on the (single) connection field.
 - Pre-v0.23: ad-hoc `log.Printf` logging (including full inbound message bodies/addresses in the SMTP sink), PostgreSQL-only readiness with raw error text in the 503 body, and `withRecoverMiddleware` outside the request-ID middleware.
 - v0.18 worker "best-effort status reporter after Ack/Release" -> replaced in `57ee1d0` by transactional `OutcomeStore` persisted before finalization.
 - v0.18 temporary `devTenantMiddleware` -> replaced by API-key `authenticateMiddleware` in v0.19.
