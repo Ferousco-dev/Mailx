@@ -256,13 +256,34 @@ func openRedisQueue() (*queue.RedisQueue, error) {
 	return q, nil
 }
 
+// engineConfig is the production delivery configuration: direct MX delivery
+// unless a trusted relay was explicitly configured.
+func engineConfig(relay *delivery.Relay) delivery.Config {
+	cfg := delivery.DefaultConfig()
+	cfg.Relay = relay
+	return cfg
+}
+
 func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o obs) (*worker.Pool, error) {
 	tlsCfg, err := outboundTLS(o)
 	if err != nil {
 		return nil, err
 	}
 	o.log.Info("smtp_tls_configured", "policy", tlsCfg.Policy.String(), "extra_roots", tlsCfg.RootCAs != nil)
-	client, err := smtp.NewClient(smtp.ClientConfig{Identity: "mailx.local", TLS: tlsCfg})
+	relay, err := outboundRelay()
+	if err != nil {
+		return nil, err
+	}
+	transport := "direct"
+	if relay != nil {
+		transport = "relay"
+	}
+	o.log.Info("smtp_transport_configured", "transport", transport, "auth", relay != nil && relay.Auth != nil)
+	clientCfg := smtp.ClientConfig{Identity: "mailx.local", TLS: tlsCfg}
+	if o.metrics != nil {
+		clientCfg.AuthObserver = o.metrics
+	}
+	client, err := smtp.NewClient(clientCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +291,7 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o
 	if err != nil {
 		return nil, err
 	}
-	engine, err := delivery.NewEngine(dns.NewResolver(), svc, delivery.DefaultConfig())
+	engine, err := delivery.NewEngine(dns.NewResolver(), svc, engineConfig(relay))
 	if err != nil {
 		return nil, err
 	}

@@ -29,6 +29,10 @@ type Request struct {
 	Destination string
 	Envelope    mail.Envelope
 	Raw         string
+	// Auth, when non-nil, makes this a trusted-relay submission (verified TLS
+	// then SMTP AUTH). Only the relay path sets it; direct MX delivery never
+	// does. It is copied per attempt inside the SMTP client.
+	Auth *smtp.Credentials
 }
 
 // Result records what happened during one transfer attempt. It is always
@@ -56,6 +60,9 @@ type Result struct {
 	// STARTTLS was advertised, whether TLS was established, a bounded outcome
 	// category). It carries no host names, addresses or certificate data.
 	TLS smtp.TLSInfo
+	// Auth records the SMTP AUTH decision (mechanism and bounded outcome only;
+	// never credential-derived data).
+	Auth smtp.AuthInfo
 }
 
 // Duration reports how long this attempt took.
@@ -154,12 +161,14 @@ func (s *Service) Transfer(ctx context.Context, req Request) (Result, error) {
 		Address:  req.Destination,
 		Envelope: req.Envelope,
 		Raw:      req.Raw,
+		Auth:     req.Auth,
 	})
 	result.FinishedAt = s.now()
 	result.Accepted = sendResult.Accepted
 	result.FinalCode = sendResult.FinalCode
 	result.RemoteMessage = sendResult.FinalMessage
 	result.TLS = sendResult.TLS
+	result.Auth = sendResult.Auth
 	if sendResult.QuitError != nil {
 		result.QuitError = sendResult.QuitError.Error()
 	}

@@ -47,3 +47,8 @@ Process decisions above (DEC-001..DEC-007) belong to the v0.23 FLEET run and sta
 - DEC-040 [v0.24]: All TLS-stage failures are temporary (statements about the connection, not the recipient) and the delivery engine tries the next MX for them (before MAIL FROM, same policy), reusing the existing retry model.
 - DEC-041 [v0.24]: Inbound STARTTLS is deferred (needs certificate provisioning/reload); the inbound EHLO must not advertise it.
 - DEC-042 [v0.24]: Test infrastructure lives in `internal/smtp/smtptest` (ephemeral in-memory CA + scriptable fake MX) so smtp, delivery-style and worker pipeline tests share one deterministic TLS server.
+- DEC-043 [v0.25]: Trusted relay is an explicit `delivery.Config.Relay`; relay mode replaces MX routing entirely and never falls back to direct delivery, so an operator's "deliver through this relay" intent cannot be silently bypassed.
+- DEC-044 [v0.25]: Credentials exist only inside `Config.Relay` and per-request `DeliveryRequest.Auth`; the SMTP client holds none. This makes "credentials never reach a DNS-discovered MX" structural rather than a runtime check.
+- DEC-045 [v0.25]: Mechanisms PLAIN (preferred) and LOGIN only, only over verified TLS; credentials force TLS-required regardless of policy. OAuth/XOAUTH2, SCRAM, CRAM-MD5 deferred or rejected (see design doc).
+- DEC-046 [v0.25]: Every auth-stage failure is a temporary attempt at the engine (existing backoff, never another MX): authentication describes relay configuration, not the message, so bouncing senders permanently for an operator error was rejected.
+- DEC-047 [v0.25]: Remote AUTH reply text is discarded (code and enhanced status only) and error text is a fixed category, because servers may echo credentials.

@@ -36,6 +36,11 @@ type DeliveryRequest struct {
 	// client normalizes bare LF to CRLF, dot-stuffs any leading dot, and
 	// appends the ".\r\n" terminator.
 	Raw string
+	// Auth, when non-nil, makes this send a trusted-relay submission: TLS is
+	// mandatory and the client authenticates before MAIL FROM. It is copied at
+	// Send so concurrent sends can never share or alias credentials. Direct MX
+	// delivery never sets it.
+	Auth *Credentials
 }
 
 // DeliveryResult reports what happened. Accepted is true only after the
@@ -50,6 +55,9 @@ type DeliveryResult struct {
 	// TLS describes the TLS decision for this Send. It is populated on both
 	// success and failure and contains no host names or certificate data.
 	TLS TLSInfo
+	// Auth describes the AUTH decision (populated on success and failure);
+	// it carries no credential-derived data.
+	Auth AuthInfo
 }
 
 // Client delivers one message per Send call over a fresh TCP connection.
@@ -88,6 +96,14 @@ func (c *Client) Send(ctx context.Context, req DeliveryRequest) (DeliveryResult,
 		}
 	}
 
+	var creds *Credentials
+	if req.Auth != nil {
+		if err := req.Auth.Validate(); err != nil {
+			return DeliveryResult{}, &DeliveryError{Stage: StageInvalidInput, Err: err}
+		}
+		c := *req.Auth // private copy: no aliasing between concurrent sends
+		creds = &c
+	}
 	dialCtx, cancelDial := context.WithTimeout(ctx, c.config.DialTimeout)
 	conn, err := c.dialer(dialCtx, "tcp", req.Address)
 	cancelDial()
@@ -95,7 +111,7 @@ func (c *Client) Send(ctx context.Context, req DeliveryRequest) (DeliveryResult,
 		return DeliveryResult{}, &DeliveryError{Stage: StageDial, Err: err}
 	}
 	session := &clientSession{
-		raw: conn, conn: conn, config: c.config, serverName: hostOf(req.Address),
+		raw: conn, conn: conn, config: c.config, serverName: hostOf(req.Address), creds: creds,
 		reader: bufio.NewReaderSize(conn, c.config.MaxReplyLineBytes*2),
 	}
 	defer session.close()
@@ -107,7 +123,9 @@ func (c *Client) Send(ctx context.Context, req DeliveryRequest) (DeliveryResult,
 
 	result, err := session.run(ctx, req)
 	result.TLS = session.tls
+	result.Auth = session.auth
 	session.notifyTLS()
+	session.notifyAuth()
 	return result, err
 }
 
@@ -133,8 +151,10 @@ type clientSession struct {
 	serverName string
 	// caps holds the extensions from the most recent EHLO only; it is cleared
 	// when a TLS handshake begins.
-	caps capabilities
-	tls  TLSInfo
+	caps  capabilities
+	tls   TLSInfo
+	creds *Credentials // nil for direct delivery
+	auth  AuthInfo
 }
 
 func (s *clientSession) close() {
@@ -177,6 +197,11 @@ func (s *clientSession) run(ctx context.Context, req DeliveryRequest) (DeliveryR
 		return DeliveryResult{}, derr
 	}
 	if derr := s.secure(ctx); derr != nil {
+		return DeliveryResult{}, derr
+	}
+	// AUTH runs only on a verified TLS session and only from the post-TLS
+	// capabilities; MAIL FROM below is unreachable until it succeeds.
+	if derr := s.authenticate(ctx); derr != nil {
 		return DeliveryResult{}, derr
 	}
 

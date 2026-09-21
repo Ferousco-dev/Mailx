@@ -18,3 +18,7 @@
 - RSK-012 [medium, v0.24]: MX host is verified, but MX-to-recipient-domain binding relies on unauthenticated DNS (no DANE/MTA-STS). Mitigation deferred to a later milestone.
 - RSK-013 [medium, v0.24]: fail-closed opportunistic policy means peers advertising STARTTLS with an untrusted/mismatched certificate receive no mail (retry, then exhaustion) until they fix it or an operator trusts their CA. Trade-off chosen over silent downgrade.
 - RSK-007 [superseded by v0.24]: outbound SMTP now supports STARTTLS; inbound STARTTLS still absent (see architecture limitation 8).
+
+- RSK-014 [medium, v0.25]: relay credentials are read from environment variables and stay in process memory; anyone with process-environment access (container inspect, /proc) can read them. Mitigation deferred: `_FILE`/secret-manager inputs and rotation.
+- RSK-015 [low, v0.25]: wrong relay credentials keep queued mail retrying (bounded by backoff and 5 operations) until fixed; senders are not told until exhaustion. There is no relay health signal by design (liveness/readiness never call the relay); watch `mailx_smtp_auth_attempts_total{outcome="rejected"}`.
+- RSK-016 [low, v0.25]: a single relay serves all tenants and domains; no per-tenant routing or authorization.

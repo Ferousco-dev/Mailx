@@ -70,3 +70,18 @@ fmt, vet, builds (darwin, linux/amd64, linux/arm64), `go test -count=1 ./...` an
 
 ## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
 v0.24 complete pending commit. Not pushed. Next: v0.25 SMTP AUTH (not started).
+
+## 2026-09-21 | G0-G3 | conductor | v0.25 PLAN
+Scope CR-006: outbound SMTP AUTH to a trusted relay only. Baseline at `d0cbda6` green (fmt, vet, build, diff-check, test, race with real PostgreSQL/Redis). RFC 4954 read (mechanism list may change after STARTTLS; 535 permanent, 454 temporary; plaintext mechanisms need TLS; PLAIN over TLS mandatory; initial-response line limit). Design `docs/design-v0.25.md`. No migration.
+
+## 2026-09-21 | G4 | constructor | GATE PASS
+`internal/smtp/client_auth.go`, `client.go`/`client_tls.go` integration, `delivery.Config.Relay` + `Result.Transport`, `transfer` Auth plumbing, `mailx_smtp_auth_attempts_total`, worker log fields, `cmd/mailx/relayconfig.go`, `smtptest` AUTH scripting. No InsecureSkipVerify; no credential in any print path.
+
+## 2026-09-21 | G5 | verifier | GATE PASS
+See final validation entry appended below when the full suite, Docker build and Compose checks complete.
+
+## 2026-09-21 | G5 (final) | verifier | GATE PASS
+fmt, vet, builds (darwin, linux/amd64, linux/arm64), `go test -count=1 ./...` and `-race` with explicit PostgreSQL DSN and Redis: all pass, 0 skipped. AUTH subset and mixed-failure concurrency repeated 10x under -race with no leaks. Real Dockerfile build succeeded (exit 0). Compose: default start direct transport; relay config errors (password missing, host missing, bad port) fail startup naming variables only; a valid relay config starts and a secret marker never appears in container logs; liveness and readiness stay 200 with an unreachable relay; PostgreSQL and Redis outage/recovery unchanged. Security greps: no InsecureSkipVerify, no credential print path, no markers outside tests.
+
+## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
+v0.25 complete pending commit. Not pushed (push planned after review). Next: v0.26 DKIM (not started). DEF-009 was caught before commit.

@@ -50,6 +50,15 @@ func decideFallback(err error) fallbackDecision {
 	case smtp.StageDial:
 		// Never contacted this MX — try the next.
 		return tryNext
+	case smtp.StageAuth:
+		// Relay authentication problems (bad or expired credentials, missing or
+		// unsupported mechanism, server trouble) describe MailX's relay
+		// CONFIGURATION, not this message or its recipient. Failing the email
+		// permanently would bounce senders for an operator mistake, so the
+		// attempt is temporary and the existing backoff (30 minutes doubling to
+		// 4 hours, at most 5 operations) bounds the retry rate. Never a next MX:
+		// there is only one relay, and there is no fallback to direct delivery.
+		return stopTemporary
 	case smtp.StageStartTLS, smtp.StageTLS, smtp.StageEHLOTLS:
 		// TLS could not be established (or was required and unavailable) BEFORE
 		// MAIL FROM, so no message data reached this peer and another MX cannot

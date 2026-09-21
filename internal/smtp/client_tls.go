@@ -159,7 +159,9 @@ func (s *clientSession) secure(ctx context.Context) *DeliveryError {
 	s.tls.Policy = s.config.TLS.Policy
 	s.tls.Advertised = s.caps.has("STARTTLS")
 	if !s.tls.Advertised {
-		if s.config.TLS.Policy == TLSRequired {
+		// Credentials imply TLS-required whatever the policy says: AUTH never
+		// travels over plaintext (RFC 4954 section 4 / 8).
+		if s.config.TLS.Policy == TLSRequired || s.creds != nil {
 			return s.tlsFail(StageStartTLS, OutcomeRequiredNoTLS, nil)
 		}
 		s.tls.Outcome = OutcomeNotOffered

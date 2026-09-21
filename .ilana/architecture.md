@@ -1,4 +1,4 @@
-# MailX Architecture, Invariants, Security, Limitations (current through v0.24)
+# MailX Architecture, Invariants, Security, Limitations (current through v0.25)
 
 Verified against HEAD `481da4a` on 2026-09-21. This file states CURRENT truth. Superseded designs are kept only
 under "Superseded" so they are never read as current. History lives in `milestones.md`; rationale IDs in `decisions.md`.
@@ -129,6 +129,15 @@ Tests: `MAILX_TEST_DATABASE_URL` (PostgreSQL DSN; if unset, a local default is t
 - Invariants added: capabilities from before a handshake are never used after it; `Accepted=true` over TLS is never retransmitted even if QUIT/teardown fails (tested at client and worker-pipeline level); liveness/readiness never depend on remote SMTP/TLS; the inbound listener does not advertise STARTTLS (tested).
 - Deployment: the Docker runtime image installs `ca-certificates` (alpine ships none, which would have broken all peer verification including HTTPS webhooks).
 
+## Outbound SMTP AUTH / trusted relay (v0.25; design: `docs/design-v0.25.md`)
+
+- Flow: ... EHLO again (post-TLS) -> AUTH advertised in THAT reply? -> PLAIN (preferred) or LOGIN -> 235 -> MAIL FROM. Credentials imply TLS-required regardless of `MAILX_SMTP_TLS_POLICY`; no STARTTLS, refused STARTTLS, handshake or certificate failure all end the attempt before any AUTH byte. Mechanism chosen only from post-TLS capabilities (both `AUTH x y` and legacy `AUTH=x y` spellings). PLAIN uses the initial response unless the command would exceed the line limit, then the challenge form. CRAM-MD5, DIGEST-MD5, XOAUTH2/OAUTHBEARER, SCRAM unsupported.
+- Routing: `delivery.Config.Relay` (nil = direct). Relay mode routes every delivery to the one configured relay (no MX lookup, no credentials-bearing path anywhere else, no fallback to direct on any failure). Direct mode resolves MX hosts and carries no credentials. `delivery.Result.Transport` = direct|relay. Config: `MAILX_RELAY_HOST` (enables), `MAILX_RELAY_PORT` (587), `MAILX_RELAY_USERNAME`, `MAILX_RELAY_PASSWORD`; invalid combinations are startup errors that name variables, never values. Compose and `.env.example` carry no credentials.
+- Errors/retry: stage `auth`; SMTP semantics kept on the DeliveryError (454 temporary, 535/534 permanent, transport failures temporary); the engine treats every auth failure as temporary (`stopTemporary`, never another MX) because it describes relay configuration, not the message; existing backoff (30m..4h, 5 operations) bounds retries (tested: 20 jobs with wrong credentials = one AUTH attempt each, retries >= 20 minutes out). No separate AUTH retry system.
+- Secrets: `smtp.Credentials` redacts under every fmt verb and slog; remote AUTH reply text is discarded (codes only); per-Send and per-engine copies; value-free validation errors (255-byte limit, no CR/LF/NUL). Base64 payloads are treated as secrets and searched for in logs, metrics, errors and persisted results in tests.
+- Observability: `mailx_smtp_auth_attempts_total{mechanism (plain|login|none), outcome (success|rejected|temporary|no_tls|not_advertised|no_mechanism|protocol_error|connection_lost|timeout|canceled)}`; worker `delivery_outcome` adds `transport`, `auth_mechanism`, `auth_outcome`. Liveness/readiness never touch the relay.
+- Invariants added: credentials never sent over plaintext or on stale pre-TLS capabilities; MAIL FROM unreachable before 235; direct MX delivery never authenticates (tested with a real MX that offers AUTH); relay failure never becomes direct delivery; AUTH success is not delivery (Accepted still needs final DATA 2xx; QUIT failure after acceptance keeps Accepted=true through the relay path).
+
 ## Security decisions (verified)
 
 - API secrets never stored raw: only `key_id` + HMAC-SHA256(pepper, secret); 256-bit random secret makes slow password hashing pointless; unkeyed SHA-256 fallback without pepper is a documented dev-only choice. All auth failures collapse to one generic 401; DB error on auth fails closed. No public key-creation endpoint (CLI bootstrap).
@@ -154,7 +163,7 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 5. **Domain verification is not enforced on send:** `POST /v1/emails` does not check the sender/From domain against verified `domains`. Ownership exists as a resource only.
 6. (Resolved in v0.23) Readiness now checks PostgreSQL and Redis; metrics and structured logs exist. Remaining: no tracing, no log/metric shipping, metrics endpoint unauthenticated (bind to loopback/private network only), `queue_depth` is scraped live from Redis each scrape.
 7. **Mixed-domain recipients rejected** (one delivery domain per message); recipient-level partial success is not modeled (RCPT is all-or-error).
-8. **No inbound STARTTLS** (outbound STARTTLS exists since v0.24); IDN/A-label domains unsupported in DNS and domain ownership. Outbound TLS gaps: no DANE/MTA-STS, so MX-to-domain binding relies on DNS; default opportunistic policy fails closed on a peer that advertises STARTTLS with an untrusted or mismatched certificate (no unverified-encryption mode); TLS facts are logs/metrics only, not persisted per attempt.
+8. **No inbound STARTTLS and no inbound SMTP AUTH** (outbound STARTTLS exists since v0.24); IDN/A-label domains unsupported in DNS and domain ownership. Outbound TLS gaps: no DANE/MTA-STS, so MX-to-domain binding relies on DNS; default opportunistic policy fails closed on a peer that advertises STARTTLS with an untrusted or mismatched certificate (no unverified-encryption mode); TLS facts are logs/metrics only, not persisted per attempt.
 9. **FileStore write precedes DB commit** in the API path: a failed tx can leave an orphan message directory (deliberate and documented as harmless in `email_handler.go`: the reverse, a DB row without bytes, cannot happen; no reaper exists). Raw MIME lives on local disk (single-node storage).
 10. **SMTP receiver is not wired to the outbox/queue**: inbound mail is stored, not relayed.
 11. Attempt limits/backoff are fixed defaults (5 ops, 30m/4h), not configurable via env.
@@ -171,3 +180,4 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 - v0.15 `recipients UNIQUE(message_id, address)` -> `(message_id, address, header_kind)` (migration 000003).
 - v0.19 partial index `idx_api_keys_tenant_active` -> superseded by 000008 tenant/created_at index.
 - v0.16/v0.20 statements that retry state is process memory -> superseded by durable reconstruction (`57ee1d0`).
+15. Relay credentials live in the process environment and memory for the process lifetime (Go strings cannot be zeroed); no `_FILE` secret input, no rotation without restart. Implicit-TLS relays (port 465), OAuth/XOAUTH2 and SCRAM are unsupported; one relay for all domains and tenants.

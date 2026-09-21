@@ -287,3 +287,5 @@ func TestWorkerLogsTLSFactsWithoutPeerData(t *testing.T) {
 		t.Fatalf("peer-derived text reached the log:\n%s", out)
 	}
 }
+
+func buildinfoForTest() buildinfo.Info { return buildinfo.Info{Version: "t", Commit: "t"} }

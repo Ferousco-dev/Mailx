@@ -27,6 +27,7 @@ import (
 
 	"github.com/Ferousco-dev/mailx/internal/dns"
 	"github.com/Ferousco-dev/mailx/internal/mail"
+	"github.com/Ferousco-dev/mailx/internal/smtp"
 	"github.com/Ferousco-dev/mailx/internal/transfer"
 )
 
@@ -51,6 +52,21 @@ type Config struct {
 	// Shuffle randomizes equal-preference MX groups (RFC 5321 §5.1). If nil,
 	// crypto-seeded math/rand/v2 is used. Tests inject a deterministic one.
 	Shuffle func([]dns.MX)
+	// Relay, when non-nil, routes EVERY delivery through one explicitly
+	// configured trusted relay instead of the recipient's MX hosts. There is no
+	// MX lookup and no fallback to direct delivery: if the relay fails, the
+	// delivery fails (and is retried later) rather than silently going direct.
+	// Relay credentials are reachable only through this field, so the direct
+	// path can never send them to an MX discovered from DNS.
+	Relay *Relay
+}
+
+// Relay is a trusted submission relay. Auth may be nil for a relay that
+// authenticates by network position; when set, TLS is mandatory before AUTH.
+type Relay struct {
+	Host string
+	Port int
+	Auth *smtp.Credentials
 }
 
 // DefaultConfig returns the finite production defaults.
@@ -88,6 +104,23 @@ func NewEngine(resolver Resolver, transferer Transferer, cfg Config) (*Engine, e
 	if cfg.Shuffle == nil {
 		cfg.Shuffle = defaultShuffle
 	}
+	if cfg.Relay != nil {
+		r := *cfg.Relay // private copy: later caller mutation cannot change routing or credentials
+		if strings.TrimSpace(r.Host) == "" || strings.ContainsAny(r.Host, " \t\r\n/@") {
+			return nil, errors.New("delivery: relay host is invalid")
+		}
+		if r.Port < 1 || r.Port > 65535 {
+			return nil, fmt.Errorf("delivery: relay port %d out of range", r.Port)
+		}
+		if r.Auth != nil {
+			if err := r.Auth.Validate(); err != nil {
+				return nil, fmt.Errorf("delivery: relay credentials invalid: %w", err)
+			}
+			c := *r.Auth
+			r.Auth = &c
+		}
+		cfg.Relay = &r
+	}
 	return &Engine{
 		resolver: resolver,
 		transfer: transferer,
@@ -113,13 +146,23 @@ func (e *Engine) Deliver(ctx context.Context, req Request) (Result, error) {
 		return res, &Error{Kind: KindInvalidRequest, Domain: req.Domain, Err: err}
 	}
 
-	// 2) DNS.
-	candidates, err := e.resolver.LookupMX(ctx, req.Domain)
-	if err != nil {
-		res.FinishedAt = e.now()
-		return finishDNS(res, req.Domain, err)
+	// 2) Routing. Relay mode names the single configured relay and carries the
+	// only credentials in the system; direct mode resolves MX hosts and carries
+	// none.
+	port, auth := e.config.SMTPPort, (*smtp.Credentials)(nil)
+	if r := e.config.Relay; r != nil {
+		res.Transport = "relay"
+		res.MXCandidates = []dns.MX{{Host: r.Host}}
+		port, auth = r.Port, r.Auth
+	} else {
+		res.Transport = "direct"
+		candidates, err := e.resolver.LookupMX(ctx, req.Domain)
+		if err != nil {
+			res.FinishedAt = e.now()
+			return finishDNS(res, req.Domain, err)
+		}
+		res.MXCandidates = orderCandidates(candidates, e.config.Shuffle)
 	}
-	res.MXCandidates = orderCandidates(candidates, e.config.Shuffle)
 
 	// 3) Try candidates until acceptance, definitive failure, or exhaustion.
 	var lastErr *transfer.TransferError
@@ -130,11 +173,12 @@ func (e *Engine) Deliver(ctx context.Context, req Request) (Result, error) {
 			res.FinishedAt = e.now()
 			return finishContext(res, req.Domain, err)
 		}
-		dest := net.JoinHostPort(mx.Host, fmt.Sprintf("%d", e.config.SMTPPort))
+		dest := net.JoinHostPort(mx.Host, fmt.Sprintf("%d", port))
 		tRes, tErr := e.transfer.Transfer(ctx, transfer.Request{
 			Destination: dest,
 			Envelope:    req.Envelope,
 			Raw:         req.Raw,
+			Auth:        auth,
 		})
 		att := Attempt{MX: mx, Destination: dest, Transfer: tRes}
 		if tRes.Accepted {

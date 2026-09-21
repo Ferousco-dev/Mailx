@@ -38,6 +38,9 @@ type ClientConfig struct {
 	// TLS configures outbound STARTTLS. The zero value is opportunistic TLS
 	// with certificate verification and a finite handshake timeout.
 	TLS TLSConfig
+	// AuthObserver receives one bounded event per Send that carried
+	// credentials. Nil disables it; a panicking observer cannot affect delivery.
+	AuthObserver AuthObserver
 }
 
 // DefaultClientConfig returns the finite default configuration.

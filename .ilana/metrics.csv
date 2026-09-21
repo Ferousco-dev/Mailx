@@ -11,3 +11,6 @@ MET-009,2026-09-21,readiness_bound_seconds,v0.23,2,seconds,internal/observabilit
 MET-010,2026-09-21,new_env_vars,v0.24,2,count,cmd/mailx/tlsconfig.go
 MET-011,2026-09-21,tls_outcome_categories,v0.24,11,count,internal/smtp/client_tls.go
 MET-012,2026-09-21,skipped_tests,v0.24,0,count,go test -v ./...
+MET-013,2026-09-21,new_env_vars,v0.25,4,count,cmd/mailx/relayconfig.go
+MET-014,2026-09-21,auth_outcome_categories,v0.25,10,count,internal/smtp/client_auth.go
+MET-015,2026-09-21,skipped_tests,v0.25,0,count,go test -v ./...

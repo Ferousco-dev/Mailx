@@ -12,6 +12,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"io"
 	"math/big"
 	"net"
@@ -98,6 +99,28 @@ type Options struct {
 	QuitCloses    bool   // drop the connection instead of answering QUIT
 	HeloOnly      bool   // reject EHLO with 502
 	DropAfterTLS  bool   // close the connection right after a successful handshake
+
+	// SMTP AUTH scripting. AuthPre/AuthPost are the mechanism lists advertised
+	// before/after TLS (e.g. "PLAIN LOGIN"; empty = no AUTH line).
+	AuthPre, AuthPost string
+	// AuthUser/AuthPass are the credentials the server accepts.
+	AuthUser, AuthPass string
+	// AuthReply, if set, is sent as the final AUTH reply instead of judging the
+	// credentials (e.g. "454 4.7.0 try later", "garbage").
+	AuthReply string
+	// AuthEcho puts the submitted credentials into the failure reply text, the
+	// way a careless server might.
+	AuthEcho bool
+	// AuthDrop closes the connection on AUTH; AuthStall never answers it;
+	// AuthStallMid stalls a LOGIN exchange after the first challenge.
+	AuthDrop, AuthStall, AuthStallMid bool
+	// RequireAuth answers MAIL with 530 until authentication succeeded.
+	RequireAuth bool
+}
+
+// AuthAttempt is one AUTH exchange as decoded by the server.
+type AuthAttempt struct {
+	Phase, Mechanism, User, Pass string
 }
 
 // Server is one scripted fake MX.
@@ -106,6 +129,7 @@ type Server struct {
 	opts  Options
 	mu    sync.Mutex
 	log   []string
+	auths []AuthAttempt
 	Conns atomic.Int32
 	wg    sync.WaitGroup
 }
@@ -181,6 +205,7 @@ func (m *Server) handle(raw net.Conn) {
 	c := net.Conn(raw)
 	r := bufio.NewReader(c)
 	phase := "plain"
+	authed := false
 	send := func(s string) { _, _ = c.Write([]byte(s)) }
 	send("220 mx.test ESMTP\r\n")
 	for {
@@ -190,8 +215,13 @@ func (m *Server) handle(raw net.Conn) {
 			return
 		}
 		line = strings.TrimRight(line, "\r\n")
-		m.record(phase, line)
 		verb := strings.ToUpper(strings.Fields(line + " x")[0])
+		if verb == "AUTH" { // never keep credential payloads, even in test logs
+			f := strings.Fields(line)
+			m.record(phase, strings.Join(f[:min(2, len(f))], " "))
+		} else {
+			m.record(phase, line)
+		}
 		switch verb {
 		case "EHLO":
 			if m.opts.HeloOnly {
@@ -207,6 +237,13 @@ func (m *Server) handle(raw net.Conn) {
 				caps = m.opts.PostCaps
 			} else if m.opts.Advertise {
 				caps = append([]string{"STARTTLS"}, caps...)
+			}
+			auth := m.opts.AuthPre
+			if phase == "tls" {
+				auth = m.opts.AuthPost
+			}
+			if auth != "" {
+				caps = append(append([]string(nil), caps...), "AUTH "+auth)
 			}
 			lines := append([]string{"mx.test greets you"}, caps...)
 			for i, l := range lines {
@@ -247,7 +284,17 @@ func (m *Server) handle(raw net.Conn) {
 				return
 			}
 			c, r, phase = tc, bufio.NewReader(tc), "tls"
+		case "AUTH":
+			cont, success := m.handleAuth(phase, line, c, r, send)
+			if !cont {
+				return
+			}
+			authed = authed || success
 		case "MAIL", "RCPT":
+			if verb == "MAIL" && m.opts.RequireAuth && !authed {
+				send("530 5.7.0 Authentication required\r\n")
+				continue
+			}
 			send("250 2.1.0 ok\r\n")
 		case "DATA":
 			send("354 go ahead\r\n")
@@ -275,4 +322,88 @@ func (m *Server) handle(raw net.Conn) {
 			send("500 5.5.2 unrecognized\r\n")
 		}
 	}
+}
+
+// AuthAttempts returns the AUTH exchanges the server decoded (in memory only).
+func (m *Server) AuthAttempts() []AuthAttempt {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]AuthAttempt(nil), m.auths...)
+}
+
+// handleAuth runs one AUTH exchange. cont=false ends the connection (drop/stall
+// scripted, or a read error); success reports a 235.
+func (m *Server) handleAuth(phase, line string, c net.Conn, r *bufio.Reader, send func(string)) (cont, success bool) {
+	f := strings.Fields(line)
+	if len(f) < 2 {
+		send("501 5.5.4 syntax\r\n")
+		return true, false
+	}
+	mech := strings.ToUpper(f[1])
+	if m.opts.AuthDrop {
+		return false, false
+	}
+	if m.opts.AuthStall {
+		_, _ = io.Copy(io.Discard, c)
+		return false, false
+	}
+	readLine := func() (string, bool) {
+		l, err := r.ReadString('\n')
+		return strings.TrimRight(l, "\r\n"), err == nil
+	}
+	decode := func(s string) string { b, _ := base64.StdEncoding.DecodeString(s); return string(b) }
+	var user, pass string
+	switch mech {
+	case "PLAIN":
+		initial := ""
+		if len(f) > 2 {
+			initial = f[2]
+		} else {
+			send("334 \r\n")
+			var ok bool
+			if initial, ok = readLine(); !ok {
+				return false, false
+			}
+		}
+		parts := strings.Split(decode(initial), "\x00")
+		if len(parts) == 3 {
+			user, pass = parts[1], parts[2]
+		}
+	case "LOGIN":
+		send("334 VXNlcm5hbWU6\r\n")
+		if m.opts.AuthStallMid {
+			_, _ = io.Copy(io.Discard, c)
+			return false, false
+		}
+		u, ok := readLine()
+		if !ok {
+			return false, false
+		}
+		send("334 UGFzc3dvcmQ6\r\n")
+		p, ok := readLine()
+		if !ok {
+			return false, false
+		}
+		user, pass = decode(u), decode(p)
+	default:
+		send("504 5.5.4 mechanism not supported\r\n")
+		return true, false
+	}
+	m.mu.Lock()
+	m.auths = append(m.auths, AuthAttempt{Phase: phase, Mechanism: mech, User: user, Pass: pass})
+	m.mu.Unlock()
+	switch {
+	case m.opts.AuthReply != "":
+		send(m.opts.AuthReply + "\r\n")
+	case user == m.opts.AuthUser && pass == m.opts.AuthPass:
+		send("235 2.7.0 Authentication successful\r\n")
+		return true, true
+	default:
+		text := "535 5.7.8 Authentication credentials invalid"
+		if m.opts.AuthEcho {
+			text += " for " + user + ":" + pass
+		}
+		send(text + "\r\n")
+	}
+	return true, false
 }

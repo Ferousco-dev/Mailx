@@ -5,3 +5,4 @@
 - CR-003 [approved, 2026-09-21]: implement v0.23 observability (SRS `docs/srs.md`, design `docs/design-v0.23.md`). Scope note: includes the DEF-004 worker resilience fix because the milestone's dependency-outage acceptance criteria cannot hold without it.
 - CR-004 [approved, 2026-09-21]: address Greptile review of PR #14 (DEF-005..DEF-007); no scope beyond the three findings.
 - CR-005 [approved, 2026-09-21]: implement v0.24 outbound SMTP STARTTLS (design `docs/design-v0.24.md`); v0.25 SMTP AUTH, DKIM/SPF/DMARC, inbound STARTTLS explicitly excluded.
+- CR-006 [approved, 2026-09-21]: implement v0.25 outbound SMTP AUTH to a trusted relay (design `docs/design-v0.25.md`); inbound AUTH, OAuth, DKIM/SPF/DMARC excluded.
