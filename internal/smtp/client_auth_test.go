@@ -77,6 +77,22 @@ func authClient(t testing.TB, pki *smtptest.PKI, obs AuthObserver) *Client {
 	return c
 }
 
+// robustAuthClient has generous timeouts for concurrency tests, which verify
+// isolation rather than timing: on a slow CI runner, dozens of simultaneous TLS
+// handshakes under the race detector can take seconds.
+func robustAuthClient(t testing.TB, pki *smtptest.PKI, obs AuthObserver, read time.Duration) *Client {
+	t.Helper()
+	cfg := testClientConfig()
+	cfg.ReadTimeout = read
+	cfg.TLS = TLSConfig{RootCAs: pki.Pool, HandshakeTimeout: 20 * time.Second}
+	cfg.AuthObserver = obs
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
 func authRequest(addr string, creds *Credentials) DeliveryRequest {
 	r := request(addr)
 	r.Auth = creds
@@ -376,7 +392,7 @@ func TestConcurrentAuthenticatedSendsNeverMixCredentials(t *testing.T) {
 		c := &Credentials{Username: fmt.Sprintf("user-%d-%s", i, markerUser), Password: fmt.Sprintf("pass-%d-%s", i, markerPass)}
 		pairs[i] = pair{smtptest.Start(t, smtptest.Options{Advertise: true, Cert: &cert, AuthPost: "PLAIN LOGIN", AuthUser: c.Username, AuthPass: c.Password, RequireAuth: true}), c}
 	}
-	client := authClient(t, pki, nil)
+	client := robustAuthClient(t, pki, nil, 20*time.Second)
 	before := runtime.NumGoroutine()
 	var wg sync.WaitGroup
 	errs := make(chan error, relays*20)
@@ -446,7 +462,7 @@ func TestConcurrentMixedAuthFailuresAndDirectDeliveries(t *testing.T) {
 		"untrusted cert": {mk(smtptest.Options{Cert: &bad}), markerCreds, true},
 		"direct":         {mk(smtptest.Options{}), nil, false},
 	}
-	client := authClient(t, pki, &authRec{})
+	client := robustAuthClient(t, pki, &authRec{}, 3*time.Second) // stalls end after 3s (or by cancellation)
 	before := runtime.NumGoroutine()
 	var wg sync.WaitGroup
 	failures := make(chan string, 200)

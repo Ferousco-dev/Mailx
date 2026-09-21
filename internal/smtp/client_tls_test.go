@@ -374,7 +374,7 @@ func TestConcurrentTLSDeliveriesMixedPeers(t *testing.T) {
 	stall := smtptest.Start(t, smtptest.Options{Advertise: true, Handshake: smtptest.HSStall, Cert: &good})
 	plain := smtptest.Start(t, smtptest.Options{})
 	cfg := testClientConfig()
-	cfg.TLS = TLSConfig{RootCAs: pki.Pool, HandshakeTimeout: 200 * time.Millisecond}
+	cfg.TLS = TLSConfig{RootCAs: pki.Pool, HandshakeTimeout: 2 * time.Second} // generous for slow CI; the stall peer still ends at the timeout
 	c, _ := NewClient(cfg)
 
 	before := runtime.NumGoroutine()

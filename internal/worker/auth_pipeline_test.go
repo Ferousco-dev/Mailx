@@ -73,7 +73,7 @@ func newRelayRig(t *testing.T, opts smtptest.Options, readTimeout time.Duration,
 	}
 	rig.metrics = metrics
 	client, err := smtp.NewClient(smtp.ClientConfig{ReadTimeout: readTimeout, AuthObserver: metrics,
-		TLS: smtp.TLSConfig{RootCAs: pki.Pool, HandshakeTimeout: time.Second, Observer: metrics}})
+		TLS: smtp.TLSConfig{RootCAs: pki.Pool, HandshakeTimeout: 10 * time.Second, Observer: metrics}})
 	if err != nil {
 		t.Fatal(err)
 	}
