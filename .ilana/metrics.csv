@@ -1,0 +1,10 @@
+id,date,metric,category,value,unit,source
+MET-001,2026-09-21,intake_assumptions,process,7,count,.ilana/decisions.md
+MET-002,2026-09-21,commits_inspected,recovery,50,count,git rev-list --count HEAD
+MET-003,2026-09-21,migrations_recovered,recovery,11,count,internal/database/migrations
+MET-004,2026-09-21,milestones_recovered,recovery,22,count,.ilana/milestones.md
+MET-005,2026-09-21,invariants_recorded,recovery,18,count,.ilana/architecture.md
+MET-006,2026-09-21,known_limitations_recorded,recovery,14,count,.ilana/architecture.md
+MET-007,2026-09-21,new_env_vars,v0.23,3,count,cmd/mailx/observe.go
+MET-008,2026-09-21,metric_families_mailx,v0.23,13,count,internal/observability/metrics.go
+MET-009,2026-09-21,readiness_bound_seconds,v0.23,2,seconds,internal/observability/operator.go

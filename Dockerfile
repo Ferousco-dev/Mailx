@@ -5,9 +5,11 @@ FROM golang:1.27.1-bookworm AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
+ARG VERSION=dev
+ARG COMMIT=unknown
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/mailx ./cmd/mailx
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/Ferousco-dev/mailx/internal/buildinfo.Version=${VERSION} -X github.com/Ferousco-dev/mailx/internal/buildinfo.Commit=${COMMIT}" -o /out/mailx ./cmd/mailx
 
 # Runtime stage: alpine (not distroless) so the volume-owning /data
 # directory can be created and chowned to the non-root user before the
@@ -19,5 +21,5 @@ RUN addgroup -S mailx && adduser -S -G mailx mailx \
 WORKDIR /app
 COPY --from=build /out/mailx /app/mailx
 USER mailx:mailx
-EXPOSE 2525
+EXPOSE 2525 8080 9090
 ENTRYPOINT ["/app/mailx"]

@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
-	"github.com/Ferousco-dev/mailx/internal/mail"
 	"github.com/Ferousco-dev/mailx/internal/smtp"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 )
@@ -131,35 +130,29 @@ func notifyShutdown() (context.Context, context.CancelFunc) {
 // serve is the original v0.1-v0.14 SMTP-only entry point, used when
 // DATABASE_URL is not configured (runFull falls back to this).
 func serve() error {
+	o, err := newObs()
+	if err != nil {
+		return err
+	}
 	store, err := storage.NewFileStore(storageRoot())
 	if err != nil {
 		return err
 	}
 	ctx, stop := notifyShutdown()
 	defer stop()
-	return runSMTPReceiver(ctx, store)
+	return runSMTPReceiver(ctx, store, o)
 }
 
 // runSMTPReceiver blocks until ctx is canceled, at which point it closes
 // its listener so Serve returns instead of relying on SIGKILL.
-func runSMTPReceiver(ctx context.Context, store *storage.FileStore) error {
+func runSMTPReceiver(ctx context.Context, store *storage.FileStore, o obs) error {
 	addr := smtpAddr()
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		return err
 	}
-	log.Printf("MailX SMTP server listening on %s", addr)
-	server, err := smtp.NewServer(smtp.DefaultConfig(), func(s smtp.Session, m mail.Message) error {
-		record, e := storage.NewMessageRecord(s.Envelope, m)
-		if e != nil {
-			return e
-		}
-		if e := store.Save(record); e != nil {
-			return e
-		}
-		log.Printf("\n========== EMAIL RECEIVED ==========\nSMTP ENVELOPE\nMAIL FROM: %s\nRCPT TO: %v\nMESSAGE\nFrom: %s\nTo: %v\nCc: %v\nSubject: %s\nDate: %s\nMessage-ID: %s\nBODY\n%s\n====================================", s.Envelope.MailFrom, s.Envelope.Recipients, m.From, m.To, m.Cc, m.Subject, m.Date, m.MessageID, m.Body)
-		return nil
-	})
+	o.log.Info("smtp_listening", "addr", addr)
+	server, err := smtp.NewServer(o.smtpConfig(), o.smtpSink(store))
 	if err != nil {
 		l.Close()
 		return err
@@ -167,7 +160,7 @@ func runSMTPReceiver(ctx context.Context, store *storage.FileStore) error {
 
 	go func() {
 		<-ctx.Done()
-		log.Println("MailX SMTP server shutting down")
+		o.log.Info("smtp_shutting_down")
 		l.Close()
 	}()
 
@@ -195,6 +188,6 @@ func migrate() error {
 	if err := db.Migrate(ctx); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
-	log.Println("MailX: migrations applied")
+	fmt.Println("MailX: migrations applied")
 	return nil
 }

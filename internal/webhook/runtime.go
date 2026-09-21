@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/observability"
 )
 
 type FanOut struct {
@@ -56,6 +58,19 @@ type WorkerPool struct {
 	config  WorkerConfig
 	onError func(error)
 	wg      sync.WaitGroup
+	log     *slog.Logger
+	metrics *observability.Metrics
+}
+
+// WithObservability installs structured logging and metrics. Records carry
+// tenant/subscription/event/delivery IDs and bounded categories only: never
+// the URL, secret, signature, or response body.
+func (p *WorkerPool) WithObservability(l *slog.Logger, m *observability.Metrics) *WorkerPool {
+	if l != nil {
+		p.log = l
+	}
+	p.metrics = m
+	return p
 }
 
 func NewWorkerPool(db *database.DB, box *SecretBox, client *Client, cfg WorkerConfig, onError func(error)) (*WorkerPool, error) {
@@ -74,7 +89,7 @@ func NewWorkerPool(db *database.DB, box *SecretBox, client *Client, cfg WorkerCo
 	if onError == nil {
 		onError = func(error) {}
 	}
-	return &WorkerPool{db: db, box: box, client: client, config: cfg, onError: onError}, nil
+	return &WorkerPool{db: db, box: box, client: client, config: cfg, onError: onError, log: observability.Discard()}, nil
 }
 
 func (p *WorkerPool) Run(ctx context.Context) error {
@@ -107,6 +122,12 @@ func (p *WorkerPool) worker(ctx context.Context) {
 			}
 			continue
 		}
+		p.log.Debug("webhook_claimed", "delivery_id", claim.ID, "subscription_id", claim.SubscriptionID,
+			"event_id", claim.Event.ID, "tenant_id", claim.TenantID, "attempt", claim.AttemptCount)
+		if claim.Status == "delivering" {
+			p.log.Warn("webhook_reclaimed", "delivery_id", claim.ID, "subscription_id", claim.SubscriptionID,
+				"event_id", claim.Event.ID, "tenant_id", claim.TenantID, "attempt", claim.AttemptCount)
+		}
 		p.safeDeliver(ctx, claim)
 	}
 }
@@ -115,6 +136,7 @@ func (p *WorkerPool) safeDeliver(ctx context.Context, claim database.ClaimedWebh
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			p.onError(fmt.Errorf("webhook: recovered panic delivering %s: %v", claim.ID, recovered))
+			p.log.Error("webhook_panic", "delivery_id", claim.ID, "subscription_id", claim.SubscriptionID)
 			// The durable lease expires; another worker will reclaim the already
 			// started attempt without losing the delivery obligation.
 		}
@@ -140,8 +162,28 @@ func (p *WorkerPool) complete(claim database.ClaimedWebhookDelivery, outcome Att
 	})
 	if err != nil {
 		p.onError(fmt.Errorf("webhook complete %s: %w", claim.ID, err))
+		p.log.Error("webhook_complete_failed", "delivery_id", claim.ID, "subscription_id", claim.SubscriptionID)
 		// No destructive fallback: the lease remains durable and reclaimable.
+		return
 	}
+	p.metrics.WebhookAttempt(outcome.Status, outcome.Duration)
+	level := slog.LevelInfo
+	if outcome.Status != "succeeded" {
+		level = slog.LevelWarn
+	}
+	attrs := []any{"delivery_id", claim.ID, "subscription_id", claim.SubscriptionID, "event_id", claim.Event.ID,
+		"tenant_id", claim.TenantID, "attempt", claim.AttemptCount, "outcome", outcome.Status,
+		"duration_ms", outcome.Duration.Milliseconds()}
+	if outcome.ResponseCode != nil {
+		attrs = append(attrs, "response_code", *outcome.ResponseCode)
+	}
+	if outcome.ErrorCategory != "" {
+		attrs = append(attrs, "error_category", outcome.ErrorCategory)
+	}
+	if outcome.NextRetryAt != nil {
+		attrs = append(attrs, "next_retry_at", outcome.NextRetryAt.UTC())
+	}
+	p.log.Log(context.Background(), level, "webhook_attempt", attrs...)
 }
 
 func waitContext(ctx context.Context, duration time.Duration) bool {

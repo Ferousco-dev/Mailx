@@ -1,0 +1,28 @@
+req_id,requirement,type,design_id,module,test_ids,status
+REQ-001,logging configuration,functional,,internal/observability/logging.go,TC-001;TC-002,specified
+REQ-002,process lifecycle logs,functional,,cmd/mailx,TC-003,specified
+REQ-003,HTTP correlation and access logs,functional,,internal/api,TC-004;TC-005,specified
+REQ-004,SMTP session records,functional,,internal/smtp;cmd/mailx,TC-006;TC-007,specified
+REQ-005,queue and worker records,functional,,internal/dispatch;internal/worker,TC-008;TC-009,specified
+REQ-006,email delivery records,functional,,internal/worker,TC-010,specified
+REQ-007,webhook records,functional,,internal/webhook,TC-011,specified
+REQ-008,aggregate metrics,functional,,internal/observability,TC-012;TC-013,specified
+REQ-009,operator metrics endpoint,functional,,internal/observability,TC-014,specified
+REQ-010,liveness,functional,,internal/observability,TC-015,specified
+REQ-011,readiness,functional,,internal/observability;internal/api,TC-016;TC-017,specified
+REQ-012,queue depth,functional,,internal/queue,TC-018,specified
+REQ-013,build identity,functional,,internal/buildinfo,TC-019,specified
+REQ-014,reuse durable inspection,functional,,internal/api;internal/database,TC-020,specified
+REQ-015,observability isolation,functional,,internal/observability,TC-021,specified
+NFR-001,zero forbidden marker exposure,nonfunctional,,cross-cutting,TC-022,specified
+NFR-002,bounded metric labels,nonfunctional,,internal/observability,TC-023,specified
+NFR-003,readiness completes within 2.2 seconds,nonfunctional,,internal/observability,TC-024,specified
+NFR-004,duration metrics use seconds,nonfunctional,,internal/observability,TC-025,specified
+NFR-005,race detector has zero findings,nonfunctional,,cross-cutting,TC-026,specified
+NFR-006,full validation passes,nonfunctional,,cross-cutting,TC-027,specified
+NFR-007,zero extra API DB or network operations,nonfunctional,,internal/api,TC-028,specified
+NFR-008,health body at most 1 KiB,nonfunctional,,internal/observability,TC-029,specified
+NFR-009,at most three new environment settings,nonfunctional,,cmd/mailx,TC-030,specified
+NFR-010,new production files under 400 lines,nonfunctional,,cross-cutting,TC-031,specified
+DOM-001,Prometheus client exposition,domain,,internal/observability,TC-032,specified
+DOM-002,Go slog handlers,domain,,internal/observability,TC-033,specified

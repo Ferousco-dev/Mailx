@@ -9,9 +9,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/queue"
 )
 
@@ -37,7 +39,23 @@ func WithBatchSize(n int) Option          { return func(disp *Dispatcher) { disp
 func WithOnError(fn func(error)) Option { return func(disp *Dispatcher) { disp.onError = fn } }
 
 // Dispatcher polls the outbox and hands due rows to a queue.Queue.
+// WithLogger installs a structured logger (IDs and categories only).
+func WithLogger(l *slog.Logger) Option {
+	return func(d *Dispatcher) {
+		if l != nil {
+			d.log = l
+		}
+	}
+}
+
+// WithMetrics installs the aggregate metrics sink; nil disables metrics.
+func WithMetrics(m *observability.Metrics) Option {
+	return func(d *Dispatcher) { d.metrics = m }
+}
+
 type Dispatcher struct {
+	log       *slog.Logger
+	metrics   *observability.Metrics
 	outbox    Outbox
 	q         queue.Queue
 	now       func() time.Time
@@ -53,6 +71,7 @@ func New(outbox Outbox, q queue.Queue, opts ...Option) *Dispatcher {
 		interval:  defaultInterval,
 		batchSize: defaultBatchSize,
 		onError:   func(error) {},
+		log:       observability.Discard(),
 	}
 	for _, opt := range opts {
 		opt(d)
@@ -84,12 +103,17 @@ func (d *Dispatcher) tick(ctx context.Context) {
 		return
 	}
 	for _, item := range items {
-		if err := d.q.Enqueue(ctx, queue.Job{ID: item.MessageID, MessageID: item.MessageID, AvailableAt: item.AvailableAt}); err != nil {
+		err := d.q.Enqueue(ctx, queue.Job{ID: item.MessageID, MessageID: item.MessageID, AvailableAt: item.AvailableAt})
+		d.metrics.QueueOp("enqueue", err)
+		if err != nil {
 			d.onError(fmt.Errorf("dispatch: enqueue %s: %w", item.MessageID, err))
+			d.log.Error("dispatch_enqueue_failed", "message_id", item.MessageID)
 			continue
 		}
+		d.log.Debug("dispatch_enqueued", "message_id", item.MessageID)
 		if err := d.outbox.MarkOutboxDispatched(ctx, item.MessageID); err != nil && !errors.Is(err, database.ErrNotFound) {
 			d.onError(fmt.Errorf("dispatch: mark dispatched %s: %w", item.MessageID, err))
+			d.log.Error("dispatch_mark_failed", "message_id", item.MessageID)
 		}
 	}
 }

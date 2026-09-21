@@ -30,6 +30,8 @@ type dataReadResult struct {
 }
 
 type Session struct {
+	// ID is a process-local random session identifier for log correlation.
+	ID       string
 	state    state
 	Envelope mail.Envelope
 }
@@ -45,6 +47,7 @@ type connection struct {
 	conn   net.Conn
 	config Config
 	reader *bufio.Reader
+	id     string
 }
 
 func HandleConnection(conn net.Conn, sink func(Session, mail.Message) error) {
@@ -60,12 +63,20 @@ func HandleConnectionWithConfig(conn net.Conn, config Config, sink func(Session,
 	if err != nil {
 		return err
 	}
-	c := connection{conn: conn, config: config, reader: bufio.NewReaderSize(conn, config.CommandLineLimit)}
-	return c.serve(sink)
+	c := connection{conn: conn, config: config, reader: bufio.NewReaderSize(conn, config.CommandLineLimit), id: newSessionID()}
+	start := time.Now()
+	if o := config.Observer; o != nil {
+		observe(func() { o.SessionStarted(c.id) })
+	}
+	err = c.serve(sink)
+	if o := config.Observer; o != nil {
+		observe(func() { o.SessionEnded(c.id, time.Since(start), err != nil) })
+	}
+	return err
 }
 
 func (c *connection) serve(sink func(Session, mail.Message) error) error {
-	s := Session{state: connected}
+	s := Session{state: connected, ID: c.id}
 	if err := c.reply(standardReply(220, "localhost MailX SMTP Server")); err != nil {
 		return err
 	}
@@ -170,11 +181,13 @@ func (c *connection) serve(sink func(Session, mail.Message) error) error {
 			}
 			if result.oversized {
 				s.resetTransaction()
+				c.message("rejected", "oversized")
 				err = c.reply(enhancedReply(552, statusMessageTooLarge, "Message size exceeds fixed limit"))
 				break
 			}
 			if result.malformed {
 				s.resetTransaction()
+				c.message("rejected", "malformed")
 				err = c.reply(enhancedReply(554, statusMessageContentError, "Malformed mail data"))
 				break
 			}
@@ -182,17 +195,20 @@ func (c *connection) serve(sink func(Session, mail.Message) error) error {
 			message, err = mail.ParseMessage(result.raw)
 			if err != nil {
 				s.resetTransaction()
+				c.message("rejected", "content")
 				err = c.reply(enhancedReply(554, statusMessageContentError, "Message content rejected"))
 				break
 			}
 			if sink != nil {
 				if sinkErr := sink(s, message); sinkErr != nil {
 					s.resetTransaction()
+					c.message("temporary_failure", "sink_failed")
 					err = c.reply(enhancedReply(451, statusTemporarySystem, "Temporary internal failure"))
 					break
 				}
 			}
 			s.resetTransaction()
+			c.message("accepted", "")
 			err = c.reply(enhancedReply(250, statusMessageAccepted, "Message accepted by MailX"))
 		case "QUIT":
 			if hasArgument {

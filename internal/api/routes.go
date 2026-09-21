@@ -1,10 +1,12 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/Ferousco-dev/mailx/internal/auth"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
+	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/webhook"
 )
 
@@ -51,7 +53,7 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("GET /v1/webhooks/{id}/deliveries", requireScope(auth.ScopeWebhooksRead)(webhooks.handleDeliveries))
 	v1.HandleFunc("GET /v1/events", requireScope(auth.ScopeWebhooksRead)(webhooks.handleEvents))
 
-	authenticated := chain(v1, authenticateMiddleware(authSvc))
+	authenticated := chain(recordRoute(v1), authenticateMiddleware(authSvc))
 	mux.Handle("/v1/", authenticated)
 
 	mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, r *http.Request) {
@@ -59,7 +61,14 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	})
 	mux.HandleFunc("GET /health/ready", func(w http.ResponseWriter, r *http.Request) {
 		if err := readiness(); err != nil {
-			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "not_ready", "reason": err.Error()})
+			// Raw dependency errors never reach clients; only bounded
+			// component names (e.g. "postgres", "redis") do.
+			body := map[string]any{"status": "not_ready"}
+			var notReady *observability.NotReadyError
+			if errors.As(err, &notReady) {
+				body["failed"] = notReady.Failed
+			}
+			writeJSON(w, http.StatusServiceUnavailable, body)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})

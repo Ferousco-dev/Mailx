@@ -352,3 +352,20 @@ func parseClaim(fields []interface{}) (Claim, error) {
 
 func toMillis(t time.Time) int64    { return t.UTC().UnixMilli() }
 func fromMillis(ms int64) time.Time { return time.UnixMilli(ms).UTC() }
+
+// Ping checks that Redis answers. It is read-only and used for readiness.
+func (q *RedisQueue) Ping(ctx context.Context) error {
+	return q.client.Ping(ctx).Err()
+}
+
+// Depth returns available plus claimed jobs (a job is in exactly one set).
+// It is read-only and never alters queue state.
+func (q *RedisQueue) Depth(ctx context.Context) (int64, error) {
+	pipe := q.client.Pipeline()
+	avail := pipe.ZCard(ctx, q.keys.available)
+	claimed := pipe.ZCard(ctx, q.keys.claimed)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, err
+	}
+	return avail.Val() + claimed.Val(), nil
+}

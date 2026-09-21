@@ -3,8 +3,10 @@ package webhook
 import (
 	"context"
 	"errors"
+	"log/slog"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/observability"
 )
 
 var ErrInvalidURL = errors.New("webhook: invalid destination URL")
@@ -13,6 +15,23 @@ type Service struct {
 	db     *database.DB
 	box    *SecretBox
 	policy URLPolicy
+	log    *slog.Logger
+}
+
+// WithLogger installs a structured logger for subscription lifecycle events
+// (IDs only; never the URL or secret).
+func (s *Service) WithLogger(l *slog.Logger) *Service {
+	if l != nil {
+		s.log = l
+	}
+	return s
+}
+
+func (s *Service) logger() *slog.Logger {
+	if s.log == nil {
+		return observability.Discard()
+	}
+	return s.log
 }
 
 type CreatedSubscription struct {
@@ -60,7 +79,11 @@ func (s *Service) List(ctx context.Context, tenantID string, limit int, after *d
 }
 
 func (s *Service) Delete(ctx context.Context, tenantID, id string) error {
-	return s.db.DisableWebhookSubscription(ctx, tenantID, id)
+	err := s.db.DisableWebhookSubscription(ctx, tenantID, id)
+	if err == nil {
+		s.logger().Info("webhook_subscription_disabled", "tenant_id", tenantID, "subscription_id", id)
+	}
+	return err
 }
 
 func (s *Service) RotateSecret(ctx context.Context, tenantID, id string) (CreatedSubscription, error) {
@@ -76,6 +99,9 @@ func (s *Service) RotateSecret(ctx context.Context, tenantID, id string) (Create
 		return CreatedSubscription{}, err
 	}
 	row, err := s.db.RotateWebhookSecret(ctx, tenantID, id, ciphertext, nonce)
+	if err == nil {
+		s.logger().Info("webhook_secret_rotated", "tenant_id", tenantID, "subscription_id", id)
+	}
 	return CreatedSubscription{Subscription: row, Secret: secret}, err
 }
 

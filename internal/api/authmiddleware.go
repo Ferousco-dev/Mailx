@@ -53,6 +53,9 @@ func authenticateMiddleware(svc authService) func(http.Handler) http.Handler {
 				writeError(w, r, newError(ErrAuthentication, "invalid_api_key", "invalid API key"))
 				return
 			}
+			if m := metaFromContext(r.Context()); m != nil {
+				m.tenantID = record.TenantID
+			}
 			ctx := withTenant(r.Context(), record.TenantID)
 			ctx = withAuth(ctx, record.Scopes, record.ID)
 			next.ServeHTTP(w, r.WithContext(ctx))

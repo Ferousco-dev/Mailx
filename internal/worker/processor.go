@@ -25,6 +25,7 @@ func (p *Pool) processOne(ctx context.Context, c queue.Claim) {
 		return
 	}
 	if durable.Terminal {
+		p.log.Info("terminal_reclaim", "job_id", c.Job.ID, "message_id", c.Job.MessageID)
 		if p.ack(c) {
 			p.states.delete(c.Job.ID)
 		}
@@ -73,6 +74,7 @@ func (p *Pool) processOne(ctx context.Context, c queue.Claim) {
 	if !p.persistOutcome(ctx, c, latest, outcome) {
 		return
 	}
+	p.observeOutcome(c, latest)
 
 	switch outcome.Status {
 	case retry.StatusSucceeded:
@@ -129,12 +131,15 @@ func (p *Pool) persistOutcome(ctx context.Context, c queue.Claim, attempt retry.
 		renewCtx, renewCancel := context.WithTimeout(context.Background(), persistTimeout)
 		renewErr := p.q.Renew(renewCtx, c.Job.ID, c.Token)
 		renewCancel()
+		p.metrics.QueueOp("renew", renewErr)
 		if renewErr != nil {
+			p.log.Warn("claim_renew_failed", "job_id", c.Job.ID, "message_id", c.Job.MessageID)
 			p.onError(fmt.Errorf("worker: renew claim for job %s during outcome persistence: %w", c.Job.ID, renewErr))
 		}
 		persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
 		err := p.outcomes.Persist(persistCtx, c.Job.MessageID, attempt, outcome)
 		persistCancel()
+		p.metrics.QueueOp("persist", err)
 		if err == nil {
 			return true
 		}
@@ -145,6 +150,7 @@ func (p *Pool) persistOutcome(ctx context.Context, c queue.Claim, attempt retry.
 			return false
 		}
 		p.onError(fmt.Errorf("worker: persist outcome for job %s: %w", c.Job.ID, err))
+		p.log.Error("outcome_persist_failed", "job_id", c.Job.ID, "message_id", c.Job.MessageID, "attempt", attempt.Number)
 		timer := time.NewTimer(retryDelay)
 		select {
 		case <-ctx.Done():
@@ -206,12 +212,34 @@ func recipientDomain(recipients []string) (string, error) {
 	}
 	addr := strings.TrimSpace(recipients[0])
 	if !strings.HasPrefix(addr, "<") || !strings.HasSuffix(addr, ">") || len(addr) < 2 {
-		return "", fmt.Errorf("recipient %q is not addressable", addr)
+		return "", errors.New("recipient is not addressable")
 	}
 	inner := addr[1 : len(addr)-1]
 	at := strings.LastIndexByte(inner, '@')
 	if at < 0 || at == len(inner)-1 {
-		return "", fmt.Errorf("recipient %q is not addressable", addr)
+		return "", errors.New("recipient is not addressable")
 	}
 	return inner[at+1:], nil
+}
+
+// observeOutcome records one delivery operation after its outcome is
+// durable. It logs IDs and bounded categories only: no recipient, domain, or
+// remote SMTP text.
+func (p *Pool) observeOutcome(c queue.Claim, a retry.DeliveryAttempt) {
+	decision := "terminal_failure"
+	switch a.Decision {
+	case retry.Retry:
+		decision = "retry"
+	case retry.TerminalSuccess:
+		decision = "terminal_success"
+	}
+	r := a.Result
+	d := r.FinishedAt.Sub(r.StartedAt)
+	p.metrics.DeliveryAttempt(string(r.Kind), decision, d)
+	attrs := []any{"job_id", c.Job.ID, "message_id", c.Job.MessageID, "attempt", a.Number, "kind", string(r.Kind),
+		"decision", decision, "accepted", r.Accepted, "duration_ms", d.Milliseconds()}
+	if r.FinalCode != 0 {
+		attrs = append(attrs, "smtp_code", r.FinalCode)
+	}
+	p.log.Info("delivery_outcome", attrs...)
 }
