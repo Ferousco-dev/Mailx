@@ -112,3 +112,16 @@ fmt, vet, builds (darwin, linux/amd64), `go test -count=1 ./...` and `-race` wit
 
 ## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
 v0.27 complete pending commit. Not pushed. Next: v0.28 DMARC (not started).
+
+
+## 2026-09-21 | G0-G3 | conductor | v0.28 PLAN
+Scope CR-010: DMARC policy, alignment and readiness. Baseline at `cc8c178` green (23 packages, plain and race). RFC 9989 identified as the current standard (RFC 7489 obsolete). Source audit: MAIL FROM = From address, d= = From domain, HELO `mailx.local`. Real domain `appmd.dev` already publishes `v=DMARC1; p=none;` (Gmail reported dmarc=pass), used as a live existing-record case. Design `docs/design-v0.28.md`. No migration (DEC-065).
+
+## 2026-09-21 | G4 | constructor | GATE PASS
+`internal/dmarc` (record, align, service), API `dmarc_handler.go` + routes + OpenAPI, adapters in `cmd/mailx/dmarcconfig.go`, metric `mailx_dmarc_verifications_total`. No new config.
+
+## 2026-09-21 | G5 | verifier | GATE PASS
+fmt, vet, builds (darwin, linux/amd64), `go test -count=1 ./...` and `-race` with real PostgreSQL/Redis: all pass, 0 skipped (1293 passes under race). Parser fuzzed 30 s, no findings; dmarc suite 12x and API DMARC tests 6x under -race. Real `docker compose build` exit 0; Compose runtime against real `appmd.dev` DNS: existing `p=none;` preserved, DKIM and SPF paths ready, readiness ready, receiver_result not_observed; 409 for an unverified domain, 404 unknown; health unaffected; metric exposed. One test-authoring correction (MAIL FROM keeps brackets/case); no production defects.
+
+## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
+v0.28 complete pending commit. Not pushed. RSK-020/RSK-021 (egress IP correctness, `mailx.local` HELO) remain OPEN. Next: v0.29 public SMTP identity (not started).

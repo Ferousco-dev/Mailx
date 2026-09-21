@@ -22,3 +22,7 @@ MET-020,2026-09-21,new_env_vars,v0.27,2,count,cmd/mailx/spfconfig.go
 MET-021,2026-09-21,spf_status_categories,v0.27,8,count,internal/spf/service.go
 MET-022,2026-09-21,skipped_tests,v0.27,0,count,go test -race -v ./...
 MET-023,2026-09-21,largest_new_production_file,v0.27,378,loc,internal/spf/record.go
+MET-024,2026-09-21,new_env_vars,v0.28,0,count,internal/dmarc
+MET-025,2026-09-21,dmarc_dns_status_categories,v0.28,7,count,internal/dmarc/service.go
+MET-026,2026-09-21,skipped_tests,v0.28,0,count,go test -race -v ./...
+MET-027,2026-09-21,largest_new_production_file,v0.28,441,loc,internal/dmarc/service.go

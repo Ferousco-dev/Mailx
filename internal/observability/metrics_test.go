@@ -60,13 +60,14 @@ func TestEveryMetricFamilyIsExposed(t *testing.T) {
 	m.AuthResult("plain", "success")
 	m.SignResult("rsa-sha256", "signed")
 	m.SPFResult("direct", "verified")
+	m.DMARCResult("monitoring", "ready")
 	names := gather(t, m)
 	for _, want := range []string{
 		"mailx_build_info", "mailx_http_requests_total", "mailx_http_request_duration_seconds",
 		"mailx_smtp_sessions_total", "mailx_smtp_active_sessions", "mailx_smtp_messages_total",
 		"mailx_delivery_attempts_total", "mailx_delivery_attempt_duration_seconds",
 		"mailx_queue_operations_total", "mailx_queue_depth", "mailx_webhook_attempts_total",
-		"mailx_webhook_attempt_duration_seconds", "mailx_smtp_tls_sessions_total", "mailx_smtp_auth_attempts_total", "mailx_dkim_signatures_total", "mailx_spf_verifications_total", "go_goroutines",
+		"mailx_webhook_attempt_duration_seconds", "mailx_smtp_tls_sessions_total", "mailx_smtp_auth_attempts_total", "mailx_dkim_signatures_total", "mailx_spf_verifications_total", "mailx_dmarc_verifications_total", "go_goroutines",
 	} {
 		if !names[want] {
 			t.Errorf("family %s missing", want)
@@ -282,4 +283,29 @@ func TestSPFMetricLabelsAreBounded(t *testing.T) {
 	}
 	var nilMetrics *Metrics
 	nilMetrics.SPFResult("direct", "verified")
+}
+
+func TestDMARCMetricLabelsAreBounded(t *testing.T) {
+	m := newTestMetrics(t)
+	m.DMARCResult("monitoring", "ready")
+	m.DMARCResult("conflict", "dns_action_required")
+	// Hostile values (domains, records, URIs, resolver text) must collapse.
+	m.DMARCResult("v=DMARC1; p=none; rua=mailto:x@example.com", "victim.example.org 203.0.113.9")
+	out := scrape(m)
+	for _, want := range []string{
+		`mailx_dmarc_verifications_total{outcome="monitoring",readiness="ready"} 1`,
+		`mailx_dmarc_verifications_total{outcome="conflict",readiness="dns_action_required"} 1`,
+		`mailx_dmarc_verifications_total{outcome="other",readiness="other"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, banned := range []string{"example", "203.0.113", "DMARC1", "mailto"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unbounded DMARC label value %q reached exposition", banned)
+		}
+	}
+	var nilMetrics *Metrics
+	nilMetrics.DMARCResult("monitoring", "ready")
 }

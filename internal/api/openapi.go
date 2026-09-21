@@ -212,6 +212,31 @@ const openAPISpec = `{
         }
       }
     },
+    "/domains/{id}/dmarc": {
+      "get": {
+        "summary": "DMARC guidance and alignment model for a domain",
+        "description": "Requires domains:read. NO DNS query is made ('checked' is false, readiness 'unchecked'). Returns the DMARC record MailX recommends and how MailX's DKIM and SPF identities relate to the From domain. DMARC (RFC 9989, which obsoletes RFC 7489) lives in a TXT record at _dmarc.<domain> and ties the visible RFC 5322 From domain to authenticated identities: a message passes DMARC at a receiver when SPF or DKIM passes AND the authenticated domain aligns with the From domain. Alignment is 'relaxed' (same organizational domain, per the Public Suffix List) or 'strict' (identical domain) per the record's adkim/aspf tags (default relaxed). In MailX the From domain, the SPF/MAIL FROM domain and the DKIM d= domain are the same tenant-verified domain, so both paths align exactly. The recommended first record is 'v=DMARC1; p=none', a monitoring policy: MailX never chooses enforcement for you and never adds rua/ruf report addresses (MailX has no report intake). Tighten to quarantine or reject yourself once you have confirmed all your legitimate senders authenticate and align. DMARC does not grant sending rights (domain ownership does), does not change DKIM keys or SPF authorization, and does not block or slow sending in MailX.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "DMARC guidance", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DmarcStatus"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/domains/{id}/dmarc/verify": {
+      "post": {
+        "summary": "Inspect the domain's published DMARC policy and MailX's alignment readiness",
+        "description": "Requires domains:write and a VERIFIED domain (409 domain_not_verified otherwise, with no DNS query). Performs bounded public TXT lookups (5 s total, at most 8 queries, at most 64 records per answer, 2048-byte record) for _dmarc.<domain> and, when that name has no DMARC record, its parent names up to the organizational domain, and runs one SPF verification. 'dns.status': 'monitoring' (valid, effective policy none), 'enforcing' (valid, quarantine or reject), 'not_configured', 'conflict' (more than one DMARC record at one name: RFC 9989 makes receivers discard all of them, so fix it), 'invalid' (malformed, duplicate or invalid tags, or no p and no valid rua; 'reason' is a code), 'temporary_error' (DNS failed or timed out; nothing is concluded, and it is never treated as a misconfiguration). An existing policy is never rewritten and MailX never recommends a second record. A record inherited from the organizational domain is reported with source 'organizational_domain' and its sp policy (when present) applies to this subdomain. Tags: v, p, sp, np, adkim, aspf, t, psd, rua, ruf are understood; pct, rf and ri were removed by RFC 9989 and are ignored with a warning; unknown tags are ignored. 'readiness': 'ready' means a valid DMARC record exists and at least one authentication path is configured AND aligned (DKIM: an active key; SPF: a verified SPF record in direct mode), 'dns_action_required', 'authentication_incomplete', or 'unknown' (for example relay mode, where the relay may rewrite the return-path so the SPF path cannot be established, or a DNS/SPF/DKIM lookup failure). READINESS IS NOT A RECEIVER RESULT: 'ready' is a precondition for a receiver to pass DMARC, never proof that it did (receiver_result is always 'not_observed'); a published p=reject does not mean mail reaches the inbox. Limits: organizational domains use the Public Suffix List rather than the RFC 9989 DNS tree walk (they differ only where a public-suffix operator publishes psd tags); aggregate and failure reports are not received or shown. This call stores nothing and changes no domain, DKIM, SPF or sending-authorization state. MailX does not block sending when DMARC is missing or invalid.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "Verification result", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DmarcStatus"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/domains/{id}/spf": {
       "get": {
         "summary": "SPF guidance for a domain",
@@ -345,6 +370,40 @@ const openAPISpec = `{
             "value": {"type": "string", "description": "One complete SPF record. Empty when MailX cannot truthfully provide one."}}},
           "warnings": {"type": "array", "items": {"type": "string", "enum": ["unevaluated_mechanisms", "permits_all", "dns_lookup_limit_risk", "deprecated_ptr"]}},
           "unevaluated_mechanisms": {"type": "boolean", "description": "True when the record has include/a/mx/exists/ptr/redirect terms MailX did not follow."}
+        }
+      },
+      "DmarcPath": {
+        "type": "object", "required": ["identity", "aligned", "mode", "status"],
+        "properties": {
+          "identity": {"type": "string", "description": "The authenticated domain MailX would use: the DKIM d= domain, or the SPF MAIL FROM domain (empty when it cannot be established, for example relay mode)."},
+          "aligned": {"type": "boolean", "description": "Whether that identity aligns with the From domain under the mode. This is a relation between two names, not an authentication result."},
+          "mode": {"type": "string", "enum": ["relaxed", "strict"]},
+          "status": {"type": "string", "enum": ["ready", "not_configured", "not_aligned", "unknown"]},
+          "reason": {"type": "string", "description": "Bounded code, for example no_active_dkim_key, spf_not_verified, relay_return_path_unknown, spf_state_unavailable, not_checked."}
+        }
+      },
+      "DmarcStatus": {
+        "type": "object", "required": ["domain_id", "domain", "checked", "readiness", "receiver_result", "dns", "dkim", "spf", "expected", "warnings"],
+        "properties": {
+          "domain_id": {"type": "string"}, "domain": {"type": "string"}, "organizational_domain": {"type": "string"},
+          "mode": {"type": "string", "enum": ["direct", "relay"], "description": "MailX's routing mode (see the SPF endpoints)."},
+          "checked": {"type": "boolean", "description": "True only when public DNS was queried for this response."},
+          "readiness": {"type": "string", "enum": ["unchecked", "ready", "dns_action_required", "authentication_incomplete", "unknown"], "description": "Sender-side precondition for DMARC, not a receiver result."},
+          "receiver_result": {"type": "string", "enum": ["not_observed"], "description": "MailX does not observe receivers' DMARC results and never claims one."},
+          "dns": {"type": "object", "required": ["status", "testing", "report_uri_count"], "properties": {
+            "status": {"type": "string", "enum": ["unchecked", "not_configured", "monitoring", "enforcing", "conflict", "invalid", "temporary_error"]},
+            "reason": {"type": "string"}, "source": {"type": "string", "enum": ["domain", "organizational_domain"]},
+            "record_name": {"type": "string", "description": "The _dmarc. name where the governing record was found."},
+            "policy": {"type": "string", "enum": ["none", "quarantine", "reject"]}, "subdomain_policy": {"type": "string", "enum": ["none", "quarantine", "reject"]},
+            "effective_policy": {"type": "string", "enum": ["none", "quarantine", "reject"], "description": "The policy that applies to this domain (sp when inherited from the organizational domain)."},
+            "testing": {"type": "boolean", "description": "The t=y testing flag."}, "report_uri_count": {"type": "integer", "description": "Usable mailto: rua addresses; MailX cannot receive the reports."},
+            "published_record": {"type": "string", "description": "The single DMARC record found."}}},
+          "dkim": {"$ref": "#/components/schemas/DmarcPath"}, "spf": {"$ref": "#/components/schemas/DmarcPath"},
+          "expected": {"type": "object", "required": ["action"], "properties": {
+            "action": {"type": "string", "enum": ["create", "none", "fix_record", "merge_records", "retry_later"]},
+            "type": {"type": "string", "enum": ["TXT"]}, "name": {"type": "string"},
+            "value": {"type": "string", "description": "Only set for create: 'v=DMARC1; p=none'. An existing policy is never rewritten."}}},
+          "warnings": {"type": "array", "items": {"type": "string", "enum": ["deprecated_tag", "ignored_report_uri", "policy_defaulted_from_rua", "policy_not_enforcing", "testing_mode", "failure_reporting_enabled", "external_report_destination", "relay_may_alter_signed_content"]}}
         }
       },
       "DNSRecord": {

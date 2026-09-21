@@ -10,6 +10,7 @@ import (
 
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/dkim"
+	"github.com/Ferousco-dev/mailx/internal/dmarc"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
 	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/spf"
@@ -47,6 +48,9 @@ type Config struct {
 	// SPF guides SPF DNS setup. Optional: nil makes the SPF endpoints answer 503
 	// and changes nothing else (sending never consults SPF).
 	SPF *spf.Service
+	// DMARC gives sender-side DMARC readiness. Optional: nil makes the DMARC
+	// endpoints answer 503 and changes nothing else (sending never consults it).
+	DMARC *dmarc.Service
 	// Logger and Metrics are optional; nil disables the corresponding
 	// observation without changing request handling.
 	Logger  *slog.Logger
@@ -105,7 +109,7 @@ func NewServer(cfg Config) (*Server, error) {
 		defer cancel()
 		return cfg.Ready(ctx)
 	}
-	mux := newMux(h, cfg.Auth, readiness, routeServices{domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF})
+	mux := newMux(h, cfg.Auth, readiness, routeServices{domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC})
 	log := cfg.Logger
 	if log == nil {
 		log = observability.Discard()
