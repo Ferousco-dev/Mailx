@@ -51,8 +51,9 @@ commit dates (all v0.1-v0.15 work is dated 2026-09-13..15).
 - v0.23 Logs / Observability: **COMPLETE** (merged; `37b384d`).
 - v0.24 Outbound SMTP STARTTLS: **COMPLETE** (`d0cbda6`).
 - v0.25 SMTP AUTH / trusted relay: **COMPLETE** (`631836c`).
-- v0.26 DKIM / verified-From: **COMPLETE** once the feat commit lands (validated 2026-09-21; see `git log`).
-- v0.27 SPF: **NEXT, NOT STARTED.**
+- v0.26 DKIM / verified-From: **COMPLETE** (`ce40839`, PR #15 fixes `06f3c3e`, `48939d0`).
+- v0.27 SPF sending-authorization guidance: **COMPLETE** (validated 2026-09-21; commit `feat: add SPF sending authorization`, local, not pushed). Design `docs/design-v0.27.md`. No schema change.
+- v0.28 DMARC: **NEXT, NOT STARTED.**
 
 ## Uncertain / unavailable
 

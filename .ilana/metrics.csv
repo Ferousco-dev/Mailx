@@ -18,3 +18,7 @@ MET-016,2026-09-21,new_env_vars,v0.26,1,count,cmd/mailx/dkimconfig.go
 MET-017,2026-09-21,dkim_outcome_categories,v0.26,7,count,internal/dkim/service.go
 MET-018,2026-09-21,skipped_tests,v0.26,0,count,go test -v ./...
 MET-019,2026-09-21,signing_lookup_buffers,v0.26,6,pages,EXPLAIN (ANALYZE BUFFERS) 6000 domains
+MET-020,2026-09-21,new_env_vars,v0.27,2,count,cmd/mailx/spfconfig.go
+MET-021,2026-09-21,spf_status_categories,v0.27,8,count,internal/spf/service.go
+MET-022,2026-09-21,skipped_tests,v0.27,0,count,go test -race -v ./...
+MET-023,2026-09-21,largest_new_production_file,v0.27,378,loc,internal/spf/record.go

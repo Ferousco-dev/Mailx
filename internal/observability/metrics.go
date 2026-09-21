@@ -34,6 +34,9 @@ var (
 	dkimAlgs     = []string{"rsa-sha256"}
 	dkimOutcomes = []string{"signed", "unsigned_no_key", "key_unavailable", "key_decrypt_failed", "key_invalid",
 		"sign_failed", "domain_mismatch"}
+	spfModes    = []string{"direct", "relay"}
+	spfOutcomes = []string{"unchecked", "verified", "not_configured", "mismatch", "conflict", "invalid", "temporary_error",
+		"sending_infrastructure_unknown"}
 	authMechs    = []string{"plain", "login", "none"}
 	authOutcomes = []string{"success", "rejected", "temporary", "no_tls", "not_advertised", "no_mechanism",
 		"protocol_error", "connection_lost", "timeout", "canceled"}
@@ -70,6 +73,7 @@ type Metrics struct {
 	tlsSessions  *prometheus.CounterVec
 	authAttempts *prometheus.CounterVec
 	dkimSigs     *prometheus.CounterVec
+	spfVerifs    *prometheus.CounterVec
 	depthFn      DepthFunc
 	depthDesc    *prometheus.Desc
 }
@@ -105,13 +109,15 @@ func NewMetrics(info buildinfo.Info) (*Metrics, error) {
 		Help: "Outbound SMTP AUTH results by bounded mechanism and outcome."}, []string{"mechanism", "outcome"})
 	m.dkimSigs = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "dkim_signatures_total",
 		Help: "DKIM signing attempts by bounded algorithm and outcome."}, []string{"algorithm", "outcome"})
+	m.spfVerifs = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "spf_verifications_total",
+		Help: "SPF verifications by bounded mode and outcome."}, []string{"mode", "outcome"})
 	m.depthDesc = prometheus.NewDesc(ns+"_queue_depth", "Queue jobs available plus claimed.", nil, nil)
 	build := prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "build_info",
 		Help: "Build identity; value is always 1."}, []string{"version", "commit"})
 	build.WithLabelValues(info.Version, info.Commit).Set(1)
 
 	for _, c := range []prometheus.Collector{m.httpTotal, m.httpDuration, m.smtpSessions, m.smtpActive, m.smtpMessages,
-		m.deliveries, m.deliveryDur, m.queueOps, m.tlsSessions, m.authAttempts, m.dkimSigs, m.webhooks, m.webhookDur, build, m,
+		m.deliveries, m.deliveryDur, m.queueOps, m.tlsSessions, m.authAttempts, m.dkimSigs, m.spfVerifs, m.webhooks, m.webhookDur, build, m,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})} {
 		if err := m.reg.Register(c); err != nil {
 			return nil, err
@@ -266,5 +272,14 @@ func (m *Metrics) SignResult(algorithm, outcome string) {
 	if m != nil {
 		defer guard()
 		m.dkimSigs.WithLabelValues(pick(algorithm, dkimAlgs), pick(outcome, dkimOutcomes)).Inc()
+	}
+}
+
+// SPFResult records one SPF verification. It satisfies spf.Observer. Labels are
+// allowlisted: no domain, tenant, address, DNS text or record can become a label.
+func (m *Metrics) SPFResult(mode, outcome string) {
+	if m != nil {
+		defer guard()
+		m.spfVerifs.WithLabelValues(pick(mode, spfModes), pick(outcome, spfOutcomes)).Inc()
 	}
 }

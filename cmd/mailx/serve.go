@@ -81,13 +81,17 @@ func runFull() error {
 	if err != nil {
 		return err
 	}
+	spfSvc, err := buildSPF(db, o)
+	if err != nil {
+		return err
+	}
 	webhookRuntime, err := buildWebhookRuntime(db, o)
 	if err != nil {
 		return err
 	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
-		Webhooks: webhookRuntime.service, DKIM: dkimSvc,
+		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc,
 		Ready:  ready.Check,
 		Logger: o.log, Metrics: o.metrics,
 	})

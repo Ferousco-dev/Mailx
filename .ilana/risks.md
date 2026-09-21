@@ -27,3 +27,5 @@
 - RSK-017 [medium, v0.26]: a domain with an active DKIM key refuses to send if its key cannot be decrypted (for example after a lost or wrong `MAILX_DKIM_MASTER_KEY`); recovery is to re-create keys, which requires the master key to be restored first or the domain re-keyed manually.
 - RSK-018 [low, v0.26]: retired selectors must stay in DNS long enough for queued mail to verify (recommended >= 24 h; the default retry schedule spans about 7.5 h); MailX does not check.
 - RSK-019 [low, v0.26]: DKIM proves domain control of the signing domain only; it does not affect SPF, DMARC alignment policy, or PTR/HELO deliverability (v0.27+).
+- RSK-020 [medium, v0.27]: SPF guidance is only as good as the operator's `MAILX_SENDING_IPS`; a wrong (but public) address yields a truthful-looking but wrong record. MailX cannot detect NAT/egress mismatches. Mitigation: documented; verify egress with a real send in v0.29 testing.
+- RSK-021 [low, v0.27]: HELO is `mailx.local` and bounces use the null reverse path, so receivers that check HELO for bounces get no usable SPF identity; deliverability of DSNs is affected (DSNs are also not transmitted yet, limitation 2). Address in v0.29.

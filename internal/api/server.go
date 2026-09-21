@@ -12,6 +12,7 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/dkim"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
 	"github.com/Ferousco-dev/mailx/internal/observability"
+	"github.com/Ferousco-dev/mailx/internal/spf"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 	"github.com/Ferousco-dev/mailx/internal/webhook"
 )
@@ -43,6 +44,9 @@ type Config struct {
 	// the API would accept mail from a domain with an active key and send it
 	// unsigned.
 	DKIM *dkim.Service
+	// SPF guides SPF DNS setup. Optional: nil makes the SPF endpoints answer 503
+	// and changes nothing else (sending never consults SPF).
+	SPF *spf.Service
 	// Logger and Metrics are optional; nil disables the corresponding
 	// observation without changing request handling.
 	Logger  *slog.Logger
@@ -101,7 +105,7 @@ func NewServer(cfg Config) (*Server, error) {
 		defer cancel()
 		return cfg.Ready(ctx)
 	}
-	mux := newMux(h, cfg.Auth, readiness, routeServices{domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM})
+	mux := newMux(h, cfg.Auth, readiness, routeServices{domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF})
 	log := cfg.Logger
 	if log == nil {
 		log = observability.Discard()

@@ -59,13 +59,14 @@ func TestEveryMetricFamilyIsExposed(t *testing.T) {
 	m.TLSResult("opportunistic", "established", "1.3")
 	m.AuthResult("plain", "success")
 	m.SignResult("rsa-sha256", "signed")
+	m.SPFResult("direct", "verified")
 	names := gather(t, m)
 	for _, want := range []string{
 		"mailx_build_info", "mailx_http_requests_total", "mailx_http_request_duration_seconds",
 		"mailx_smtp_sessions_total", "mailx_smtp_active_sessions", "mailx_smtp_messages_total",
 		"mailx_delivery_attempts_total", "mailx_delivery_attempt_duration_seconds",
 		"mailx_queue_operations_total", "mailx_queue_depth", "mailx_webhook_attempts_total",
-		"mailx_webhook_attempt_duration_seconds", "mailx_smtp_tls_sessions_total", "mailx_smtp_auth_attempts_total", "mailx_dkim_signatures_total", "go_goroutines",
+		"mailx_webhook_attempt_duration_seconds", "mailx_smtp_tls_sessions_total", "mailx_smtp_auth_attempts_total", "mailx_dkim_signatures_total", "mailx_spf_verifications_total", "go_goroutines",
 	} {
 		if !names[want] {
 			t.Errorf("family %s missing", want)
@@ -256,4 +257,29 @@ func TestDKIMMetricLabelsAreBounded(t *testing.T) {
 	gather(t, m)
 	var nilMetrics *Metrics
 	nilMetrics.SignResult("rsa-sha256", "signed")
+}
+
+func TestSPFMetricLabelsAreBounded(t *testing.T) {
+	m := newTestMetrics(t)
+	m.SPFResult("direct", "verified")
+	m.SPFResult("relay", "temporary_error")
+	// Hostile values (domains, addresses, raw records, DNS errors) must collapse.
+	m.SPFResult("example.com", "v=spf1 ip4:203.0.113.9 -all lookup failed on 10.0.0.1")
+	out := scrape(m)
+	for _, want := range []string{
+		`mailx_spf_verifications_total{mode="direct",outcome="verified"} 1`,
+		`mailx_spf_verifications_total{mode="relay",outcome="temporary_error"} 1`,
+		`mailx_spf_verifications_total{mode="other",outcome="other"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, banned := range []string{"example.com", "203.0.113", "10.0.0.1", "v=spf1"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unbounded SPF label value %q reached exposition", banned)
+		}
+	}
+	var nilMetrics *Metrics
+	nilMetrics.SPFResult("direct", "verified")
 }

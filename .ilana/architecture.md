@@ -58,6 +58,7 @@ SMTP receive path (`:2525`) only parses and stores to FileStore; it does NOT cre
 | `internal/webhook` | Subscriptions, secrets, signing, URL policy, fan-out, delivery workers |
 | `internal/observability` | slog logger factory (panic-safe), Prometheus metrics (private pedantic registry, bounded labels), operator listener (`/metrics`, `/health/live`, `/health/ready`), bounded readiness |
 | `internal/buildinfo` | Version/commit via `-ldflags -X`; fallbacks `dev`/`unknown` |
+| `internal/spf` | v0.27 SPF guidance: bounded parser, `Analyze`, `Service` (stateless; one TXT lookup); imports no transport/DKIM/queue package (tested) |
 | `cmd/mailx` | Composition root (`databaseOutcomeStore` adapter lives here so `database` does not import `delivery`/`retry`) |
 
 ## HTTP surface (v1)
@@ -65,11 +66,11 @@ SMTP receive path (`:2525`) only parses and stores to FileStore; it does NOT cre
 Auth: `Authorization: Bearer mx_<key_id>_<secret>` (not a JWT). Scopes: `emails:send`, `emails:read`, `domains:read`, `domains:write`,
 `webhooks:read`, `webhooks:write`. Unauthenticated: `/health/live`, `/health/ready` (readiness = PostgreSQL AND Redis within 2 s total; 503 body names only `postgres`/`redis`, never raw errors), `/openapi.json`, `/docs`.
 Operator listener (`MAILX_OBSERVABILITY_ADDR`, default `:9090`, separate from the API): `GET /metrics`, `/health/live` (no dependency calls), `/health/ready`; no `/v1`.
-Routes: `POST /v1/emails`, `GET /v1/emails[/{id}]`, `/v1/domains` (+`/{id}`, `/{id}/verify`, DELETE), `/v1/webhooks` (+`/{id}`, `/{id}/rotate-secret`, `/{id}/deliveries`, DELETE), `GET /v1/events`.
+Routes: `POST /v1/emails`, `GET /v1/emails[/{id}]`, `/v1/domains` (+`/{id}`, `/{id}/verify`, DELETE), `/v1/webhooks` (+`/{id}`, `/{id}/rotate-secret`, `/{id}/deliveries`, DELETE), `GET /v1/events`, `GET /v1/domains/{id}/dkim` (+POST, `/verify`), `GET /v1/domains/{id}/spf`, `POST /v1/domains/{id}/spf/verify`.
 `POST /v1/emails` in v0.22: text/html body, to/cc/bcc, reply-to; **all recipients must share one domain (422 `mixed_recipient_domains`)**; attachments/tags/custom headers deferred.
 OpenAPI is hand-written (`internal/api/openapi.go`) and guarded by a runtime drift test: API changes must update it.
 
-## Database (PostgreSQL 16; migrations 000001-000011; forward-only fixes, applied migrations never edited)
+## Database (PostgreSQL 16; migrations 000001-000012; forward-only fixes, applied migrations never edited)
 
 Tables: `tenants`, `messages`, `recipients`, `delivery_attempts`, `events`, `outbox`, `api_keys`, `idempotency_keys`, `domains`,
 `webhook_subscriptions`, `webhook_deliveries`, `webhook_delivery_attempts`. Message statuses: `queued, processing, retrying, delivered, failed, bounced`.
@@ -82,7 +83,7 @@ Note: migration 000011 `webhook_deliveries` FKs `events(tenant_id,id) ON DELETE 
 
 `DATABASE_URL` (enables full pipeline), `REDIS_ADDR` (default localhost:6379), `MAILX_HTTP_ADDR` (:8080), `MAILX_SMTP_ADDR` (:2525),
 `MAILX_STORAGE_ROOT`, `MAILX_WORKERS` (4), `MAILX_QUEUE_CAPACITY` (1000), `MAILX_CLAIM_LEASE` (2m), `MAILX_API_KEY_PEPPER` (optional; warns if unset),
-`MAILX_WEBHOOK_MASTER_KEY` (**required** in full mode; base64 32 bytes), `MAILX_WEBHOOK_ALLOW_INSECURE` (dev only: allows HTTP + private IPs), `MAILX_WEBHOOK_WORKERS` (4), `MAILX_LOG_LEVEL` (info), `MAILX_LOG_FORMAT` (json|text), `MAILX_OBSERVABILITY_ADDR` (:9090; explicitly empty disables).
+`MAILX_WEBHOOK_MASTER_KEY` (**required** in full mode; base64 32 bytes), `MAILX_WEBHOOK_ALLOW_INSECURE` (dev only: allows HTTP + private IPs), `MAILX_WEBHOOK_WORKERS` (4), `MAILX_LOG_LEVEL` (info), `MAILX_LOG_FORMAT` (json|text), `MAILX_OBSERVABILITY_ADDR` (:9090; explicitly empty disables), `MAILX_SENDING_IPS` / `MAILX_SPF_RELAY_INCLUDE` (v0.27, optional SPF declarations; see below).
 Tests: `MAILX_TEST_DATABASE_URL` (PostgreSQL DSN; if unset, a local default is tried and tests skip when unreachable) and `REDIS_ADDR` (Redis tests fail loudly rather than skip). CI runs `go test -race ./...` with Postgres/Redis services + govulncheck.
 `.env` and `.claude` are gitignored; `.env.example` holds dev-only placeholders.
 
@@ -149,6 +150,18 @@ Tests: `MAILX_TEST_DATABASE_URL` (PostgreSQL DSN; if unset, a local default is t
 - API: `GET|POST /v1/domains/{id}/dkim`, `POST /v1/domains/{id}/dkim/verify` (domains:read/write, tenant-scoped 404); OpenAPI updated (drift test).
 - Observability: `mailx_dkim_signatures_total{algorithm (rsa-sha256), outcome (signed|unsigned_no_key|key_unavailable|key_decrypt_failed|key_invalid|sign_failed|domain_mismatch)}`; nothing domain-, selector- or key-derived is logged or labelled.
 
+## SPF sending-authorization guidance (v0.27; design: `docs/design-v0.27.md`)
+
+- Purpose: help a tenant publish ONE correct SPF record and check it. It is guidance/readiness only: it never authorizes sending, never blocks sending, never evaluates a message, and never emits Received-SPF/Authentication-Results.
+- SPF identity (verified in code): receivers check the envelope sender. MAIL FROM = the API From address (`email_handler.go`), so the record belongs on the tenant's own sending domain. Bounces use the null reverse path, for which receivers check HELO; MailX's HELO/EHLO is the constant `mailx.local` (`cmd/mailx/serve.go`), which cannot carry an SPF record (deliverability gap, v0.29). Header From and DMARC alignment are out of scope (v0.28).
+- Sending infrastructure is operator-declared, never guessed: direct mode `MAILX_SENDING_IPS` (public IPv4/IPv6, max 16; loopback/private/link-local/CGNAT/documentation/multicast/reserved/ULA rejected at startup and again in `spf.NewService`); relay mode `MAILX_SPF_RELAY_INCLUDE` (a host name the relay provider documents). The other mode's variable is a startup error. Unset => status `sending_infrastructure_unknown`, actions `declare_sending_ips` / `follow_relay_provider`, no invented record. Local development needs neither.
+- Verification (`POST /v1/domains/{id}/spf/verify`, domains:write, VERIFIED domain required, else 409; cross-tenant/unknown 404): one TXT lookup of the domain (5 s timeout, 16 concurrent lookups then 503 `spf_verification_busy`, <=64 TXT records, SPF record <=2048 bytes, <=64 terms, <=255 bytes/term, no regex/recursion). Statuses: `verified | not_configured | mismatch | conflict | invalid | temporary_error | sending_infrastructure_unknown | unchecked`, with bounded `reason` codes and `warnings` (`unevaluated_mechanisms`, `permits_all`, `dns_lookup_limit_risk`, `deprecated_ptr`). Temporary DNS failures (timeout, SERVFAIL, any resolver error) are never reported as misconfiguration. `GET /v1/domains/{id}/spf` (domains:read) returns guidance with NO DNS query.
+- Record model: missing -> `create` `v=spf1 <ip4:/ip6: | include:relay> ~all`; existing single record -> `verified` only if it literally authorizes MailX (first matching literal ip4/ip6 with `+`, stopping at `all`; `~ip4:`, `-ip4:` and `+all` do not count), else `update_existing` = the SAME record with MailX's mechanisms inserted at the front; multiple SPF records -> `conflict`/`merge_records` (MailX never recommends a second record); merged output >2048 bytes is refused, not truncated.
+- Lookup-limit decision: only the literal subset is evaluated. include/a/mx/exists/ptr/redirect are parsed, never followed (unbounded tenant-controlled DNS walking; RFC 7208 4.6.4 limit of 10). Such records report `mismatch` with `unevaluated_mechanisms: true`. `verified` never claims how a specific receiver will evaluate the record.
+- Sending policy (DEC-054): missing/wrong SPF never blocks sending. Authorization = verified domain ownership; signing = active DKIM key; SPF = readiness info. SPF and DKIM state are independent (tested both ways); SPF cannot grant From authorization (tested: attacker cannot send from victim's domain even when SPF records authorize MailX).
+- No persistence: DNS is the source of truth; no migration, no index. Observability: `mailx_spf_verifications_total{mode (direct|relay), outcome (statuses)}` allowlisted; no domain/tenant/IP/record/DNS-error label or log field. Health endpoints never touch SPF or public DNS.
+- Structural boundary test: `internal/spf` may not import smtp/delivery/worker/dkim/queue/dispatch/secretbox; smtp/delivery/worker/dkim/dispatch/queue/retry/bounce may not import spf; `email_handler.go` must not mention SPF. So SPF cannot alter routing, relay credentials, STARTTLS, AUTH, signing or delivery truth.
+
 ## Security decisions (verified)
 
 - API secrets never stored raw: only `key_id` + HMAC-SHA256(pepper, secret); 256-bit random secret makes slow password hashing pointless; unkeyed SHA-256 fallback without pepper is a documented dev-only choice. All auth failures collapse to one generic 401; DB error on auth fails closed. No public key-creation endpoint (CLI bootstrap).
@@ -193,4 +206,5 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 - v0.19 partial index `idx_api_keys_tenant_active` -> superseded by 000008 tenant/created_at index.
 - v0.16/v0.20 statements that retry state is process memory -> superseded by durable reconstruction (`57ee1d0`).
 15. Relay credentials live in the process environment and memory for the process lifetime (Go strings cannot be zeroed); no `_FILE` secret input, no rotation without restart. Implicit-TLS relays (port 465), OAuth/XOAUTH2 and SCRAM are unsupported; one relay for all domains and tenants.
+17. SPF (v0.27): egress addresses must be declared by the operator (no discovery; NAT/gateway/IPv6 privacy addresses are the operator's job); only the literal ip4/ip6 (direct) or named include (relay) subset is verified, so records that authorize MailX only via include/a/mx/exists/redirect show `mismatch`; HELO is `mailx.local` (no SPF/PTR-alignable HELO until v0.29); relay return-path rewriting is provider-specific and unmodelled; SPF result is not persisted or shown in the message/event history.
 16. DKIM master key lives in the environment like the webhook key (no `_FILE` input, no re-encryption tooling for master-key rotation); losing it makes stored DKIM keys undecryptable and domains with an active key refuse to send until rekeyed.

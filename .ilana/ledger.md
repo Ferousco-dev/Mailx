@@ -100,3 +100,15 @@ v0.26 complete pending commit. Not pushed. Next: v0.27 SPF (not started). DEF-00
 
 ## 2026-09-21 | REVIEW | constructor | CR-008
 Greptile reviewed PR #15 (3 findings, DEF-011..DEF-013), all fixed with regression tests; key generation is now preceded by the pending check and capped at 2 concurrent generations.
+
+## 2026-09-21 | G0-G3 | conductor | v0.27 PLAN
+Scope CR-009: SPF sending-authorization guidance. Baseline at `48939d0` green. RFC 7208 identity/evaluation rules applied (MAIL FROM vs HELO, single record, `all` ends evaluation, 10-lookup limit). Repository audit: MAIL FROM = From address, HELO = `mailx.local`. Design `docs/design-v0.27.md`. No migration: DNS is source of truth (DEC-059). Sending is not blocked by SPF (DEC-054).
+
+## 2026-09-21 | G4 | constructor | GATE PASS
+`internal/spf` (record, sending, service), API `spf_handler.go` + routes + OpenAPI, `cmd/mailx/spfconfig.go`, metric `mailx_spf_verifications_total`, compose/.env.example variables (empty by default, no fake IPs).
+
+## 2026-09-21 | G5 | verifier | GATE PASS
+fmt, vet, builds (darwin, linux/amd64), `go test -count=1 ./...` and `-race` with real PostgreSQL/Redis: all pass, 0 skipped (1229 passes under race). Parser fuzzed (FuzzParse, 50 s, no findings). SPF suite repeated 15x and API SPF tests 8x under -race. Real `docker compose build` exit 0; Compose runtime: default start healthy (live/ready), `MAILX_SENDING_IPS=127.0.0.1` refuses startup naming only the variable, `MAILX_SENDING_IPS=8.8.8.8` yields guidance record `v=spf1 ip4:8.8.8.8 ~all`, verify 409 on unverified, 404 unknown, health unaffected. No defects found in production code.
+
+## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
+v0.27 complete pending commit. Not pushed. Next: v0.28 DMARC (not started).

@@ -211,6 +211,31 @@ const openAPISpec = `{
           "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
         }
       }
+    },
+    "/domains/{id}/spf": {
+      "get": {
+        "summary": "SPF guidance for a domain",
+        "description": "Requires domains:read. Returns the SPF record MailX recommends for this domain. NO DNS query is made ('checked' is false, status 'unchecked'); call the verify endpoint to compare against public DNS. SPF is checked by receivers against the envelope sender (MAIL FROM) domain, which for MailX is the From-address domain. Direct mode (default): MailX connects to recipient servers from its own public IP addresses, declared by the operator; 'sending.ips' lists them and the record authorizes exactly those addresses with ip4/ip6. Relay mode: all mail goes through the operator's trusted relay; MailX cannot know the relay's SPF requirements, so it only knows an include domain if the operator configured one, otherwise 'expected.action' is 'follow_relay_provider' and no record is invented. If the operator has not declared the sending addresses, status is 'sending_infrastructure_unknown' and no record is generated. Publish ONE SPF TXT record per domain: if you already have one, use the 'update_existing' value from verify, which extends it instead of creating a second. SPF does not authorize sending from a domain in MailX (domain ownership does), does not affect DKIM, and does not guarantee delivery or inbox placement.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "SPF guidance", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SpfStatus"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/domains/{id}/spf/verify": {
+      "post": {
+        "summary": "Check the domain's published SPF record",
+        "description": "Requires domains:write and a VERIFIED domain (409 domain_not_verified otherwise, and no DNS query is made). Performs one bounded public TXT lookup (5 s timeout, at most 64 TXT records, 2048-byte SPF record) and reports: 'verified' (the single published record literally authorizes MailX's sending addresses via ip4/ip6, or, in relay mode, contains the configured include); 'not_configured' (no SPF record); 'mismatch' (a record exists but does not authorize MailX; 'expected.value' is your existing record extended with the missing mechanisms, still ONE record); 'conflict' (more than one SPF record, which receivers treat as a permanent error: merge them into one); 'invalid' (malformed or over the size bounds; 'reason' is a code); 'temporary_error' (DNS failed or timed out; nothing is concluded, retry later, and it is not a misconfiguration); 'sending_infrastructure_unknown' (see the GET endpoint). Limits: include, a, mx, exists, ptr and redirect terms are parsed but NOT followed (RFC 7208 caps evaluation at 10 DNS-querying terms and MailX does not walk DNS trees), so a record that authorizes MailX only through such terms reports 'mismatch' with 'unevaluated_mechanisms' true; 'verified' is never a claim about how a particular receiver will evaluate the record. This call stores nothing and changes no domain, DKIM or sending-authorization state. MailX does not block sending when SPF is missing or unverified.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "Verification result", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SpfStatus"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
     }
   },
   "components": {
@@ -301,6 +326,26 @@ const openAPISpec = `{
       "DkimVerifyResult": {
         "type": "object", "required": ["published", "status"],
         "properties": {"published": {"type": "boolean"}, "status": {"$ref": "#/components/schemas/DkimStatus"}}
+      },
+      "SpfStatus": {
+        "type": "object", "required": ["domain_id", "domain", "mode", "checked", "status", "sending", "expected", "warnings", "unevaluated_mechanisms"],
+        "properties": {
+          "domain_id": {"type": "string"}, "domain": {"type": "string"},
+          "mode": {"type": "string", "enum": ["direct", "relay"], "description": "How this MailX deployment reaches the Internet."},
+          "checked": {"type": "boolean", "description": "True only when a public DNS lookup was performed for this response."},
+          "status": {"type": "string", "enum": ["unchecked", "verified", "not_configured", "mismatch", "conflict", "invalid", "temporary_error", "sending_infrastructure_unknown"]},
+          "reason": {"type": "string", "description": "Bounded reason code (for example sending_address_not_listed, relay_include_missing, multiple_spf_records, bad_cidr, record_too_long, dns_error). Never contains DNS text."},
+          "sending": {"type": "object", "properties": {
+            "ips": {"type": "array", "items": {"type": "string"}, "description": "Public sending addresses declared by the operator (direct mode)."},
+            "relay_include": {"type": "string", "description": "Include domain declared by the operator for the relay (relay mode)."}}},
+          "published_record": {"type": "string", "description": "The single SPF record found in your DNS (only present when exactly one was found and it parsed)."},
+          "expected": {"type": "object", "required": ["action"], "properties": {
+            "action": {"type": "string", "enum": ["create", "update_existing", "none", "merge_records", "fix_record", "declare_sending_ips", "follow_relay_provider"]},
+            "type": {"type": "string", "enum": ["TXT"]}, "name": {"type": "string"},
+            "value": {"type": "string", "description": "One complete SPF record. Empty when MailX cannot truthfully provide one."}}},
+          "warnings": {"type": "array", "items": {"type": "string", "enum": ["unevaluated_mechanisms", "permits_all", "dns_lookup_limit_risk", "deprecated_ptr"]}},
+          "unevaluated_mechanisms": {"type": "boolean", "description": "True when the record has include/a/mx/exists/ptr/redirect terms MailX did not follow."}
+        }
       },
       "DNSRecord": {
         "type": "object", "required": ["type", "name", "value"],

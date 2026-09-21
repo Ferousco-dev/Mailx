@@ -22,6 +22,7 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/dkim"
 	"github.com/Ferousco-dev/mailx/internal/secretbox"
+	"github.com/Ferousco-dev/mailx/internal/spf"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 )
 
@@ -67,7 +68,11 @@ type actor struct {
 	h      http.Handler
 }
 
-func newDKIMAPI(t *testing.T) *dkimAPI {
+func newDKIMAPI(t *testing.T) *dkimAPI { return newAPIWithSPF(t, nil) }
+
+// newAPIWithSPF builds the shared test API; mkSPF (optional) receives the
+// shared DNS fake so SPF and DKIM/ownership see the same published records.
+func newAPIWithSPF(t *testing.T, mkSPF func(*database.DB, *publishedDNS) *spf.Service) *dkimAPI {
 	t.Helper()
 	db := newTestDB(t)
 	store, err := storage.NewFileStore(t.TempDir())
@@ -83,7 +88,11 @@ func newDKIMAPI(t *testing.T) *dkimAPI {
 		t.Fatal(err)
 	}
 	authSvc := auth.NewService(db, nil)
-	mux := newMux(newEmailHandler(db, store), authSvc, func() error { return nil }, routeServices{dkim: svc})
+	var spfSvc *spf.Service
+	if mkSPF != nil {
+		spfSvc = mkSPF(db, dns)
+	}
+	mux := newMux(newEmailHandler(db, store), authSvc, func() error { return nil }, routeServices{dkim: svc, spf: spfSvc})
 	return &dkimAPI{t: t, db: db, store: store, authSvc: authSvc, box: box, dns: dns, mux: mux}
 }
 

@@ -69,6 +69,10 @@ services:
       # webhook key; production must provide its own random base64 32-byte key.
       MAILX_DKIM_MASTER_KEY: ${MAILX_DKIM_MASTER_KEY:-AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=}
       MAILX_WEBHOOK_ALLOW_INSECURE: ${MAILX_WEBHOOK_ALLOW_INSECURE:-true}
+      # SPF guidance only (no effect on sending). Empty by default: local
+      # development needs no public address, and MailX never invents one.
+      MAILX_SENDING_IPS: ${MAILX_SENDING_IPS:-}
+      MAILX_SPF_RELAY_INCLUDE: ${MAILX_SPF_RELAY_INCLUDE:-}
     volumes:
       - mailx-data:/data
     ports:
