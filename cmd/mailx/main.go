@@ -26,7 +26,7 @@ func main() {
 }
 
 const usage = "usage: mailx [list | migrate | inspect <mailx-id> | " +
-	"create-tenant | create-api-key | rotate-api-key | revoke-api-key | list-api-keys]"
+	"create-tenant | create-api-key | rotate-api-key | revoke-api-key | list-api-keys | check-smtp-identity]"
 
 func run(args []string, output io.Writer) error {
 	if len(args) == 0 {
@@ -61,6 +61,8 @@ func run(args []string, output io.Writer) error {
 		return cmdRevokeAPIKey(args[1:], output)
 	case "list-api-keys":
 		return cmdListAPIKeys(args[1:], output)
+	case "check-smtp-identity":
+		return cmdCheckSMTPIdentity(args[1:], output)
 	}
 	return fmt.Errorf("unknown command %q; %s", args[0], usage)
 }

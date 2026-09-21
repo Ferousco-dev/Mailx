@@ -128,3 +128,21 @@ v0.28 complete pending commit. Not pushed. RSK-020/RSK-021 (egress IP correctnes
 
 ## 2026-09-21 | REVIEW | constructor | CR-011 v0.28 correction
 Independent review found the DMARC Organizational Domain used the PSL (DEF-015, RSK-022). RFC 9989 sections 4.10, 4.10.1 and 4.10.2 re-read from the RFC text. Replaced by one bounded DNS Tree Walk that yields policy and Organizational Domain (`internal/dmarc/treewalk.go`, `align.go`); psd=y/psd=n implemented; multiple records discarded with the walk continuing yet reported as conflict; DNS errors fail safe (unknown, never a substituted parent policy). Evidence: RFC worked examples reproduced, PSL-vs-walk difference tests, policy/organization consistency test over 400 pseudo-random zones, walk bounded to 8 queries (RFC's 12-label example), parser and walk-input fuzzing, concurrency with psd cases, source scan forbidding PSL/suffix matching. Full suite plain and -race green with real PostgreSQL/Redis (1321 passes, 0 skipped), Docker build exit 0, read-only Compose run against real appmd.dev preserved its `p=none;` policy. RSK-022 closed; RSK-020, RSK-021, RSK-023 remain OPEN. No API shape change. A pre-existing test flake (DEF-016, a raw-substring assertion over the whole metrics dump) surfaced under -race and was fixed; `service.go` was split by responsibility into `service.go` (I/O) and `readiness.go` (pure model).
+
+## 2026-09-21 | DECISION | conductor | deployment target
+User chose an AWS Lightsail $7/month instance as the first deployment target (DEC-069); RSK-024 and RSK-025 recorded; the hosted-database question (Aiven free PostgreSQL) is open. Code fact verified: hosted TLS/password Redis is unsupported (architecture limitation 19). No code changed.
+
+## 2026-09-21 | DECISION | conductor | single-host deployment
+User approved DEC-070: everything on the one Lightsail $7 host, backups from day one, managed PostgreSQL only later. The earlier open hosted-database question in DEC-069 is closed. No code changed; the tuning, swap and backup steps are not yet written or implemented.
+
+## 2026-09-21 | G0-G3 | conductor | v0.29 PLAN
+Scope CR-012: public SMTP identity, PTR/rDNS readiness, EHLO and Message-ID. Baseline at `5d60bc4` green (24 packages, plain and race). Standards read from RFC text (5321 4.1.1.1/4.1.3, 7208 2.3/2.4, 1912 2.1, 5322 3.6.4) plus Gmail sender guidance (receiver practice, kept separate from RFC requirements). Audit found `mailx.local` in 4 production places (client EHLO, two Message-ID constructions, DSN Reporting-MTA). Design `docs/design-v0.29.md`; no migration.
+
+## 2026-09-21 | G4 | constructor | GATE PASS
+`internal/smtpidentity` (hostname validation, PTR/FCrDNS readiness), `cmd/mailx/smtpidentity.go` (modes, `check-smtp-identity`), Message-ID helper and `api.Config.MessageIDDomain`, worker Reporting-MTA wiring, compose/.env.example.
+
+## 2026-09-21 | G5 | verifier | GATE PASS
+fmt, vet, builds (darwin, linux/amd64), `go test -count=1 ./...` and `-race` with real PostgreSQL/Redis: all pass, 0 skipped (1392 passes under race). Hostname, PTR (A-L) and multi-IP matrices, failure injection, concurrency, three fuzzers, byte-capture EHLO tests (pre-TLS, post-TLS, HELO fallback, relay), Message-ID with independent DKIM verification, import boundaries. Real `docker compose build` exit 0; Compose runtime: local mode healthy, public mode healthy, IPs without hostname fails startup with a clear message, invalid hostname fails without echoing the value, `check-smtp-identity` works in the image; read-only live DNS check of the laptop IP reported `missing_ptr` (truthful). The user's already-running container was left untouched. RSK-021 closed; RSK-020 and RSK-023 remain OPEN.
+
+## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
+v0.29 complete pending commit. Not pushed. OPERATIONAL NOTE: recreating the compose service with the existing `.env` (which declares `MAILX_SENDING_IPS`) now requires `MAILX_SMTP_HOSTNAME`. Next: v0.30 suppression (not started); the first controlled Internet-delivery test is a separate explicit action.

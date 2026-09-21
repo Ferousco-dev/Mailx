@@ -69,6 +69,9 @@ type actor struct {
 	h      http.Handler
 }
 
+// testMessageIDDomain, when set by a test, is the Message-ID domain of the shared harness.
+var testMessageIDDomain string
+
 func newDKIMAPI(t *testing.T) *dkimAPI { return newAPIWithSPF(t, nil) }
 
 // newAPIWithSPF builds the shared test API; mkSPF (optional) receives the
@@ -103,7 +106,11 @@ func newAPIFull(t *testing.T, mkSPF func(*database.DB, *publishedDNS) *spf.Servi
 	if mkDMARC != nil {
 		dmarcSvc = mkDMARC(db, dns, svc, spfSvc)
 	}
-	mux := newMux(newEmailHandler(db, store), authSvc, func() error { return nil }, routeServices{dkim: svc, spf: spfSvc, dmarc: dmarcSvc})
+	eh := newEmailHandler(db, store)
+	if testMessageIDDomain != "" {
+		eh.msgDomain = testMessageIDDomain
+	}
+	mux := newMux(eh, authSvc, func() error { return nil }, routeServices{dkim: svc, spf: spfSvc, dmarc: dmarcSvc})
 	return &dkimAPI{t: t, db: db, store: store, authSvc: authSvc, box: box, dns: dns, mux: mux}
 }
 

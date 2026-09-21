@@ -15,11 +15,11 @@
     "DOM": 0,
     "DES": 8,
     "TC": 0,
-    "DEF": 16,
-    "CR": 11,
-    "RSK": 23,
-    "DEC": 68,
-    "MET": 29,
+    "DEF": 17,
+    "CR": 12,
+    "RSK": 26,
+    "DEC": 76,
+    "MET": 33,
     "ETH": 1
   },
   "attempts": {
@@ -34,10 +34,10 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.28",
-    "ilana_current_through": "v0.28",
-    "current_milestone": "none (v0.29 not started)",
-    "current_milestone_status": "v0.28 complete",
-    "next_milestone": "v0.29 public SMTP identity / PTR / HELO (not started)"
+    "last_completed_milestone": "v0.29",
+    "ilana_current_through": "v0.29",
+    "current_milestone": "none (v0.30 not started)",
+    "current_milestone_status": "v0.29 complete",
+    "next_milestone": "v0.30 suppression (not started)"
   }
 }

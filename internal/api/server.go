@@ -51,6 +51,9 @@ type Config struct {
 	// DMARC gives sender-side DMARC readiness. Optional: nil makes the DMARC
 	// endpoints answer 503 and changes nothing else (sending never consults it).
 	DMARC *dmarc.Service
+	// MessageIDDomain is the domain used in generated Message-IDs: MailX's public
+	// SMTP hostname when configured. Empty keeps the local development default.
+	MessageIDDomain string
 	// Logger and Metrics are optional; nil disables the corresponding
 	// observation without changing request handling.
 	Logger  *slog.Logger
@@ -62,6 +65,10 @@ type Config struct {
 }
 
 func (c Config) validate() error {
+	// First, so a bad value is reported as itself and not hidden by an earlier check.
+	if c.MessageIDDomain != "" && !validMessageIDDomain(c.MessageIDDomain) {
+		return errors.New("api: MessageIDDomain is not a plain domain name")
+	}
 	if c.Addr == "" {
 		return errors.New("api: Addr is empty")
 	}
@@ -99,6 +106,9 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	h := newEmailHandler(cfg.DB, cfg.Store)
+	if cfg.MessageIDDomain != "" {
+		h.msgDomain = cfg.MessageIDDomain
+	}
 	resolver := cfg.DomainResolver
 	if resolver == nil {
 		resolver = maildomain.NewNetTXTResolver()
@@ -148,4 +158,19 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("api: shutdown: %w", err)
 	}
 	return nil
+}
+
+// validMessageIDDomain is defense in depth for a value that ends up inside a
+// message header: printable ASCII, no angle brackets, '@', whitespace or control
+// characters. The real validation happens once at startup (smtpidentity).
+func validMessageIDDomain(d string) bool {
+	if d == "" || len(d) > 253 {
+		return false
+	}
+	for i := 0; i < len(d); i++ {
+		if c := d[i]; c <= 0x20 || c >= 0x7f || c == '<' || c == '>' || c == '@' {
+			return false
+		}
+	}
+	return true
 }

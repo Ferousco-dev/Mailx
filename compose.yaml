@@ -71,6 +71,9 @@ services:
       MAILX_WEBHOOK_ALLOW_INSECURE: ${MAILX_WEBHOOK_ALLOW_INSECURE:-true}
       # SPF guidance only (no effect on sending). Empty by default: local
       # development needs no public address, and MailX never invents one.
+      # Public SMTP identity (v0.29). Empty = local development identity. REQUIRED
+      # (startup fails without it) when MAILX_SENDING_IPS is set.
+      MAILX_SMTP_HOSTNAME: ${MAILX_SMTP_HOSTNAME:-}
       MAILX_SENDING_IPS: ${MAILX_SENDING_IPS:-}
       MAILX_SPF_RELAY_INCLUDE: ${MAILX_SPF_RELAY_INCLUDE:-}
     volumes:

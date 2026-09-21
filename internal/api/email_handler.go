@@ -44,10 +44,23 @@ type emailHandler struct {
 	// requires it).
 	dkim *dkim.Service
 	now  func() time.Time
+	// msgDomain is the right-hand side of generated Message-IDs (RFC 5322 3.6.4:
+	// a domain of the generating host). It is MailX's infrastructure hostname,
+	// never a tenant domain, and defaults to the local development identity.
+	msgDomain string
+}
+
+const defaultMessageIDDomain = "mailx.local"
+
+// messageID is the ONE place a Message-ID is built, used for both the message
+// header and the stored metadata so they can never differ. It is generated before
+// DKIM signing, so the signature covers it and no stored byte changes afterwards.
+func (h *emailHandler) messageID(id string) string {
+	return "<" + id + "@" + h.msgDomain + ">"
 }
 
 func newEmailHandler(db *database.DB, store *storage.FileStore) *emailHandler {
-	return &emailHandler{db: db, store: store, now: func() time.Time { return time.Now().UTC() }}
+	return &emailHandler{db: db, store: store, now: func() time.Time { return time.Now().UTC() }, msgDomain: defaultMessageIDDomain}
 }
 
 // handleSend implements POST /v1/emails. See the v0.18 report's "Acceptance
@@ -97,7 +110,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	built, err := outbound.Build(outbound.Request{
 		From: req.From, To: req.To, Cc: req.Cc, Bcc: req.Bcc, ReplyTo: req.ReplyTo,
 		Subject: req.Subject, Text: req.Text, HTML: req.HTML,
-		MessageID: fmt.Sprintf("<%s@mailx.local>", id), Date: now,
+		MessageID: h.messageID(id), Date: now,
 	})
 	if err != nil {
 		writeError(w, r, newError(ErrValidation, "invalid_message", err.Error()))
@@ -174,7 +187,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	msg, err := h.db.InsertMessage(r.Context(), database.NewMessage{
 		ID: id, TenantID: tenantID, MailFrom: built.From, FromHeader: req.From,
-		Subject: req.Subject, MessageIDHeader: fmt.Sprintf("<%s@mailx.local>", id),
+		Subject: req.Subject, MessageIDHeader: h.messageID(id),
 		Recipients: recipients, AvailableAt: scheduledAt, IdempotencyCompletion: idemCompletion,
 		SenderDomain: fromDomain,
 	})
