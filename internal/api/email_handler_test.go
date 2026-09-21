@@ -75,6 +75,16 @@ func setupMux(t *testing.T) (http.Handler, *database.DB, string) {
 	return authInjector{next: mux, token: rawKey}, db, tenant.ID
 }
 
+// setupSendMux is setupMux plus a verified example.com, the sender domain most
+// send tests use. Domain-management tests keep using setupMux because they
+// create example.com themselves.
+func setupSendMux(t *testing.T) (http.Handler, *database.DB, string) {
+	t.Helper()
+	mux, db, tenantID := setupMux(t)
+	verifyTestDomain(t, db, tenantID, "example.com")
+	return mux, db, tenantID
+}
+
 // setupMuxNoAuth is the same stack without the authInjector wrapper, for
 // tests that need to control Authorization themselves.
 func setupMuxNoAuth(t *testing.T) (http.Handler, *database.DB, database.Tenant, *auth.Service, string) {
@@ -99,7 +109,7 @@ func setupMuxNoAuth(t *testing.T) (http.Handler, *database.DB, database.Tenant, 
 // ------------------------------------------------------------ POST -----
 
 func TestSendTextEmail(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "Alice <alice@example.com>", "to": []string{"bob@example.com"},
 		"subject": "hi", "text": "hello",
@@ -120,7 +130,7 @@ func TestSendTextEmail(t *testing.T) {
 }
 
 func TestSendHTMLEmail(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "a@example.com", "to": []string{"b@example.com"}, "html": "<b>hi</b>",
 	})
@@ -130,7 +140,7 @@ func TestSendHTMLEmail(t *testing.T) {
 }
 
 func TestSendTextAndHTMLEmail(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "a@example.com", "to": []string{"b@example.com"}, "html": "<b>hi</b>", "text": "hi",
 	})
@@ -140,7 +150,7 @@ func TestSendTextAndHTMLEmail(t *testing.T) {
 }
 
 func TestSendMultipleRecipientsCcBccReplyTo(t *testing.T) {
-	mux, db, tenantID := setupMux(t)
+	mux, db, tenantID := setupSendMux(t)
 	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "a@example.com", "to": []string{"b@example.com", "c@example.com"},
 		"cc": []string{"d@example.com"}, "bcc": []string{"secret@example.com"},
@@ -166,7 +176,7 @@ func TestSendMultipleRecipientsCcBccReplyTo(t *testing.T) {
 }
 
 func TestSendMixedDomainsRejectedBeforeAcceptance(t *testing.T) {
-	mux, db, tenantID := setupMux(t)
+	mux, db, tenantID := setupSendMux(t)
 	for _, recipients := range []map[string]any{
 		{"to": []string{"bob@example.com", "carol@other.example"}},
 		{"to": []string{"bob@example.com"}, "cc": []string{"carol@other.example"}},
@@ -189,7 +199,7 @@ func TestSendMixedDomainsRejectedBeforeAcceptance(t *testing.T) {
 }
 
 func TestSendSameDomainCaseInsensitive(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "alice@example.com", "to": []string{"bob@EXAMPLE.COM", "carol@example.com"}, "text": "hello",
 	})
@@ -199,7 +209,7 @@ func TestSendSameDomainCaseInsensitive(t *testing.T) {
 }
 
 func TestSendUnicodeSubjectAndBody(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "a@example.com", "to": []string{"b@example.com"},
 		"subject": "héllo wörld", "text": "café ☕",
@@ -210,7 +220,7 @@ func TestSendUnicodeSubjectAndBody(t *testing.T) {
 }
 
 func TestSendMalformedJSON(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doRaw(t, mux, "POST", "/v1/emails", "application/json", []byte(`{"from": `))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
@@ -218,7 +228,7 @@ func TestSendMalformedJSON(t *testing.T) {
 }
 
 func TestSendUnknownFieldRejected(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doRaw(t, mux, "POST", "/v1/emails", "application/json", []byte(`{"from":"a@example.com","to":["b@example.com"],"text":"x","attachments":[]}`))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected unknown field to be rejected as malformed, got %d: %s", rec.Code, rec.Body.String())
@@ -226,7 +236,7 @@ func TestSendUnknownFieldRejected(t *testing.T) {
 }
 
 func TestSendMissingRequiredFields(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	for _, body := range []map[string]any{
 		{"to": []string{"b@example.com"}, "text": "x"},             // missing from
 		{"from": "a@example.com", "text": "x"},                     // missing to
@@ -240,7 +250,7 @@ func TestSendMissingRequiredFields(t *testing.T) {
 }
 
 func TestSendInvalidAddress(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "not-an-address", "to": []string{"b@example.com"}, "text": "x",
 	})
@@ -250,7 +260,7 @@ func TestSendInvalidAddress(t *testing.T) {
 }
 
 func TestSendCRLFInjectionRejected(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "a@example.com", "to": []string{"b@example.com"}, "text": "x",
 		"subject": "hi\r\nBcc: attacker@evil.com",
@@ -261,7 +271,7 @@ func TestSendCRLFInjectionRejected(t *testing.T) {
 }
 
 func TestSendEmptyRecipients(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "a@example.com", "to": []string{}, "text": "x",
 	})
@@ -271,7 +281,7 @@ func TestSendEmptyRecipients(t *testing.T) {
 }
 
 func TestSendTooManyRecipients(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	to := make([]string, 51)
 	for i := range to {
 		to[i] = "user@example.com"
@@ -285,7 +295,7 @@ func TestSendTooManyRecipients(t *testing.T) {
 }
 
 func TestSendOversizedBody(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "a@example.com", "to": []string{"b@example.com"},
 		"text": strings.Repeat("a", maxBodyLen+1),
@@ -296,7 +306,7 @@ func TestSendOversizedBody(t *testing.T) {
 }
 
 func TestSendInvalidContentType(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doRaw(t, mux, "POST", "/v1/emails", "text/plain", []byte(`{}`))
 	if rec.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
@@ -304,7 +314,7 @@ func TestSendInvalidContentType(t *testing.T) {
 }
 
 func TestSendAcceptsParameterizedJSONContentType(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doRaw(t, mux, "POST", "/v1/emails", "application/json; charset=utf-8", []byte(`{
 		"from":"a@example.com",
 		"to":["b@example.com"],
@@ -318,7 +328,7 @@ func TestSendAcceptsParameterizedJSONContentType(t *testing.T) {
 // ------------------------------------------------------------- GET -----
 
 func TestGetExistingEmail(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	sendRec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 		"from": "a@example.com", "to": []string{"b@example.com"}, "text": "hello body", "html": "<p>hello</p>",
 	})
@@ -340,7 +350,7 @@ func TestGetExistingEmail(t *testing.T) {
 }
 
 func TestGetNonexistentEmail(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "GET", "/v1/emails/does-not-exist", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
@@ -387,7 +397,7 @@ func TestGetCrossTenantAccessIsNotFound(t *testing.T) {
 // ------------------------------------------------------------ LIST -----
 
 func TestListEmpty(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "GET", "/v1/emails", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
@@ -400,7 +410,7 @@ func TestListEmpty(t *testing.T) {
 }
 
 func TestListMultipleAndPaginationAndStatusFilter(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	for i := 0; i < 5; i++ {
 		rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
 			"from": "a@example.com", "to": []string{"b@example.com"}, "text": "x",
@@ -436,7 +446,7 @@ func TestListMultipleAndPaginationAndStatusFilter(t *testing.T) {
 }
 
 func TestListInvalidCursor(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "GET", "/v1/emails?cursor=not-valid-base64!!", nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
@@ -444,7 +454,7 @@ func TestListInvalidCursor(t *testing.T) {
 }
 
 func TestListLimitBoundaries(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	for _, limit := range []string{"0", "101", "abc"} {
 		rec := doJSON(t, mux, "GET", "/v1/emails?limit="+limit, nil)
 		if rec.Code != http.StatusUnprocessableEntity {
@@ -454,7 +464,7 @@ func TestListLimitBoundaries(t *testing.T) {
 }
 
 func TestListInvalidStatusFilter(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSON(t, mux, "GET", "/v1/emails?status=not-a-status", nil)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())

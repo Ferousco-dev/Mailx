@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/Ferousco-dev/mailx/internal/auth"
+	"github.com/Ferousco-dev/mailx/internal/dkim"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
 	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/webhook"
@@ -13,6 +14,7 @@ import (
 type routeServices struct {
 	domains  *maildomain.Service
 	webhooks *webhook.Service
+	dkim     *dkim.Service
 }
 
 // newMux registers every /v1 route plus health checks. Handlers stay
@@ -33,6 +35,10 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 			webhookService = extras[0].webhooks
 		}
 	}
+	if len(extras) > 0 && extras[0].dkim != nil {
+		h.dkim = extras[0].dkim
+	}
+	dkimHandler := &dkimHandler{service: h.dkim}
 	domains := newDomainHandler(domainService)
 	webhooks := &webhookHandler{service: webhookService, db: h.db}
 
@@ -45,6 +51,9 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("GET /v1/domains", requireScope(auth.ScopeDomainsRead)(domains.handleList))
 	v1.HandleFunc("POST /v1/domains/{id}/verify", requireScope(auth.ScopeDomainsWrite)(domains.handleVerify))
 	v1.HandleFunc("DELETE /v1/domains/{id}", requireScope(auth.ScopeDomainsWrite)(domains.handleDelete))
+	v1.HandleFunc("GET /v1/domains/{id}/dkim", requireScope(auth.ScopeDomainsRead)(dkimHandler.handleStatus))
+	v1.HandleFunc("POST /v1/domains/{id}/dkim", requireScope(auth.ScopeDomainsWrite)(dkimHandler.handleCreate))
+	v1.HandleFunc("POST /v1/domains/{id}/dkim/verify", requireScope(auth.ScopeDomainsWrite)(dkimHandler.handleVerify))
 	v1.HandleFunc("POST /v1/webhooks", requireScope(auth.ScopeWebhooksWrite)(webhooks.handleCreate))
 	v1.HandleFunc("GET /v1/webhooks", requireScope(auth.ScopeWebhooksRead)(webhooks.handleList))
 	v1.HandleFunc("GET /v1/webhooks/{id}", requireScope(auth.ScopeWebhooksRead)(webhooks.handleGet))

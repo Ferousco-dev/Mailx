@@ -1,4 +1,4 @@
-# MailX Architecture, Invariants, Security, Limitations (current through v0.25)
+# MailX Architecture, Invariants, Security, Limitations (current through v0.26)
 
 Verified against HEAD `481da4a` on 2026-09-21. This file states CURRENT truth. Superseded designs are kept only
 under "Superseded" so they are never read as current. History lives in `milestones.md`; rationale IDs in `decisions.md`.
@@ -138,6 +138,16 @@ Tests: `MAILX_TEST_DATABASE_URL` (PostgreSQL DSN; if unset, a local default is t
 - Observability: `mailx_smtp_auth_attempts_total{mechanism (plain|login|none), outcome (success|rejected|temporary|no_tls|not_advertised|no_mechanism|protocol_error|connection_lost|timeout|canceled)}`; worker `delivery_outcome` adds `transport`, `auth_mechanism`, `auth_outcome`. Liveness/readiness never touch the relay.
 - Invariants added: credentials never sent over plaintext or on stale pre-TLS capabilities; MAIL FROM unreachable before 235; direct MX delivery never authenticates (tested with a real MX that offers AUTH); relay failure never becomes direct delivery; AUTH success is not delivery (Accepted still needs final DATA 2xx; QUIT failure after acceptance keeps Accepted=true through the relay path).
 
+## DKIM and verified-From (v0.26; design: `docs/design-v0.26.md`)
+
+- Verified-From: `POST /v1/emails` requires the RFC 5322 From domain (parsed with `net/mail`, canonicalized by `domain.Normalize` via `domain.FromDomain`) to EXACTLY equal a verified, non-deleted domain of the authenticated tenant (`db.VerifiedSenderDomain`). No suffix or parent/subdomain inference; another tenant's or an unverified domain gives 403 `from_domain_not_authorized`. Runs before the idempotency claim, the FileStore write and every insert; `InsertMessage(SenderDomain)` re-checks FOR SHARE in its transaction. MAIL FROM is still the From address (bounce architecture unchanged). The API is the only outbound creator.
+- Signing: `dkim.Sign` = rsa-sha256, 2048-bit, relaxed/relaxed, d=From domain (must equal the message From domain, exactly one From), signed headers from,to,cc,subject,date,message-id,mime-version,content-type,content-transfer-encoding,reply-to (present ones), tags v,a,c,d,s,t,h,bh,b only. Done at acceptance in the API after MIME is final and before storage: stored bytes = queued bytes = transmitted bytes (tested at a capturing MX for direct and relay, plus independent verification with go-msgauth). Retries resend the stored bytes; a message keeps its acceptance-time signature across key rotation.
+- Keys: `dkim_keys` (migration 000012; FK to `domains(tenant_id,id)`; CHECK algorithm/size/selector/lifecycle; `uq_dkim_one_active`, `uq_dkim_one_pending`; `UNIQUE(domain_id,selector)`). Lifecycle pending (does not sign) -> active (after DNS TXT publication is verified by `POST .../dkim/verify`) -> retired (private ciphertext destroyed). Rotation = create a new pending key, publish, verify; the old key signs until activation. Selector `mx`+YYYYMMDD+4 hex. Domain deletion deletes keys in the same transaction; a re-claimed name starts with no keys.
+- Storage/crypto: private key PKCS#8 DER -> AES-256-GCM (`internal/secretbox`, fresh nonce, AAD `mailx-dkim-v1|tenant|domain|selector`). `MAILX_DKIM_MASTER_KEY` (required, base64 32 bytes) must differ from `MAILX_WEBHOOK_MASTER_KEY` (enforced at startup); errors name variables not values. Webhook `SecretBox` now wraps the shared `secretbox`. Private keys are never in any API response, log, metric or error; keys live in process memory while used (Go cannot zeroize).
+- Failure behavior: a domain with an ACTIVE key always signs; missing/undecryptable/corrupt/mismatched key or signing failure => 503 `dkim_signing_unavailable`, nothing accepted or stored, never unsigned. A domain with no active key sends unsigned (DKIM not set up).
+- API: `GET|POST /v1/domains/{id}/dkim`, `POST /v1/domains/{id}/dkim/verify` (domains:read/write, tenant-scoped 404); OpenAPI updated (drift test).
+- Observability: `mailx_dkim_signatures_total{algorithm (rsa-sha256), outcome (signed|unsigned_no_key|key_unavailable|key_decrypt_failed|key_invalid|sign_failed|domain_mismatch)}`; nothing domain-, selector- or key-derived is logged or labelled.
+
 ## Security decisions (verified)
 
 - API secrets never stored raw: only `key_id` + HMAC-SHA256(pepper, secret); 256-bit random secret makes slow password hashing pointless; unkeyed SHA-256 fallback without pepper is a documented dev-only choice. All auth failures collapse to one generic 401; DB error on auth fails closed. No public key-creation endpoint (CLI bootstrap).
@@ -160,7 +170,7 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 2. **DSNs are generated but never transmitted** (`worker.handleTerminalFailure` builds/serializes then discards). A terminal failure emits a `failed`/`bounced` event, but the sender gets no bounce email. Also `handleTerminalFailure` runs after outcome persistence and is not itself durable.
 3. **Webhook delivery is at-least-once, no manual replay** (deferred), no global ordering guarantee across events/endpoints.
 4. **Process-local retry state** (`stateStore`) survives only as a cache; durable state is authoritative on every job (v0.20-era note about memory-only state is superseded by `57ee1d0`).
-5. **Domain verification is not enforced on send:** `POST /v1/emails` does not check the sender/From domain against verified `domains`. Ownership exists as a resource only.
+5. (Resolved in v0.26) Verified-From is enforced at the API boundary. Remaining: no per-domain "require DKIM" flag (a domain requires DKIM exactly when it has an active key); no automatic key expiry or scheduled rotation; no explicit key deletion endpoint; Ed25519 and header oversigning deferred; no DKIM DNS re-check after activation.
 6. (Resolved in v0.23) Readiness now checks PostgreSQL and Redis; metrics and structured logs exist. Remaining: no tracing, no log/metric shipping, metrics endpoint unauthenticated (bind to loopback/private network only), `queue_depth` is scraped live from Redis each scrape.
 7. **Mixed-domain recipients rejected** (one delivery domain per message); recipient-level partial success is not modeled (RCPT is all-or-error).
 8. **No inbound STARTTLS and no inbound SMTP AUTH** (outbound STARTTLS exists since v0.24); IDN/A-label domains unsupported in DNS and domain ownership. Outbound TLS gaps: no DANE/MTA-STS, so MX-to-domain binding relies on DNS; default opportunistic policy fails closed on a peer that advertises STARTTLS with an untrusted or mismatched certificate (no unverified-encryption mode); TLS facts are logs/metrics only, not persisted per attempt.
@@ -173,6 +183,7 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 
 ## Superseded (do not treat as current)
 
+- Pre-v0.26: outbound mail from any From domain was accepted (v0.21 recorded ownership but did not enforce it) and every message was sent unsigned.
 - Pre-v0.24: outbound SMTP was always plaintext; the client sent MAIL FROM straight after the first EHLO and its context watcher set deadlines on the (single) connection field.
 - Pre-v0.23: ad-hoc `log.Printf` logging (including full inbound message bodies/addresses in the SMTP sink), PostgreSQL-only readiness with raw error text in the 503 body, and `withRecoverMiddleware` outside the request-ID middleware.
 - v0.18 worker "best-effort status reporter after Ack/Release" -> replaced in `57ee1d0` by transactional `OutcomeStore` persisted before finalization.
@@ -181,3 +192,4 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 - v0.19 partial index `idx_api_keys_tenant_active` -> superseded by 000008 tenant/created_at index.
 - v0.16/v0.20 statements that retry state is process memory -> superseded by durable reconstruction (`57ee1d0`).
 15. Relay credentials live in the process environment and memory for the process lifetime (Go strings cannot be zeroed); no `_FILE` secret input, no rotation without restart. Implicit-TLS relays (port 465), OAuth/XOAUTH2 and SCRAM are unsupported; one relay for all domains and tenants.
+16. DKIM master key lives in the environment like the webhook key (no `_FILE` input, no re-encryption tooling for master-key rotation); losing it makes stored DKIM keys undecryptable and domains with an active key refuse to send until rekeyed.

@@ -15,11 +15,11 @@
     "DOM": 0,
     "DES": 8,
     "TC": 0,
-    "DEF": 9,
-    "CR": 6,
-    "RSK": 16,
-    "DEC": 47,
-    "MET": 15,
+    "DEF": 10,
+    "CR": 7,
+    "RSK": 19,
+    "DEC": 53,
+    "MET": 19,
     "ETH": 1
   },
   "attempts": {
@@ -34,12 +34,12 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.25",
-    "ilana_current_through": "v0.25",
-    "current_milestone": "none (v0.26 not started)",
-    "current_milestone_status": "v0.25 complete",
-    "next_milestone": "v0.26 DKIM (not started)",
-    "recovered_from_head": "d0cbda6",
+    "last_completed_milestone": "v0.26",
+    "ilana_current_through": "v0.26",
+    "current_milestone": "none (v0.27 not started)",
+    "current_milestone_status": "v0.26 complete",
+    "next_milestone": "v0.27 SPF (not started)",
+    "recovered_from_head": "631836c",
     "recovered_on": "2026-09-21"
   }
 }

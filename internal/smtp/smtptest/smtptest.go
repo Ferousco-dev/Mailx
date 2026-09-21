@@ -116,6 +116,8 @@ type Options struct {
 	AuthDrop, AuthStall, AuthStallMid bool
 	// RequireAuth answers MAIL with 530 until authentication succeeded.
 	RequireAuth bool
+	// Capture keeps every received DATA body (dot-unstuffed) for Messages().
+	Capture bool
 }
 
 // AuthAttempt is one AUTH exchange as decoded by the server.
@@ -130,6 +132,7 @@ type Server struct {
 	mu    sync.Mutex
 	log   []string
 	auths []AuthAttempt
+	msgs  []string
 	Conns atomic.Int32
 	wg    sync.WaitGroup
 }
@@ -298,6 +301,7 @@ func (m *Server) handle(raw net.Conn) {
 			send("250 2.1.0 ok\r\n")
 		case "DATA":
 			send("354 go ahead\r\n")
+			var body strings.Builder
 			for {
 				l, err := r.ReadString('\n')
 				if err != nil {
@@ -306,6 +310,12 @@ func (m *Server) handle(raw net.Conn) {
 				if strings.TrimRight(l, "\r\n") == "." {
 					break
 				}
+				body.WriteString(strings.TrimPrefix(l, ".")) // undo dot-stuffing (only a leading dot is added)
+			}
+			if m.opts.Capture {
+				m.mu.Lock()
+				m.msgs = append(m.msgs, body.String())
+				m.mu.Unlock()
 			}
 			final := m.opts.FinalReply
 			if final == "" {
@@ -406,4 +416,11 @@ func (m *Server) handleAuth(phase, line string, c net.Conn, r *bufio.Reader, sen
 		send(text + "\r\n")
 	}
 	return true, false
+}
+
+// Messages returns the DATA bodies received (dot-unstuffed), when Capture is set.
+func (m *Server) Messages() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.msgs...)
 }

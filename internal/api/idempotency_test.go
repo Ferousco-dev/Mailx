@@ -50,7 +50,7 @@ func samplePayload() map[string]any {
 }
 
 func TestIdempotencyNoKeyBehavesLikeBeforeV020(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	first := doJSON(t, mux, "POST", "/v1/emails", samplePayload())
 	second := doJSON(t, mux, "POST", "/v1/emails", samplePayload())
 	if first.Code != http.StatusAccepted || second.Code != http.StatusAccepted {
@@ -63,7 +63,7 @@ func TestIdempotencyNoKeyBehavesLikeBeforeV020(t *testing.T) {
 }
 
 func TestIdempotencyIdenticalRetryReturnsSameEmail(t *testing.T) {
-	mux, db, tenantID := setupMux(t)
+	mux, db, tenantID := setupSendMux(t)
 	first := doJSONWithKey(t, mux, "POST", "/v1/emails", "key-abc", samplePayload())
 	if first.Code != http.StatusAccepted {
 		t.Fatalf("got %d: %s", first.Code, first.Body.String())
@@ -101,7 +101,7 @@ func TestIdempotencyIdenticalRetryReturnsSameEmail(t *testing.T) {
 }
 
 func TestIdempotencyDifferentKeyCreatesNewEmail(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	first := doJSONWithKey(t, mux, "POST", "/v1/emails", "key-a", samplePayload())
 	second := doJSONWithKey(t, mux, "POST", "/v1/emails", "key-b", samplePayload())
 	e1, e2 := decodeEmail(t, first), decodeEmail(t, second)
@@ -111,7 +111,7 @@ func TestIdempotencyDifferentKeyCreatesNewEmail(t *testing.T) {
 }
 
 func TestIdempotencySameKeyDifferentPayloadConflicts(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	first := doJSONWithKey(t, mux, "POST", "/v1/emails", "key-x", samplePayload())
 	if first.Code != http.StatusAccepted {
 		t.Fatalf("got %d: %s", first.Code, first.Body.String())
@@ -133,7 +133,7 @@ func TestIdempotencySameKeyDifferentPayloadConflicts(t *testing.T) {
 }
 
 func TestIdempotencyInvalidKeyRejected(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	rec := doJSONWithKey(t, mux, "POST", "/v1/emails", strings.Repeat("a", idempotency.MaxKeyLen+1), samplePayload())
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
@@ -141,7 +141,7 @@ func TestIdempotencyInvalidKeyRejected(t *testing.T) {
 }
 
 func TestIdempotencyValidationFailureDoesNotConsumeKey(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	bad := map[string]any{"from": "a@example.com", "to": []string{}, "text": "x"} // no recipients
 	firstRec := doJSONWithKey(t, mux, "POST", "/v1/emails", "retry-key", bad)
 	if firstRec.Code != http.StatusUnprocessableEntity {
@@ -156,7 +156,7 @@ func TestIdempotencyValidationFailureDoesNotConsumeKey(t *testing.T) {
 }
 
 func TestIdempotencyMalformedJSONDoesNotConsumeKey(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	req := httptest.NewRequest("POST", "/v1/emails", strings.NewReader(`{"from": `))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Idempotency-Key", "retry-key-2")
@@ -177,7 +177,7 @@ func TestIdempotencyMalformedJSONDoesNotConsumeKey(t *testing.T) {
 // payload, must resolve to exactly one logical email - arbitrated by
 // PostgreSQL, not any in-process coordination.
 func TestIdempotencyConcurrentIdenticalRequestsCreateOneEmail(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	const concurrency = 30
 	var wg sync.WaitGroup
 	ids := make([]string, concurrency)
@@ -209,7 +209,7 @@ func TestIdempotencyConcurrentIdenticalRequestsCreateOneEmail(t *testing.T) {
 }
 
 func TestIdempotencyConcurrentConflictingPayloadsDeterministic(t *testing.T) {
-	mux, _, _ := setupMux(t)
+	mux, _, _ := setupSendMux(t)
 	const concurrency = 10
 	var wg sync.WaitGroup
 	codes := make([]int, concurrency*2)
@@ -252,6 +252,7 @@ func TestIdempotencyConcurrentConflictingPayloadsDeterministic(t *testing.T) {
 
 func TestIdempotencyAcrossTenantsIndependent(t *testing.T) {
 	mux, db, tenantA, authSvcA, keyA := setupMuxNoAuth(t)
+	verifyTestDomain(t, db, tenantA.ID, "example.com")
 	tenantB, err := db.CreateTenant(context.Background(), "tenant-b")
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +265,11 @@ func TestIdempotencyAcrossTenantsIndependent(t *testing.T) {
 	muxB := authInjector{next: mux, token: genB.Raw}
 
 	recA := doJSONWithKey(t, muxA, "POST", "/v1/emails", "shared-key", samplePayload())
-	recB := doJSONWithKey(t, muxB, "POST", "/v1/emails", "shared-key", samplePayload())
+	// Only one tenant may hold a verified name, so tenant B sends from its own domain.
+	verifyTestDomain(t, db, tenantB.ID, "tenant-b.example.org")
+	payloadB := samplePayload()
+	payloadB["from"] = "b@tenant-b.example.org"
+	recB := doJSONWithKey(t, muxB, "POST", "/v1/emails", "shared-key", payloadB)
 	if recA.Code != http.StatusAccepted || recB.Code != http.StatusAccepted {
 		t.Fatalf("expected both tenants to independently succeed, got %d and %d", recA.Code, recB.Code)
 	}
@@ -279,7 +284,8 @@ func TestIdempotencyAcrossTenantsIndependent(t *testing.T) {
 // TENANT, not the API-key row: a retry authenticated with a NEW key
 // (after rotation) must still find the SAME tenant-scoped claim.
 func TestIdempotencySurvivesAPIKeyRotation(t *testing.T) {
-	mux, _, tenant, authSvc, oldKey := setupMuxNoAuth(t)
+	mux, db, tenant, authSvc, oldKey := setupMuxNoAuth(t)
+	verifyTestDomain(t, db, tenant.ID, "example.com")
 	authed := authInjector{next: mux, token: oldKey}
 
 	first := doJSONWithKey(t, authed, "POST", "/v1/emails", "payment-123", samplePayload())
@@ -309,7 +315,8 @@ func TestIdempotencySurvivesAPIKeyRotation(t *testing.T) {
 }
 
 func TestIdempotencyRevokedKeyCannotClaimOrReplay(t *testing.T) {
-	mux, _, tenant, authSvc, rawKey := setupMuxNoAuth(t)
+	mux, db, tenant, authSvc, rawKey := setupMuxNoAuth(t)
+	verifyTestDomain(t, db, tenant.ID, "example.com")
 	authed := authInjector{next: mux, token: rawKey}
 
 	first := doJSONWithKey(t, authed, "POST", "/v1/emails", "will-be-revoked", samplePayload())
@@ -332,7 +339,7 @@ func TestIdempotencyRevokedKeyCannotClaimOrReplay(t *testing.T) {
 }
 
 func TestIdempotencyReplayReflectsCurrentResourceState(t *testing.T) {
-	mux, db, _ := setupMux(t)
+	mux, db, _ := setupSendMux(t)
 	first := doJSONWithKey(t, mux, "POST", "/v1/emails", "evolve-key", samplePayload())
 	e1 := decodeEmail(t, first)
 	if e1.Status != "queued" {

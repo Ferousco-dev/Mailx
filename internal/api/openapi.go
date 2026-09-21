@@ -24,7 +24,7 @@ const openAPISpec = `{
     "/emails": {
       "post": {
         "summary": "Send an email",
-        "description": "Requires the emails:send scope. Durably accepts an email for asynchronous processing. All to/cc/bcc recipients must share one delivery domain; mixed-domain requests receive 422 before acceptance. 202 means MailX has validated and durably recorded the email and has durable responsibility for eventually attempting delivery - it does NOT mean the email has been delivered, that the recipient's server accepted it, or that Redis currently has the job. Retrying safely: supply the same Idempotency-Key on retry to get the original result back instead of creating a second email; this prevents duplicate MailX email SUBMISSIONS from a repeated HTTP request - it does not and cannot guarantee exactly-once SMTP delivery to the recipient's server. v0.21 records DNS ownership but does not yet enforce a verified From domain; enforcement is deferred to the sending-identity/DKIM milestone.",
+        "description": "Requires the emails:send scope. Durably accepts an email for asynchronous processing. The From domain must be a domain your account has VERIFIED (exact match; a verified root does not authorize its subdomains): otherwise 403 from_domain_not_authorized, before anything is stored. If the From domain has an active DKIM key the message is signed with it at acceptance; if that key cannot be used the request fails with 503 dkim_signing_unavailable and nothing is accepted (never sent unsigned). All to/cc/bcc recipients must share one delivery domain; mixed-domain requests receive 422 before acceptance. 202 means MailX has validated and durably recorded the email and has durable responsibility for eventually attempting delivery - it does NOT mean the email has been delivered, that the recipient's server accepted it, or that Redis currently has the job. Retrying safely: supply the same Idempotency-Key on retry to get the original result back instead of creating a second email; this prevents duplicate MailX email SUBMISSIONS from a repeated HTTP request - it does not and cannot guarantee exactly-once SMTP delivery to the recipient's server.",
         "parameters": [
           {
             "name": "Idempotency-Key", "in": "header", "required": false,
@@ -49,7 +49,8 @@ const openAPISpec = `{
           "413": {"$ref": "#/components/responses/Error"},
           "415": {"$ref": "#/components/responses/Error"},
           "422": {"$ref": "#/components/responses/Error"},
-          "500": {"$ref": "#/components/responses/Error"}
+          "500": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"}
         }
       },
       "get": {
@@ -174,6 +175,42 @@ const openAPISpec = `{
           "503": {"$ref": "#/components/responses/Error"}
         }
       }
+    },
+    "/domains/{id}/dkim": {
+      "get": {
+        "summary": "DKIM status for a domain",
+        "description": "Requires domains:read. Returns the domain's DKIM keys (public metadata and the DNS TXT record to publish). The private key is never returned by any endpoint. 'signing' is true when an active key exists; from then on mail from this domain is always signed (a key failure refuses the send instead of sending unsigned).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "DKIM state", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DkimStatus"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "post": {
+        "summary": "Generate a DKIM key (setup or rotation)",
+        "description": "Requires domains:write and a VERIFIED domain (409 domain_not_verified otherwise). Generates a 2048-bit rsa-sha256 key with a fresh selector and stores it as 'pending'; a pending key does not sign. Publish the returned TXT record, then call verify. If an active key exists this starts a rotation: the active key keeps signing until the new one is verified. Only one pending key may exist (409 dkim_key_pending).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "201": {"description": "Key created (pending)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DkimStatus"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/domains/{id}/dkim/verify": {
+      "post": {
+        "summary": "Verify DKIM DNS publication and activate the pending key",
+        "description": "Requires domains:write. Performs a bounded public DNS TXT lookup for the pending key's selector and compares the published public key. On a match the pending key becomes active and the previous active key is retired (its private key destroyed); keep the old DNS record published for at least 24 hours so messages queued before rotation still verify. 'published:false' means the record is absent or different and nothing changed. 409 dkim_no_pending_key when there is nothing to verify; 503 on DNS infrastructure failure.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "Verification result", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/DkimVerifyResult"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
     }
   },
   "components": {
@@ -232,6 +269,38 @@ const openAPISpec = `{
       "CreateDomainRequest": {
         "type": "object", "required": ["name"], "additionalProperties": false,
         "properties": {"name": {"type": "string", "example": "example.com", "description": "Public ASCII DNS name. Root and subdomain resources are independent; wildcards, IPs, IDNs, and public suffixes are rejected in v0.21."}}
+      },
+      "DkimKey": {
+        "type": "object", "required": ["selector", "algorithm", "key_bits", "status", "created_at", "dns"],
+        "properties": {
+          "selector": {"type": "string", "example": "mx202609211a2b"},
+          "algorithm": {"type": "string", "enum": ["rsa-sha256"]},
+          "key_bits": {"type": "integer", "example": 2048},
+          "status": {"type": "string", "enum": ["pending", "active", "retired"]},
+          "created_at": {"type": "string", "format": "date-time"},
+          "activated_at": {"type": "string", "format": "date-time", "nullable": true},
+          "retired_at": {"type": "string", "format": "date-time", "nullable": true},
+          "dns": {"type": "object", "required": ["type", "name", "value", "value_chunks"], "properties": {
+            "type": {"type": "string", "enum": ["TXT"]},
+            "name": {"type": "string", "example": "mx202609211a2b._domainkey.example.com"},
+            "value": {"type": "string", "example": "v=DKIM1; k=rsa; p=<base64-public-key>"},
+            "value_chunks": {"type": "array", "items": {"type": "string"}, "description": "The value split into DNS character-strings of at most 255 bytes, for providers that require it."}
+          }}
+        }
+      },
+      "DkimStatus": {
+        "type": "object", "required": ["domain_id", "domain", "signing", "active", "pending", "retired"],
+        "properties": {
+          "domain_id": {"type": "string"}, "domain": {"type": "string"},
+          "signing": {"type": "boolean", "description": "True when an active key exists; mail from the domain is then always DKIM-signed."},
+          "active": {"allOf": [{"$ref": "#/components/schemas/DkimKey"}], "nullable": true},
+          "pending": {"allOf": [{"$ref": "#/components/schemas/DkimKey"}], "nullable": true},
+          "retired": {"type": "array", "items": {"$ref": "#/components/schemas/DkimKey"}}
+        }
+      },
+      "DkimVerifyResult": {
+        "type": "object", "required": ["published", "status"],
+        "properties": {"published": {"type": "boolean"}, "status": {"$ref": "#/components/schemas/DkimStatus"}}
       },
       "DNSRecord": {
         "type": "object", "required": ["type", "name", "value"],

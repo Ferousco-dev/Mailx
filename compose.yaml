@@ -65,6 +65,9 @@ services:
       # Explicitly insecure local-development values. Production must provide
       # a random base64 32-byte key and leave private/HTTP destinations off.
       MAILX_WEBHOOK_MASTER_KEY: ${MAILX_WEBHOOK_MASTER_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      # DKIM private-key encryption key. Dev-only placeholder that differs from the
+      # webhook key; production must provide its own random base64 32-byte key.
+      MAILX_DKIM_MASTER_KEY: ${MAILX_DKIM_MASTER_KEY:-AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=}
       MAILX_WEBHOOK_ALLOW_INSECURE: ${MAILX_WEBHOOK_ALLOW_INSECURE:-true}
     volumes:
       - mailx-data:/data

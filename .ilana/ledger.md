@@ -85,3 +85,15 @@ fmt, vet, builds (darwin, linux/amd64, linux/arm64), `go test -count=1 ./...` an
 
 ## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
 v0.25 complete pending commit. Not pushed (push planned after review). Next: v0.26 DKIM (not started). DEF-009 was caught before commit.
+
+## 2026-09-21 | G0-G3 | conductor | v0.26 PLAN
+Scope CR-007: DKIM signing, key lifecycle, verified-From. Baseline at `631836c` green (fmt, vet, build, diff-check, test, race with real PostgreSQL/Redis). RFC 6376 and RFC 8301 read (relaxed canonicalization, From must be signed, hash construction, rsa-sha1 forbidden, 2048-bit recommended). Design `docs/design-v0.26.md`; migration 000012 justified (key storage and lifecycle constraints need durable, tenant-safe schema).
+
+## 2026-09-21 | G4 | constructor | GATE PASS
+`internal/dkim` (keys, canon, sign, service), `internal/secretbox`, migration 000012, `database/dkim_keys.go`, sender authorization + in-transaction recheck, API handlers/OpenAPI, cmd wiring, metric. No InsecureSkipVerify, no weak algorithm, no math/rand, no plaintext key path.
+
+## 2026-09-21 | G5 | verifier | GATE PASS
+fmt, vet, builds (darwin, linux/amd64, linux/arm64), `go test -count=1 ./...` and `-race` with explicit PostgreSQL DSN and Redis: all pass, 0 skipped. Targeted DKIM/authorization/concurrency/rotation/deletion/delivery subset repeated 8x under -race. Independent DKIM verification (go-msgauth) of text, html, alternative, multipart/mixed+attachment; mutation and canonicalization tests; DB plaintext-marker inspection; capturing MX proves stored = transmitted bytes for direct and relay. Real Dockerfile build exit 0; Compose: migration 000012 applied, verified-From 403/202, DKIM create returns a pending TXT record with no private material, ciphertext row inspected, master-key validation (missing, malformed, same-as-webhook) fails startup naming variables only, valid key starts.
+
+## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
+v0.26 complete pending commit. Not pushed. Next: v0.27 SPF (not started). DEF-001 and RSK-006 closed.

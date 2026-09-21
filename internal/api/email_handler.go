@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/dkim"
+	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
 	"github.com/Ferousco-dev/mailx/internal/idempotency"
 	"github.com/Ferousco-dev/mailx/internal/mail"
 	"github.com/Ferousco-dev/mailx/internal/outbound"
@@ -38,7 +40,10 @@ const (
 type emailHandler struct {
 	db    *database.DB
 	store *storage.FileStore
-	now   func() time.Time
+	// dkim signs accepted messages; nil disables signing (tests only: NewServer
+	// requires it).
+	dkim *dkim.Service
+	now  func() time.Time
 }
 
 func newEmailHandler(db *database.DB, store *storage.FileStore) *emailHandler {
@@ -103,15 +108,19 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	parsed, err := mail.ParseMessage(built.Raw)
+	tenantID := tenantFromContext(r.Context())
+	fromDomain, raw, ok := h.authorizeAndSign(w, r, tenantID, built.From, built.Raw)
+	if !ok {
+		return
+	}
+
+	parsed, err := mail.ParseMessage(raw)
 	if err != nil {
 		// Build produced something MailX's own parser rejects — a bug in
 		// the builder, never a client input problem.
 		writeError(w, r, newError(ErrInternal, "internal_error", "failed to finalize message"))
 		return
 	}
-
-	tenantID := tenantFromContext(r.Context())
 
 	// Idempotency claim happens HERE — after every validation step above
 	// has already succeeded, so a malformed/invalid request never
@@ -167,7 +176,12 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		ID: id, TenantID: tenantID, MailFrom: built.From, FromHeader: req.From,
 		Subject: req.Subject, MessageIDHeader: fmt.Sprintf("<%s@mailx.local>", id),
 		Recipients: recipients, AvailableAt: scheduledAt, IdempotencyCompletion: idemCompletion,
+		SenderDomain: fromDomain,
 	})
+	if errors.Is(err, database.ErrSenderNotAuthorized) { // domain removed after the pre-check
+		writeError(w, r, newError(ErrForbidden, "from_domain_not_authorized", "the From domain is not a verified domain of this account"))
+		return
+	}
 	if err != nil {
 		// Lost the completion race for our OWN idempotency claim: someone
 		// else (a reclaimer after we stalled past the staleness window)
@@ -425,4 +439,41 @@ func (h *emailHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		resp.NextCursor = &cursor
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// authorizeAndSign enforces verified-From and signs the final message bytes. It
+// writes the error response itself and reports ok=false when the request must
+// stop. Verified-From (v0.26): the RFC 5322 From domain must be a domain this
+// tenant owns and has verified, EXACTLY (no parent/subdomain inference; see
+// internal/domain). It runs before the idempotency claim, the FileStore write
+// and every durable insert, so an unauthorized sender is never accepted
+// responsibility for. The SMTP MAIL FROM is the same address today (envelope
+// sender), so both identities are authorized; bounce/return-path architecture is
+// unchanged. Signing happens at the point the message bytes become final: what
+// is signed here is exactly what is stored, queued and transmitted. A domain
+// with an active DKIM key must sign; any key failure refuses the message rather
+// than sending it unsigned. No key means DKIM is not set up for the domain.
+func (h *emailHandler) authorizeAndSign(w http.ResponseWriter, r *http.Request, tenantID, envelopeFrom, raw string) (fromDomain, signed string, ok bool) {
+	fromDomain, err := maildomain.FromDomain(envelopeFrom)
+	if err != nil {
+		writeError(w, r, newError(ErrValidation, "invalid_from", "the From address does not have a valid domain"))
+		return "", "", false
+	}
+	if _, err := h.db.VerifiedSenderDomain(r.Context(), tenantID, fromDomain); err != nil {
+		if errors.Is(err, database.ErrNotFound) {
+			writeError(w, r, newError(ErrForbidden, "from_domain_not_authorized", "the From domain is not a verified domain of this account"))
+			return "", "", false
+		}
+		writeError(w, r, newError(ErrInternal, "internal_error", "failed to authorize sender"))
+		return "", "", false
+	}
+	if h.dkim == nil {
+		return fromDomain, raw, true
+	}
+	out, _, serr := h.dkim.SignMessage(r.Context(), tenantID, fromDomain, []byte(raw))
+	if serr != nil {
+		writeError(w, r, newError(ErrTemporarilyUnavailable, "dkim_signing_unavailable", "message signing is unavailable for this domain right now; retry later"))
+		return "", "", false
+	}
+	return fromDomain, string(out), true
 }

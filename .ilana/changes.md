@@ -6,3 +6,4 @@
 - CR-004 [approved, 2026-09-21]: address Greptile review of PR #14 (DEF-005..DEF-007); no scope beyond the three findings.
 - CR-005 [approved, 2026-09-21]: implement v0.24 outbound SMTP STARTTLS (design `docs/design-v0.24.md`); v0.25 SMTP AUTH, DKIM/SPF/DMARC, inbound STARTTLS explicitly excluded.
 - CR-006 [approved, 2026-09-21]: implement v0.25 outbound SMTP AUTH to a trusted relay (design `docs/design-v0.25.md`); inbound AUTH, OAuth, DKIM/SPF/DMARC excluded.
+- CR-007 [approved, 2026-09-21]: implement v0.26 DKIM signing, key lifecycle and verified-From enforcement (design `docs/design-v0.26.md`); SPF, DMARC, PTR/HELO, inbound work and dashboards excluded.

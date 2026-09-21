@@ -78,7 +78,16 @@ type NewMessage struct {
 	// complete but message failed" cannot happen; there is only one
 	// commit for both.
 	IdempotencyCompletion *IdempotencyCompletion
+	// SenderDomain, when non-empty, is the canonical From domain. InsertMessage
+	// re-checks in the same transaction that the tenant still has this domain
+	// verified and not deleted (FOR SHARE), so a domain deleted between the API's
+	// pre-check and the commit cannot slip an unauthorized message through.
+	SenderDomain string
 }
+
+// ErrSenderNotAuthorized means the tenant does not (or no longer does) own the
+// From domain as a verified domain.
+var ErrSenderNotAuthorized = errors.New("database: sender domain is not authorized for this tenant")
 
 // IdempotencyCompletion identifies the idempotency_keys row to complete.
 // TenantID is taken from NewMessage.TenantID (the two must always agree,
@@ -141,6 +150,19 @@ func (db *DB) InsertMessage(ctx context.Context, in NewMessage) (Message, error)
 		return Message{}, fmt.Errorf("database: begin insert message: %w", normalizeErr(err))
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if in.SenderDomain != "" {
+		var one int
+		err := tx.QueryRow(ctx, `SELECT 1 FROM domains
+			WHERE tenant_id = $1 AND name = $2 AND deleted_at IS NULL AND verification_status = 'verified' FOR SHARE`,
+			in.TenantID, in.SenderDomain).Scan(&one)
+		if errors.Is(normalizeErr(err), ErrNotFound) {
+			return Message{}, ErrSenderNotAuthorized
+		}
+		if err != nil {
+			return Message{}, fmt.Errorf("database: check sender domain: %w", normalizeErr(err))
+		}
+	}
 
 	var msg Message
 	err = tx.QueryRow(ctx, `

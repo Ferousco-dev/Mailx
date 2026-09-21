@@ -77,15 +77,19 @@ func runFull() error {
 		return err
 	}
 	authSvc := auth.NewService(db, apiKeyPepper())
+	dkimSvc, err := buildDKIM(db, o)
+	if err != nil {
+		return err
+	}
 	webhookRuntime, err := buildWebhookRuntime(db, o)
 	if err != nil {
 		return err
 	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
-		Webhooks: webhookRuntime.service,
-		Ready:    ready.Check,
-		Logger:   o.log, Metrics: o.metrics,
+		Webhooks: webhookRuntime.service, DKIM: dkimSvc,
+		Ready:  ready.Check,
+		Logger: o.log, Metrics: o.metrics,
 	})
 	if err != nil {
 		return err

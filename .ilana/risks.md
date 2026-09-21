@@ -22,3 +22,8 @@
 - RSK-014 [medium, v0.25]: relay credentials are read from environment variables and stay in process memory; anyone with process-environment access (container inspect, /proc) can read them. Mitigation deferred: `_FILE`/secret-manager inputs and rotation.
 - RSK-015 [low, v0.25]: wrong relay credentials keep queued mail retrying (bounded by backoff and 5 operations) until fixed; senders are not told until exhaustion. There is no relay health signal by design (liveness/readiness never call the relay); watch `mailx_smtp_auth_attempts_total{outcome="rejected"}`.
 - RSK-016 [low, v0.25]: a single relay serves all tenants and domains; no per-tenant routing or authorization.
+
+- RSK-006 [CLOSED in v0.26]: verified-From enforcement now exists.
+- RSK-017 [medium, v0.26]: a domain with an active DKIM key refuses to send if its key cannot be decrypted (for example after a lost or wrong `MAILX_DKIM_MASTER_KEY`); recovery is to re-create keys, which requires the master key to be restored first or the domain re-keyed manually.
+- RSK-018 [low, v0.26]: retired selectors must stay in DNS long enough for queued mail to verify (recommended >= 24 h; the default retry schedule spans about 7.5 h); MailX does not check.
+- RSK-019 [low, v0.26]: DKIM proves domain control of the signing domain only; it does not affect SPF, DMARC alignment policy, or PTR/HELO deliverability (v0.27+).
