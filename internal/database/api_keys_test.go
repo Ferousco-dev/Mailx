@@ -52,6 +52,18 @@ func TestInsertAPIKeyRejectsUnknownScope(t *testing.T) {
 	}
 }
 
+func TestInsertAPIKeyAcceptsEveryCurrentScope(t *testing.T) {
+	db := newTestDB(t)
+	tenant := newTestTenant(t, db)
+	_, err := db.InsertAPIKey(context.Background(), NewAPIKey{
+		TenantID: tenant.ID, Name: "all", KeyID: "all-current-scopes", SecretHash: "hash",
+		Scopes: []string{"emails:send", "emails:read", "domains:read", "domains:write", "webhooks:read", "webhooks:write"},
+	})
+	if err != nil {
+		t.Fatalf("current scope rejected by PostgreSQL: %v", err)
+	}
+}
+
 func TestInsertAPIKeyDuplicateKeyIDConflicts(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()

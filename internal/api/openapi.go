@@ -81,6 +81,40 @@ const openAPISpec = `{
         }
       }
     },
+    "/events": {
+      "get": {
+        "summary": "List durable events",
+        "description": "Requires webhooks:read. Lists immutable tenant events newest first. Public types are email.queued, email.delivered, email.delivery_delayed, email.failed, and email.bounced. delivered means final SMTP DATA was accepted, not inbox placement.",
+        "parameters": [
+          {"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":100,"default":20}},
+          {"name":"cursor","in":"query","schema":{"type":"string"}}
+        ],
+        "responses": {"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventList"}}}},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"}}
+      }
+    },
+    "/webhooks": {
+      "post": {
+        "summary": "Create a webhook",
+        "description": "Requires webhooks:write. Returns signing_secret exactly once. MailX signs timestamp + '.' + the exact raw JSON body with HMAC-SHA256 and sends MailX-Webhook-Id, MailX-Event-Id, MailX-Webhook-Timestamp, and MailX-Webhook-Signature (v1=<hex>). Consumers should reject timestamps older/newer than five minutes using a constant-time MAC comparison and deduplicate by event id. Delivery is asynchronous and at-least-once; webhook failure never changes email status.",
+        "requestBody":{"required":true,"content":{"application/json":{"schema":{"$ref":"#/components/schemas/CreateWebhookRequest"}}}},
+        "responses":{"201":{"description":"Created; secret visible only here","content":{"application/json":{"schema":{"$ref":"#/components/schemas/WebhookCreated"}}}},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"},"415":{"$ref":"#/components/responses/Error"},"422":{"$ref":"#/components/responses/Error"}}
+      },
+      "get": {
+        "summary":"List webhooks","description":"Requires webhooks:read. Signing secrets are never returned.",
+        "parameters":[{"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":100,"default":20}},{"name":"cursor","in":"query","schema":{"type":"string"}}],
+        "responses":{"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/WebhookList"}}}},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"}}
+      }
+    },
+    "/webhooks/{id}": {
+      "get":{"summary":"Retrieve a webhook","description":"Requires webhooks:read. Cross-tenant IDs return 404; the secret is omitted.","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/Webhook"}}}},"404":{"$ref":"#/components/responses/Error"}}},
+      "delete":{"summary":"Disable a webhook","description":"Requires webhooks:write. Stops future fan-out and cancels unfinished deliveries while retaining history.","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"204":{"description":"Disabled"},"404":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/webhooks/{id}/rotate-secret": {
+      "post":{"summary":"Rotate a webhook secret","description":"Requires webhooks:write. New delivery claims use the replacement secret immediately and the new raw secret is returned once. A request already in flight may complete with the previous secret, so consumers should allow a short overlap during planned rotation.","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}}],"responses":{"200":{"description":"Rotated","content":{"application/json":{"schema":{"$ref":"#/components/schemas/WebhookCreated"}}}},"404":{"$ref":"#/components/responses/Error"}}}
+    },
+    "/webhooks/{id}/deliveries": {
+      "get":{"summary":"List webhook deliveries","description":"Requires webhooks:read. Uses opaque keyset pagination. Delivery is at-least-once: consumers must deduplicate by event_id. Any 2xx succeeds; network errors, timeouts, 408, 429, and 5xx retry with capped exponential jitter (maximum 8 attempts, Retry-After capped at one hour); redirects and ordinary 4xx are terminal. Replay is not implemented in v0.22. Delivery order is not guaranteed across endpoints or retries.","parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"string"}},{"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":100,"default":20}},{"name":"cursor","in":"query","schema":{"type":"string"}}],"responses":{"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/WebhookDeliveryList"}}}},"404":{"$ref":"#/components/responses/Error"}}}
+    },
     "/domains": {
       "post": {
         "summary": "Add a domain",
@@ -222,6 +256,29 @@ const openAPISpec = `{
         "type": "object",
         "properties": {"data": {"type": "array", "items": {"$ref": "#/components/schemas/Domain"}}, "next_cursor": {"type": "string", "nullable": true}}
       },
+      "CreateWebhookRequest": {
+        "type":"object","required":["url","events"],"additionalProperties":false,
+        "properties":{"url":{"type":"string","format":"uri","description":"Public HTTPS URL in production."},"events":{"type":"array","minItems":1,"items":{"type":"string","enum":["email.queued","email.delivered","email.delivery_delayed","email.failed","email.bounced"]}}}
+      },
+      "Webhook": {
+        "type":"object","required":["id","url","events","created_at","updated_at"],
+        "properties":{"id":{"type":"string"},"url":{"type":"string"},"events":{"type":"array","items":{"type":"string"}},"created_at":{"type":"string","format":"date-time"},"updated_at":{"type":"string","format":"date-time"}}
+      },
+      "WebhookCreated": {
+        "allOf":[{"$ref":"#/components/schemas/Webhook"},{"type":"object","required":["signing_secret"],"properties":{"signing_secret":{"type":"string","writeOnly":true,"description":"Shown only in this create/rotation response."}}}]
+      },
+      "WebhookList": {"type":"object","properties":{"data":{"type":"array","items":{"$ref":"#/components/schemas/Webhook"}},"next_cursor":{"type":"string","nullable":true}}},
+      "WebhookDelivery": {
+        "type":"object","required":["id","event_id","status","attempt_count","next_attempt_at","created_at"],
+        "properties":{"id":{"type":"string"},"event_id":{"type":"string","description":"Stable across automatic attempts."},"status":{"type":"string","enum":["pending","delivering","succeeded","failed","cancelled"]},"attempt_count":{"type":"integer"},"next_attempt_at":{"type":"string","format":"date-time"},"last_error_category":{"type":"string"},"last_response_code":{"type":"integer"},"created_at":{"type":"string","format":"date-time"},"delivered_at":{"type":"string","format":"date-time","nullable":true},"failed_at":{"type":"string","format":"date-time","nullable":true}}
+      },
+      "WebhookDeliveryList": {"type":"object","properties":{"data":{"type":"array","items":{"$ref":"#/components/schemas/WebhookDelivery"}},"next_cursor":{"type":"string","nullable":true}}},
+      "Event": {
+        "type":"object","required":["id","type","api_version","created_at","data"],
+        "description":"Stable logical event. Automatic webhook retries preserve this id.",
+        "properties":{"id":{"type":"string"},"type":{"type":"string"},"api_version":{"type":"string","enum":["2026-09-01"]},"created_at":{"type":"string","format":"date-time"},"data":{"type":"object","properties":{"email_id":{"type":"string"}}}}
+      },
+      "EventList": {"type":"object","properties":{"data":{"type":"array","items":{"$ref":"#/components/schemas/Event"}},"next_cursor":{"type":"string","nullable":true}}},
       "APIError": {
         "type": "object",
         "properties": {

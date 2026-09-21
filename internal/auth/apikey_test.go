@@ -126,7 +126,8 @@ func TestVerify(t *testing.T) {
 }
 
 func TestValidScope(t *testing.T) {
-	if !ValidScope("emails:send") || !ValidScope("emails:read") || !ValidScope("domains:read") || !ValidScope("domains:write") {
+	if !ValidScope("emails:send") || !ValidScope("emails:read") || !ValidScope("domains:read") || !ValidScope("domains:write") ||
+		!ValidScope("webhooks:read") || !ValidScope("webhooks:write") {
 		t.Fatal("expected all current scopes to be valid")
 	}
 	if ValidScope("emails:delete") || ValidScope("") || ValidScope("domains:verify") {

@@ -51,6 +51,10 @@ services:
       # v0.19 API-key verifier pepper — see internal/auth's package doc.
       # Dev-only placeholder; never a real secret in this repo.
       MAILX_API_KEY_PEPPER: ${MAILX_API_KEY_PEPPER:-local-dev-pepper-not-for-production}
+      # Explicitly insecure local-development values. Production must provide
+      # a random base64 32-byte key and leave private/HTTP destinations off.
+      MAILX_WEBHOOK_MASTER_KEY: ${MAILX_WEBHOOK_MASTER_KEY:-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=}
+      MAILX_WEBHOOK_ALLOW_INSECURE: ${MAILX_WEBHOOK_ALLOW_INSECURE:-true}
     volumes:
       - mailx-data:/data
     ports:

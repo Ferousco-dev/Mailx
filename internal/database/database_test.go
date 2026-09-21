@@ -113,6 +113,10 @@ func TestMigrateDownOneOnEmptyDatabaseIsNoOp(t *testing.T) {
 func TestDeliveryOutcomeMigrationUpgradesV021Data(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
+	// Roll back webhook schema and prerequisite schema to real v0.21.
+	if err := db.MigrateDownOne(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.MigrateDownOne(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -137,6 +141,30 @@ func TestDeliveryOutcomeMigrationUpgradesV021Data(t *testing.T) {
 	}
 	if len(events) != 1 || events[0].Type != EventQueued || events[0].DeliveryAttemptNumber != nil {
 		t.Fatalf("upgrade changed existing event: %+v", events)
+	}
+}
+
+func TestWebhookMigrationUpgradesDurabilityPrerequisite(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	if err := db.MigrateDownOne(ctx); err != nil {
+		t.Fatal(err)
+	}
+	tenant := newTestTenant(t, db)
+	msg, err := db.InsertMessage(ctx, sampleNewMessage(t, tenant.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Migrate(ctx); err != nil {
+		t.Fatal(err)
+	}
+	events, err := db.ListMessageEvents(ctx, msg.ID)
+	if err != nil || len(events) != 1 || events[0].Type != EventQueued {
+		t.Fatalf("upgrade changed prerequisite event truth: %+v %v", events, err)
+	}
+	var pending int
+	if err := db.pool.QueryRow(ctx, `SELECT count(*) FROM events WHERE fanned_out_at IS NULL`).Scan(&pending); err != nil || pending != 1 {
+		t.Fatalf("existing event was not made eligible for fan-out: %d %v", pending, err)
 	}
 }
 

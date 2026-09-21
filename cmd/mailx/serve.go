@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/smtp"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 	"github.com/Ferousco-dev/mailx/internal/transfer"
+	"github.com/Ferousco-dev/mailx/internal/webhook"
 	"github.com/Ferousco-dev/mailx/internal/worker"
 )
 
@@ -60,9 +62,14 @@ func runFull() error {
 		return err
 	}
 	authSvc := auth.NewService(db, apiKeyPepper())
+	webhookRuntime, err := buildWebhookRuntime(db)
+	if err != nil {
+		return err
+	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
-		Ready: func(ctx context.Context) error { return db.Ping(ctx) },
+		Webhooks: webhookRuntime.service,
+		Ready:    func(ctx context.Context) error { return db.Ping(ctx) },
 	})
 	if err != nil {
 		return err
@@ -71,9 +78,42 @@ func runFull() error {
 		component{"smtp", func(ctx context.Context) error { return runSMTPReceiver(ctx, store) }},
 		component{"dispatch", disp.Run},
 		component{"worker", pool.Run},
+		component{"webhook-fanout", webhookRuntime.fanout.Run},
+		component{"webhook-worker", webhookRuntime.workers.Run},
 		component{"api", apiServer.Run},
 		component{"idempotency-cleanup", func(ctx context.Context) error { return runIdempotencyCleanup(ctx, db) }},
 	)
+}
+
+type webhookComponents struct {
+	service *webhook.Service
+	fanout  *webhook.FanOut
+	workers *webhook.WorkerPool
+}
+
+func buildWebhookRuntime(db *database.DB) (webhookComponents, error) {
+	key, err := webhook.DecodeMasterKey(os.Getenv("MAILX_WEBHOOK_MASTER_KEY"))
+	if err != nil {
+		return webhookComponents{}, err
+	}
+	box, err := webhook.NewSecretBox(key)
+	if err != nil {
+		return webhookComponents{}, err
+	}
+	allowInsecure := envBool("MAILX_WEBHOOK_ALLOW_INSECURE")
+	policy := webhook.URLPolicy{AllowHTTP: allowInsecure, AllowPrivate: allowInsecure}
+	service, err := webhook.NewService(db, box, policy)
+	if err != nil {
+		return webhookComponents{}, err
+	}
+	onError := func(err error) { log.Printf("webhook: %v", err) }
+	workers, err := webhook.NewWorkerPool(db, box, webhook.NewClient(policy), webhook.WorkerConfig{
+		Workers: envInt("MAILX_WEBHOOK_WORKERS", 4), ClaimLease: 30 * time.Second,
+	}, onError)
+	if err != nil {
+		return webhookComponents{}, err
+	}
+	return webhookComponents{service: service, fanout: webhook.NewFanOut(db, onError), workers: workers}, nil
 }
 
 // idempotencyCleanupInterval/Batch are deliberately conservative: this
@@ -244,4 +284,13 @@ func envDuration(key string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
