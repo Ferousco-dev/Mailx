@@ -89,6 +89,10 @@ type scriptedCoordinator struct {
 	// the desired number of concurrent Attempt calls.
 	delay   time.Duration
 	barrier chan struct{}
+	// entered, if non-nil, receives one value when Attempt has passed the
+	// canceled-context check and is committed to real work (before any
+	// barrier wait), so a test can cancel strictly after that point.
+	entered chan struct{}
 
 	// notify, if non-nil, receives one value after every completed
 	// Attempt call so tests can wait deterministically instead of polling.
@@ -211,6 +215,12 @@ func (c *scriptedCoordinator) Attempt(ctx context.Context, state *retry.State, r
 		select {
 		case <-ctx.Done():
 		case <-time.After(c.delay):
+		}
+	}
+	if c.entered != nil {
+		select {
+		case c.entered <- struct{}{}:
+		default:
 		}
 	}
 	if c.barrier != nil {
