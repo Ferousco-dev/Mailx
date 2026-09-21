@@ -118,6 +118,12 @@ type Options struct {
 	RequireAuth bool
 	// Capture keeps every received DATA body (dot-unstuffed) for Messages().
 	Capture bool
+	// RcptReplies scripts per-recipient RCPT TO replies: a recipient whose command
+	// line contains the (lower-case) key gets that full reply, for example
+	// {"dead@": "550 5.1.1 no such user"}. Other recipients get 250.
+	RcptReplies map[string]string
+	// MailReply, if set, answers MAIL FROM (for example a sender rejection).
+	MailReply string
 }
 
 // AuthAttempt is one AUTH exchange as decoded by the server.
@@ -297,6 +303,24 @@ func (m *Server) handle(raw net.Conn) {
 			if verb == "MAIL" && m.opts.RequireAuth && !authed {
 				send("530 5.7.0 Authentication required\r\n")
 				continue
+			}
+			if verb == "MAIL" && m.opts.MailReply != "" {
+				send(m.opts.MailReply + "\r\n")
+				continue
+			}
+			if verb == "RCPT" {
+				lower := strings.ToLower(line)
+				rejected := false
+				for key, reply := range m.opts.RcptReplies {
+					if strings.Contains(lower, key) {
+						send(reply + "\r\n")
+						rejected = true
+						break
+					}
+				}
+				if rejected {
+					continue
+				}
 			}
 			send("250 2.1.0 ok\r\n")
 		case "DATA":

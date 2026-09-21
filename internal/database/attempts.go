@@ -67,6 +67,10 @@ type NewDeliveryAttempt struct {
 	MXAttempts     []MXAttempt
 	StartedAt      time.Time
 	FinishedAt     time.Time
+	// SuppressRecipient asks PersistDeliveryOutcome to also suppress Recipient in
+	// the SAME transaction (a qualifying recipient hard bounce; the policy lives in
+	// internal/suppression). It is ignored unless the decision is terminal failure.
+	SuppressRecipient bool
 }
 
 func (n NewDeliveryAttempt) validate() error {

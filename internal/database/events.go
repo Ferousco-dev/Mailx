@@ -18,11 +18,12 @@ const (
 	EventDeferred          EventType = "deferred"
 	EventBounced           EventType = "bounced"
 	EventFailed            EventType = "failed"
+	EventSuppressed        EventType = "suppressed" // recipients were skipped by suppression policy
 )
 
 func (e EventType) valid() bool {
 	switch e {
-	case EventQueued, EventDeliveryAttempted, EventDelivered, EventDeferred, EventBounced, EventFailed:
+	case EventQueued, EventDeliveryAttempted, EventDelivered, EventDeferred, EventBounced, EventFailed, EventSuppressed:
 		return true
 	}
 	return false
@@ -43,6 +44,8 @@ func PublicEventType(e EventType) (string, bool) {
 		return "email.failed", true
 	case EventBounced:
 		return "email.bounced", true
+	case EventSuppressed:
+		return "email.suppressed", true
 	default:
 		return "", false
 	}

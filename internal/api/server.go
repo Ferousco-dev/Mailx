@@ -119,7 +119,7 @@ func NewServer(cfg Config) (*Server, error) {
 		defer cancel()
 		return cfg.Ready(ctx)
 	}
-	mux := newMux(h, cfg.Auth, readiness, routeServices{domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC})
+	mux := newMux(h, cfg.Auth, readiness, routeServices{domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, metrics: cfg.Metrics})
 	log := cfg.Logger
 	if log == nil {
 		log = observability.Discard()

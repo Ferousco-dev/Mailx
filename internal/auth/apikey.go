@@ -67,13 +67,18 @@ const (
 	ScopeDomainsWrite  Scope = "domains:write"
 	ScopeWebhooksRead  Scope = "webhooks:read"
 	ScopeWebhooksWrite Scope = "webhooks:write"
+	// Suppression management is its own permission: it can stop mail to an
+	// address (write) or reveal which addresses are suppressed (read), so it is
+	// never implied by emails:* or domains:*.
+	ScopeSuppressionsRead  Scope = "suppressions:read"
+	ScopeSuppressionsWrite Scope = "suppressions:write"
 )
 
 // ValidScopes lists every scope MailX currently understands - grown only
 // when a real route needs a new permission, never speculatively.
 var ValidScopes = []Scope{
 	ScopeEmailsSend, ScopeEmailsRead, ScopeDomainsRead, ScopeDomainsWrite,
-	ScopeWebhooksRead, ScopeWebhooksWrite,
+	ScopeWebhooksRead, ScopeWebhooksWrite, ScopeSuppressionsRead, ScopeSuppressionsWrite,
 }
 
 func ValidScope(s string) bool {

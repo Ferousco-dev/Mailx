@@ -19,6 +19,7 @@ type routeServices struct {
 	dkim     *dkim.Service
 	spf      *spf.Service
 	dmarc    *dmarc.Service
+	metrics  *observability.Metrics
 }
 
 // newMux registers every /v1 route plus health checks. Handlers stay
@@ -43,6 +44,10 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		h.dkim = extras[0].dkim
 	}
 	dkimHandler := &dkimHandler{service: h.dkim}
+	suppressions := &suppressionHandler{db: h.db}
+	if len(extras) > 0 {
+		suppressions.metrics = extras[0].metrics
+	}
 	spfHandler := &spfHandler{}
 	dmarcHandler := &dmarcHandler{}
 	if len(extras) > 0 {
@@ -68,6 +73,10 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("POST /v1/domains/{id}/spf/verify", requireScope(auth.ScopeDomainsWrite)(spfHandler.handleVerify))
 	v1.HandleFunc("GET /v1/domains/{id}/dmarc", requireScope(auth.ScopeDomainsRead)(dmarcHandler.handleGet))
 	v1.HandleFunc("POST /v1/domains/{id}/dmarc/verify", requireScope(auth.ScopeDomainsWrite)(dmarcHandler.handleVerify))
+	v1.HandleFunc("POST /v1/suppressions", requireScope(auth.ScopeSuppressionsWrite)(suppressions.handleCreate))
+	v1.HandleFunc("GET /v1/suppressions", requireScope(auth.ScopeSuppressionsRead)(suppressions.handleList))
+	v1.HandleFunc("GET /v1/suppressions/{id}", requireScope(auth.ScopeSuppressionsRead)(suppressions.handleGet))
+	v1.HandleFunc("DELETE /v1/suppressions/{id}", requireScope(auth.ScopeSuppressionsWrite)(suppressions.handleDelete))
 	v1.HandleFunc("POST /v1/webhooks", requireScope(auth.ScopeWebhooksWrite)(webhooks.handleCreate))
 	v1.HandleFunc("GET /v1/webhooks", requireScope(auth.ScopeWebhooksRead)(webhooks.handleList))
 	v1.HandleFunc("GET /v1/webhooks/{id}", requireScope(auth.ScopeWebhooksRead)(webhooks.handleGet))

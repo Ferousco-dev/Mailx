@@ -44,7 +44,12 @@ func (p *Pool) processOne(ctx context.Context, c queue.Claim) {
 		return
 	}
 
-	domain, err := recipientDomain(loaded.Metadata.Envelope.RcptTo)
+	recipients, handled := p.enforceSuppression(ctx, c, loaded.Metadata.Envelope.RcptTo)
+	if handled {
+		return
+	}
+
+	domain, err := recipientDomain(recipients)
 	if err != nil {
 		p.onError(fmt.Errorf("worker: job %s: %w", c.Job.ID, err))
 		p.release(c, p.now())
@@ -55,7 +60,7 @@ func (p *Pool) processOne(ctx context.Context, c queue.Claim) {
 		Domain: domain,
 		Envelope: mail.Envelope{
 			MailFrom:   loaded.Metadata.Envelope.MailFrom,
-			Recipients: loaded.Metadata.Envelope.RcptTo,
+			Recipients: recipients,
 		},
 		Raw: string(loaded.Raw),
 	}

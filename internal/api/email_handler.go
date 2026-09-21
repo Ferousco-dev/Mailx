@@ -126,6 +126,9 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !h.checkRecipientsForAcceptance(w, r, tenantID, built.Envelope) {
+		return
+	}
 
 	parsed, err := mail.ParseMessage(raw)
 	if err != nil {

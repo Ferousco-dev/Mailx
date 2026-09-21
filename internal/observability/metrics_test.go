@@ -61,13 +61,15 @@ func TestEveryMetricFamilyIsExposed(t *testing.T) {
 	m.SignResult("rsa-sha256", "signed")
 	m.SPFResult("direct", "verified")
 	m.DMARCResult("monitoring", "ready")
+	m.SuppressionCheck("clear")
+	m.SuppressionWrite("manual", "api")
 	names := gather(t, m)
 	for _, want := range []string{
 		"mailx_build_info", "mailx_http_requests_total", "mailx_http_request_duration_seconds",
 		"mailx_smtp_sessions_total", "mailx_smtp_active_sessions", "mailx_smtp_messages_total",
 		"mailx_delivery_attempts_total", "mailx_delivery_attempt_duration_seconds",
 		"mailx_queue_operations_total", "mailx_queue_depth", "mailx_webhook_attempts_total",
-		"mailx_webhook_attempt_duration_seconds", "mailx_smtp_tls_sessions_total", "mailx_smtp_auth_attempts_total", "mailx_dkim_signatures_total", "mailx_spf_verifications_total", "mailx_dmarc_verifications_total", "go_goroutines",
+		"mailx_webhook_attempt_duration_seconds", "mailx_smtp_tls_sessions_total", "mailx_smtp_auth_attempts_total", "mailx_dkim_signatures_total", "mailx_spf_verifications_total", "mailx_dmarc_verifications_total", "mailx_suppression_checks_total", "mailx_suppression_writes_total", "go_goroutines",
 	} {
 		if !names[want] {
 			t.Errorf("family %s missing", want)
@@ -310,4 +312,35 @@ func TestDMARCMetricLabelsAreBounded(t *testing.T) {
 	}
 	var nilMetrics *Metrics
 	nilMetrics.DMARCResult("monitoring", "ready")
+}
+
+func TestSuppressionMetricLabelsAreBounded(t *testing.T) {
+	m := newTestMetrics(t)
+	m.SuppressionCheck("clear")
+	m.SuppressionCheck("error")
+	m.SuppressionCheck("person@example.com") // hostile value must collapse
+	m.SuppressionWrite("hard_bounce", "delivery")
+	m.SuppressionWrite("manual", "api")
+	m.SuppressionWrite("victim@example.org", "tenant-123 message-456")
+	out := scrape(m)
+	for _, want := range []string{
+		`mailx_suppression_checks_total{result="clear"} 1`,
+		`mailx_suppression_checks_total{result="error"} 1`,
+		`mailx_suppression_checks_total{result="other"} 1`,
+		`mailx_suppression_writes_total{reason="hard_bounce",source="delivery"} 1`,
+		`mailx_suppression_writes_total{reason="manual",source="api"} 1`,
+		`mailx_suppression_writes_total{reason="other",source="other"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, banned := range []string{"person@", "victim@", "tenant-123", "message-456", "example.org"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unbounded suppression label value %q reached exposition", banned)
+		}
+	}
+	var nilMetrics *Metrics
+	nilMetrics.SuppressionCheck("clear")
+	nilMetrics.SuppressionWrite("manual", "api")
 }

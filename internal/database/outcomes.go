@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/Ferousco-dev/mailx/internal/suppression"
 )
 
 // ErrMessageTerminal means a new delivery operation was presented for a
@@ -59,7 +61,7 @@ func (db *DB) LoadDeliveryState(ctx context.Context, messageID string) (Delivery
 // durable message state.
 func (s DeliveryState) Terminal() bool {
 	switch s.Status {
-	case StatusDelivered, StatusFailed, StatusBounced:
+	case StatusDelivered, StatusFailed, StatusBounced, StatusSuppressed:
 		return true
 	default:
 		return false
@@ -150,6 +152,27 @@ func (db *DB) PersistDeliveryOutcome(ctx context.Context, in NewDeliveryAttempt,
 		eventID, tenantID, in.MessageID, eventType, metaJSON, in.AttemptNumber,
 	); err != nil {
 		return fmt.Errorf("database: insert delivery outcome event: %w", normalizeErr(err))
+	}
+
+	// A recipient hard bounce and the suppression it justifies commit or roll back
+	// together with the attempt, status and event: after a crash the durable facts
+	// can never say "bounced" while the next message to the same dead address is
+	// still allowed. ON CONFLICT makes concurrent workers converge on one row.
+	if in.SuppressRecipient && in.Decision == DecisionTerminalFailure && in.Recipient != "" {
+		if key, kerr := suppression.Normalize(in.Recipient); kerr == nil {
+			suppressionID, err := newID()
+			if err != nil {
+				return err
+			}
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO suppressions (id, tenant_id, email, reason, source, message_id, smtp_code, enhanced_status)
+				VALUES ($1, $2, $3, 'hard_bounce', 'delivery', $4, NULLIF($5, 0), NULLIF($6, ''))
+				ON CONFLICT (tenant_id, email) DO NOTHING`,
+				suppressionID, tenantID, key, in.MessageID, in.FinalCode, in.EnhancedStatus,
+			); err != nil {
+				return fmt.Errorf("database: insert hard bounce suppression: %w", normalizeErr(err))
+			}
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {

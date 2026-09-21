@@ -39,6 +39,9 @@ var (
 		"sending_infrastructure_unknown"}
 	dmarcStatuses = []string{"unchecked", "not_configured", "monitoring", "enforcing", "conflict", "invalid", "temporary_error"}
 	dmarcReady    = []string{"unchecked", "ready", "dns_action_required", "authentication_incomplete", "unknown"}
+	suppResults   = []string{"clear", "partial", "all", "error"}
+	suppReasons   = []string{"manual", "hard_bounce", "complaint", "unsubscribe"}
+	suppSources   = []string{"api", "delivery", "feedback"}
 	authMechs     = []string{"plain", "login", "none"}
 	authOutcomes  = []string{"success", "rejected", "temporary", "no_tls", "not_advertised", "no_mechanism",
 		"protocol_error", "connection_lost", "timeout", "canceled"}
@@ -76,6 +79,8 @@ type Metrics struct {
 	authAttempts *prometheus.CounterVec
 	dkimSigs     *prometheus.CounterVec
 	spfVerifs    *prometheus.CounterVec
+	suppChecks   *prometheus.CounterVec
+	suppWrites   *prometheus.CounterVec
 	dmarcVerifs  *prometheus.CounterVec
 	depthFn      DepthFunc
 	depthDesc    *prometheus.Desc
@@ -116,13 +121,17 @@ func NewMetrics(info buildinfo.Info) (*Metrics, error) {
 		Help: "SPF verifications by bounded mode and outcome."}, []string{"mode", "outcome"})
 	m.dmarcVerifs = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "dmarc_verifications_total",
 		Help: "DMARC readiness verifications by bounded DNS status and readiness."}, []string{"outcome", "readiness"})
+	m.suppChecks = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "suppression_checks_total",
+		Help: "Delivery-time suppression checks by bounded result."}, []string{"result"})
+	m.suppWrites = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "suppression_writes_total",
+		Help: "Suppression writes requested, by bounded reason and source."}, []string{"reason", "source"})
 	m.depthDesc = prometheus.NewDesc(ns+"_queue_depth", "Queue jobs available plus claimed.", nil, nil)
 	build := prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "build_info",
 		Help: "Build identity; value is always 1."}, []string{"version", "commit"})
 	build.WithLabelValues(info.Version, info.Commit).Set(1)
 
 	for _, c := range []prometheus.Collector{m.httpTotal, m.httpDuration, m.smtpSessions, m.smtpActive, m.smtpMessages,
-		m.deliveries, m.deliveryDur, m.queueOps, m.tlsSessions, m.authAttempts, m.dkimSigs, m.spfVerifs, m.dmarcVerifs, m.webhooks, m.webhookDur, build, m,
+		m.deliveries, m.deliveryDur, m.queueOps, m.tlsSessions, m.authAttempts, m.dkimSigs, m.spfVerifs, m.suppChecks, m.suppWrites, m.dmarcVerifs, m.webhooks, m.webhookDur, build, m,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})} {
 		if err := m.reg.Register(c); err != nil {
 			return nil, err
@@ -296,5 +305,24 @@ func (m *Metrics) DMARCResult(dnsStatus, readiness string) {
 	if m != nil {
 		defer guard()
 		m.dmarcVerifs.WithLabelValues(pick(dnsStatus, dmarcStatuses), pick(readiness, dmarcReady)).Inc()
+	}
+}
+
+// SuppressionCheck records one delivery-time suppression check. result is one of
+// clear, partial, all, error; anything else becomes "other". No address, tenant,
+// domain or message identifier can become a label.
+func (m *Metrics) SuppressionCheck(result string) {
+	if m != nil {
+		defer guard()
+		m.suppChecks.WithLabelValues(pick(result, suppResults)).Inc()
+	}
+}
+
+// SuppressionWrite records one suppression write request by bounded reason and
+// source (created or already present: the database decides).
+func (m *Metrics) SuppressionWrite(reason, source string) {
+	if m != nil {
+		defer guard()
+		m.suppWrites.WithLabelValues(pick(reason, suppReasons), pick(source, suppSources)).Inc()
 	}
 }

@@ -24,7 +24,7 @@ const openAPISpec = `{
     "/emails": {
       "post": {
         "summary": "Send an email",
-        "description": "Requires the emails:send scope. Durably accepts an email for asynchronous processing. The From domain must be a domain your account has VERIFIED (exact match; a verified root does not authorize its subdomains): otherwise 403 from_domain_not_authorized, before anything is stored. If the From domain has an active DKIM key the message is signed with it at acceptance; if that key cannot be used the request fails with 503 dkim_signing_unavailable and nothing is accepted (never sent unsigned). All to/cc/bcc recipients must share one delivery domain; mixed-domain requests receive 422 before acceptance. 202 means MailX has validated and durably recorded the email and has durable responsibility for eventually attempting delivery - it does NOT mean the email has been delivered, that the recipient's server accepted it, or that Redis currently has the job. Retrying safely: supply the same Idempotency-Key on retry to get the original result back instead of creating a second email; this prevents duplicate MailX email SUBMISSIONS from a repeated HTTP request - it does not and cannot guarantee exactly-once SMTP delivery to the recipient's server.",
+        "description": "Requires the emails:send scope. Durably accepts an email for asynchronous processing. The From domain must be a domain your account has VERIFIED (exact match; a verified root does not authorize its subdomains): otherwise 403 from_domain_not_authorized, before anything is stored. If the From domain has an active DKIM key the message is signed with it at acceptance; if that key cannot be used the request fails with 503 dkim_signing_unavailable and nothing is accepted (never sent unsigned). All to/cc/bcc recipients must share one delivery domain; mixed-domain requests receive 422 before acceptance. Suppression: every recipient must be a plain ASCII address (422 invalid_recipient) and if EVERY recipient is on the account's suppression list nothing is stored (422 all_recipients_suppressed). If only some are suppressed the email is accepted and those recipients are skipped at delivery time with no SMTP attempt (their recipient state is 'suppressed', not failed or bounced); if all recipients become suppressed after acceptance the email ends as terminal status 'suppressed'. Suppression is re-checked immediately before every delivery attempt, including retries; a suppression created while an SMTP conversation is already in progress does not revoke that attempt, and an accepted delivery is never rewritten. If MailX cannot read suppression state it does not send: the attempt is deferred. A recipient that permanently rejects with 5.1.1 or 5.1.6 at RCPT TO is suppressed automatically (reason hard_bounce); temporary failures and sender, policy or authentication failures never suppress. 202 means MailX has validated and durably recorded the email and has durable responsibility for eventually attempting delivery - it does NOT mean the email has been delivered, that the recipient's server accepted it, or that Redis currently has the job. Retrying safely: supply the same Idempotency-Key on retry to get the original result back instead of creating a second email; this prevents duplicate MailX email SUBMISSIONS from a repeated HTTP request - it does not and cannot guarantee exactly-once SMTP delivery to the recipient's server.",
         "parameters": [
           {
             "name": "Idempotency-Key", "in": "header", "required": false,
@@ -59,7 +59,7 @@ const openAPISpec = `{
         "parameters": [
           {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
           {"name": "cursor", "in": "query", "schema": {"type": "string"}, "description": "Opaque; from a previous response's next_cursor. Never construct one."},
-          {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["queued", "processing", "retrying", "delivered", "failed", "bounced"]}}
+          {"name": "status", "in": "query", "schema": {"type": "string", "enum": ["queued", "processing", "retrying", "delivered", "failed", "bounced", "suppressed"]}}
         ],
         "responses": {
           "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/EmailList"}}}},
@@ -85,12 +85,61 @@ const openAPISpec = `{
     "/events": {
       "get": {
         "summary": "List durable events",
-        "description": "Requires webhooks:read. Lists immutable tenant events newest first. Public types are email.queued, email.delivered, email.delivery_delayed, email.failed, and email.bounced. delivered means final SMTP DATA was accepted, not inbox placement.",
+        "description": "Requires webhooks:read. Lists immutable tenant events newest first. Public types are email.queued, email.delivered, email.delivery_delayed, email.failed, email.bounced, and email.suppressed (recipients were skipped by suppression policy; no SMTP attempt named them). delivered means final SMTP DATA was accepted, not inbox placement.",
         "parameters": [
           {"name":"limit","in":"query","schema":{"type":"integer","minimum":1,"maximum":100,"default":20}},
           {"name":"cursor","in":"query","schema":{"type":"string"}}
         ],
         "responses": {"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventList"}}}},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"}}
+      }
+    },
+    "/suppressions": {
+      "post": {
+        "summary": "Suppress a recipient address",
+        "description": "Requires suppressions:write. Adds the address to THIS account's suppression list: future emails will not be sent to it (checked at acceptance and again immediately before delivery). Suppression is tenant-scoped policy, not delivery history. The address is canonicalized: whitespace and one <> pair removed, ASCII only, domain lower-cased, and the local part lower-cased FOR MATCHING ONLY (the address is still sent exactly as you supplied it; RFC 5321 discourages case-sensitive local parts and treating case variants as one recipient is the safe direction for a deny list). Dots and +tags are significant and are NEVER folded: john.smith@gmail.com and johnsmith@gmail.com are different addresses. Only reason 'manual' can be created through the API (hard_bounce entries are created automatically from delivery outcomes; complaint and unsubscribe are reserved and not produced by MailX yet). Idempotent: suppressing an already-suppressed address returns the existing entry unchanged with 200 (201 when newly created), so retries and concurrent requests are safe. 422 invalid_email or invalid_reason for bad input.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateSuppressionRequest"}}}},
+        "responses": {
+          "201": {"description": "Suppression created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Suppression"}}}},
+          "200": {"description": "Already suppressed; the existing entry is returned unchanged", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Suppression"}}}},
+          "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "415": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"}, "500": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List suppressed recipients",
+        "description": "Requires suppressions:read. Lists this account's entries newest first with keyset pagination (limit, cursor). The optional 'email' filter matches one address after the same canonicalization as creation. Other accounts' entries are never visible.",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}},
+          {"name": "email", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of suppressions", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SuppressionList"}}}},
+          "400": {"$ref": "#/components/responses/Error"}, "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}, "500": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/suppressions/{id}": {
+      "get": {
+        "summary": "Get a suppression",
+        "description": "Requires suppressions:read. Another account's entry is indistinguishable from a missing one (404).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The suppression", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Suppression"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "500": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "delete": {
+        "summary": "Remove a suppression (unsuppress)",
+        "description": "Requires suppressions:write. Hard-deletes the entry: FUTURE emails to the address may be attempted again. It changes no history: past messages, delivery attempts and events are untouched, a message that ended as 'suppressed' stays terminal, and nothing is re-queued or re-sent. To send again you must submit a new email.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "204": {"description": "Removed"},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "500": {"$ref": "#/components/responses/Error"}
+        }
       }
     },
     "/webhooks": {
@@ -303,7 +352,7 @@ const openAPISpec = `{
           "subject": {"type": "string"},
           "html": {"type": "string", "nullable": true, "description": "Only populated by GET /v1/emails/{id}, never by the list endpoint."},
           "text": {"type": "string", "nullable": true},
-          "status": {"type": "string", "enum": ["queued", "processing", "retrying", "delivered", "failed", "bounced"]},
+          "status": {"type": "string", "enum": ["queued", "processing", "retrying", "delivered", "failed", "bounced", "suppressed"]},
           "created_at": {"type": "string", "format": "date-time"},
           "queued_at": {"type": "string", "format": "date-time", "nullable": true},
           "delivered_at": {"type": "string", "format": "date-time", "nullable": true}
@@ -406,6 +455,30 @@ const openAPISpec = `{
           "warnings": {"type": "array", "items": {"type": "string", "enum": ["deprecated_tag", "ignored_report_uri", "policy_defaulted_from_rua", "policy_not_enforcing", "testing_mode", "failure_reporting_enabled", "external_report_destination", "relay_may_alter_signed_content"]}}
         }
       },
+      "CreateSuppressionRequest": {
+        "type": "object", "required": ["email"], "additionalProperties": false,
+        "properties": {
+          "email": {"type": "string", "example": "person@example.com"},
+          "reason": {"type": "string", "enum": ["manual"], "default": "manual", "description": "Only 'manual' may be created through the API."}
+        }
+      },
+      "Suppression": {
+        "type": "object", "required": ["id", "email", "reason", "source", "created_at"],
+        "properties": {
+          "id": {"type": "string"},
+          "email": {"type": "string", "description": "The canonical suppression key (lower-cased)."},
+          "reason": {"type": "string", "enum": ["manual", "hard_bounce", "complaint", "unsubscribe"], "description": "WHY. complaint and unsubscribe are reserved and not produced yet."},
+          "source": {"type": "string", "enum": ["api", "delivery", "feedback"], "description": "HOW it was created, independent of the reason."},
+          "message_id": {"type": "string", "description": "For hard_bounce: the email whose delivery produced it."},
+          "smtp_code": {"type": "integer", "description": "For hard_bounce: the SMTP reply code."},
+          "enhanced_status": {"type": "string", "description": "For hard_bounce: the RFC 3463 enhanced status (5.1.1 or 5.1.6)."},
+          "created_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "SuppressionList": {
+        "type": "object", "required": ["data", "next_cursor"],
+        "properties": {"data": {"type": "array", "items": {"$ref": "#/components/schemas/Suppression"}}, "next_cursor": {"type": "string", "nullable": true}}
+      },
       "DNSRecord": {
         "type": "object", "required": ["type", "name", "value"],
         "properties": {
@@ -431,7 +504,7 @@ const openAPISpec = `{
       },
       "CreateWebhookRequest": {
         "type":"object","required":["url","events"],"additionalProperties":false,
-        "properties":{"url":{"type":"string","format":"uri","description":"Public HTTPS URL in production."},"events":{"type":"array","minItems":1,"items":{"type":"string","enum":["email.queued","email.delivered","email.delivery_delayed","email.failed","email.bounced"]}}}
+        "properties":{"url":{"type":"string","format":"uri","description":"Public HTTPS URL in production."},"events":{"type":"array","minItems":1,"items":{"type":"string","enum":["email.queued","email.delivered","email.delivery_delayed","email.failed","email.bounced","email.suppressed"]}}}
       },
       "Webhook": {
         "type":"object","required":["id","url","events","created_at","updated_at"],

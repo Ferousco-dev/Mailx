@@ -323,7 +323,7 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o
 	}
 
 	workers := envInt("MAILX_WORKERS", 4)
-	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db}, worker.Config{Workers: workers, ReportingMTA: ident.Name()},
+	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db, metrics: o.metrics}, worker.Config{Workers: workers, ReportingMTA: ident.Name()},
 		worker.WithOnError(o.errLogger("worker")), worker.WithLogger(o.log), worker.WithMetrics(o.metrics),
 	)
 	if err != nil {
