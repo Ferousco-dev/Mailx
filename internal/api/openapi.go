@@ -96,6 +96,65 @@ const openAPISpec = `{
         "responses": {"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventList"}}}},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"}}
       }
     },
+    "/contacts": {
+      "post": {
+        "summary": "Create a contact",
+        "description": "Requires contacts:write. A contact is durable recipient data ('this account knows this address'), independent of suppressions and delivery history. email is unique per account under MailX's contact identity (ASCII, domain lower-cased, LOCAL PART CASE PRESERVED - different from suppression normalization). 409 contact_exists on a duplicate; no upsert in v0.34.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateContactRequest"}}}},
+        "responses": {
+          "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Contact"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}, "415": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List contacts",
+        "description": "Requires contacts:read. Newest first, keyset pagination (limit, cursor).",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of contacts", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ContactList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/contacts/{id}": {
+      "get": {
+        "summary": "Get a contact",
+        "description": "Requires contacts:read. Another account's contact is indistinguishable from a missing one (404).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The contact", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Contact"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "patch": {
+        "summary": "Update a contact",
+        "description": "Requires contacts:write. Partial update. Changing email re-validates and re-checks uniqueness under the new identity; it NEVER migrates or affects suppression state - suppressions key on the original address independently.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpdateContactRequest"}}}},
+        "responses": {
+          "200": {"description": "Updated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Contact"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "415": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "delete": {
+        "summary": "Delete a contact",
+        "description": "Requires contacts:write. Hard delete. Does NOT delete any suppression for the same address, and does not affect historical messages/deliveries.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "204": {"description": "Deleted"},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/templates": {
       "post": {
         "summary": "Create a template",
@@ -403,6 +462,44 @@ const openAPISpec = `{
           "scheduled_at": {"type": "string", "format": "date-time", "nullable": true, "description": "RFC 3339. Omit to send immediately."}
         },
         "additionalProperties": false
+      },
+      "Contact": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "email": {"type": "string"},
+          "name": {"type": "string"},
+          "attributes": {"type": "object", "additionalProperties": {"type": "string"}},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "CreateContactRequest": {
+        "type": "object",
+        "required": ["email"],
+        "properties": {
+          "email": {"type": "string", "example": "person@example.com"},
+          "name": {"type": "string", "maxLength": 200},
+          "attributes": {"type": "object", "additionalProperties": {"type": "string"}, "description": "At most 20 entries, 64-char keys, 500-char values. Flat string map, no nesting."}
+        },
+        "additionalProperties": false
+      },
+      "UpdateContactRequest": {
+        "type": "object",
+        "properties": {
+          "email": {"type": "string"},
+          "name": {"type": "string", "maxLength": 200},
+          "attributes": {"type": "object", "additionalProperties": {"type": "string"}}
+        },
+        "additionalProperties": false,
+        "description": "Partial update: omitted fields are unchanged. Changing email never touches suppression state."
+      },
+      "ContactList": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/Contact"}},
+          "next_cursor": {"type": "string", "nullable": true}
+        }
       },
       "Template": {
         "type": "object",

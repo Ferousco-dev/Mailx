@@ -308,3 +308,20 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 - CRUD: `POST/GET /v1/templates`, `GET/PATCH/DELETE /v1/templates/{id}`, keyset pagination (mirrors suppressions). Scopes `templates:read`/`templates:write` (new DB CHECK on `api_keys.scopes`, migration 000016). Cross-tenant access is 404 (existence never leaked).
 - Delete/update: hard delete, no versioning (deferred if ever needed). Deleting/editing a template never touches already-accepted messages (separate storage: FileStore + `messages` row already hold the rendered bytes).
 - Retention: durable tenant configuration, not delivery telemetry (like domains/suppressions, not delivery_attempts).
+
+
+## Contacts (v0.34)
+
+- Tenant-owned durable data: "this tenant knows this recipient" (migration 000017, `contacts` table). Independent of suppression (safety policy) and message recipients (SMTP transport state) — no FK between them either direction, no cascade.
+- Identity: `internal/contact.Normalize` — deliberately NOT `suppression.Normalize`. Same domain rules (ASCII, lower-cased, one trailing root dot stripped, LDH labels) but LOCAL PART CASE IS PRESERVED (suppression folds it as a deny-list safe direction; a contact must not silently merge two distinct mailboxes). No provider-specific folding (no Gmail dot/plus-tag).
+- Uniqueness: `UNIQUE(tenant_id, normalized_email)`, a DB constraint (not just app logic) — tested under 10-way concurrent create, exactly one succeeds. Duplicate create is 409, no upsert in v0.34.
+- Attributes: flat `map[string]string`, stored JSONB, bounded (20 entries, 64-char keys, 500-char values, 8192-byte serialized CHECK backstop). No nesting, no arrays, no arbitrary JSON.
+- API: `POST/GET /v1/contacts`, `GET/PATCH/DELETE /v1/contacts/{id}`, keyset pagination (mirrors templates/suppressions). Scopes `contacts:read`/`contacts:write` (new `api_keys.scopes` CHECK, migration 000017).
+- Suppression independence (explicitly tested): a suppressed address can still become a contact; deleting a contact never deletes its suppression; recreating a contact never resets/removes a suppression; changing a contact's email never migrates the suppression (it stays keyed on the old address); deleting a suppression never deletes the contact.
+- Sending is unaffected: `POST /v1/emails` requires no pre-existing contact, and v0.34 does NOT auto-create contacts from sends (deliberate, avoids implicit CRM behavior).
+- Delete: hard delete, no versioning. Update: partial (PATCH); changing email re-validates + re-checks the NEW identity's uniqueness.
+- Templates: NOT coupled to contacts in v0.34 — no automatic attribute injection into template variables (deferred to a future Broadcasts design).
+- Events/webhooks: no `contact.*` events added — deliberate, avoids scope creep; CRUD has no delivery-pipeline consequence to notify about.
+- Metrics: none added — CRUD is already covered by generic HTTP observability; no contact-specific operational signal identified yet.
+- Retention: durable customer data, kept until the tenant deletes it (unlike delivery telemetry, not retention-bound).
+- Deferred: bulk import (CSV/batch), audience/segmentation queries, GIN indexes on attributes — no query needs them yet.

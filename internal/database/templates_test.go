@@ -171,13 +171,16 @@ func TestTemplatesMigrationRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.MigrateDownOne(ctx); err != nil {
-		t.Fatal(err)
-	}
+	// Roll back past every migration newer than templates', not just one.
 	var exists bool
-	_ = db.pool.QueryRow(ctx, `SELECT to_regclass('templates') IS NOT NULL`).Scan(&exists)
-	if exists {
-		t.Fatal("down migration must drop templates")
+	for {
+		if err := db.MigrateDownOne(ctx); err != nil {
+			t.Fatal(err)
+		}
+		_ = db.pool.QueryRow(ctx, `SELECT to_regclass('templates') IS NOT NULL`).Scan(&exists)
+		if !exists {
+			break
+		}
 	}
 	// templates:read/write must also be gone from the scope CHECK.
 	_, err = db.pool.Exec(ctx, `INSERT INTO api_keys (id, tenant_id, name, key_id, secret_hash, scopes) VALUES ('k1',$1,'n','kid','h', ARRAY['templates:read'])`, tn.ID)

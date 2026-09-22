@@ -77,6 +77,10 @@ const (
 	// emails:send.
 	ScopeTemplatesRead  Scope = "templates:read"
 	ScopeTemplatesWrite Scope = "templates:write"
+	// Contacts (v0.34): independent of emails:*/suppressions:* — a contact is
+	// tenant-known-recipient data, not delivery or suppression state.
+	ScopeContactsRead  Scope = "contacts:read"
+	ScopeContactsWrite Scope = "contacts:write"
 )
 
 // ValidScopes lists every scope MailX currently understands - grown only
@@ -84,7 +88,7 @@ const (
 var ValidScopes = []Scope{
 	ScopeEmailsSend, ScopeEmailsRead, ScopeDomainsRead, ScopeDomainsWrite,
 	ScopeWebhooksRead, ScopeWebhooksWrite, ScopeSuppressionsRead, ScopeSuppressionsWrite,
-	ScopeTemplatesRead, ScopeTemplatesWrite,
+	ScopeTemplatesRead, ScopeTemplatesWrite, ScopeContactsRead, ScopeContactsWrite,
 }
 
 func ValidScope(s string) bool {

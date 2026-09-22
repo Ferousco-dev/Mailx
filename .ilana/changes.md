@@ -16,3 +16,4 @@
 - CR-014 [approved, 2026-09-22]: implement v0.31 outbound abuse controls and sending safety (design `docs/design-v0.31.md`); v0.32 complaint/feedback loops, reputation/warm-up, content scoring/ML, billing, inbound work and real Internet delivery excluded.
 - CR-015 [approved, 2026-09-22]: implement v0.32 outbound feedback (DSNs/bounces + complaints), migration 000015; general inbound email removed from the roadmap; v0.33 is now Templates.
 - CR-016 [approved, 2026-09-22]: implement v0.33 reusable email templates (migration 000016); v0.34 Contacts and later milestones excluded.
+- CR-017 [approved, 2026-09-22]: implement v0.34 contact management (migration 000017); v0.35 Audiences and later excluded.

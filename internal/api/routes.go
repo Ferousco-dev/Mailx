@@ -75,6 +75,13 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("POST /v1/domains/{id}/spf/verify", requireScope(auth.ScopeDomainsWrite)(spfHandler.handleVerify))
 	v1.HandleFunc("GET /v1/domains/{id}/dmarc", requireScope(auth.ScopeDomainsRead)(dmarcHandler.handleGet))
 	v1.HandleFunc("POST /v1/domains/{id}/dmarc/verify", requireScope(auth.ScopeDomainsWrite)(dmarcHandler.handleVerify))
+	contacts := &contactHandler{db: h.db}
+	v1.HandleFunc("POST /v1/contacts", requireScope(auth.ScopeContactsWrite)(contacts.handleCreate))
+	v1.HandleFunc("GET /v1/contacts", requireScope(auth.ScopeContactsRead)(contacts.handleList))
+	v1.HandleFunc("GET /v1/contacts/{id}", requireScope(auth.ScopeContactsRead)(contacts.handleGet))
+	v1.HandleFunc("PATCH /v1/contacts/{id}", requireScope(auth.ScopeContactsWrite)(contacts.handleUpdate))
+	v1.HandleFunc("DELETE /v1/contacts/{id}", requireScope(auth.ScopeContactsWrite)(contacts.handleDelete))
+
 	templates := &templateHandler{db: h.db}
 	v1.HandleFunc("POST /v1/templates", requireScope(auth.ScopeTemplatesWrite)(templates.handleCreate))
 	v1.HandleFunc("GET /v1/templates", requireScope(auth.ScopeTemplatesRead)(templates.handleList))
