@@ -65,6 +65,17 @@ func NewRouter(base deliverer, members map[string]MemberRoute) (*Router, error) 
 	return &Router{Base: base, Members: members}, nil
 }
 
+// Known reports whether memberID is present in this process's registry.
+// worker.holdIfMemberDisabled calls this BEFORE any SMTP work so an
+// unrecognized member holds the message (no attempt recorded, no retry
+// budget spent) rather than reaching Deliver, which is retryable but DOES
+// consume a real attempt and can eventually exhaust and permanently fail
+// the message if the registry is never refreshed.
+func (r *Router) Known(memberID string) bool {
+	_, ok := r.Members[memberID]
+	return ok
+}
+
 func (r *Router) Deliver(ctx context.Context, req delivery.Request) (delivery.Result, error) {
 	if req.MemberID == "" {
 		return r.Base.Deliver(ctx, req)

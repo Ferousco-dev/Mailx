@@ -9,6 +9,7 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/delivery"
 	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/retry"
+	"github.com/Ferousco-dev/mailx/internal/routing"
 	"github.com/Ferousco-dev/mailx/internal/suppression"
 	"github.com/Ferousco-dev/mailx/internal/worker"
 )
@@ -19,6 +20,11 @@ import (
 type databaseOutcomeStore struct {
 	db      *database.DB
 	metrics *observability.Metrics // optional
+	// router, if set, is consulted by MemberKnownLocally so a message whose
+	// durable member isn't in THIS process's registry holds instead of
+	// reaching Deliver (which would consume a real, exhausting retry
+	// attempt — see worker.MemberRegistryGate's doc).
+	router *routing.Router
 }
 
 // Compile-time guarantee that the production outcome store enforces suppression:
@@ -32,6 +38,10 @@ var _ worker.TenantLookup = databaseOutcomeStore{}
 // databaseOutcomeStore also enforces the v0.39 sending-pool member/pool
 // kill switch, so a disabled member cannot receive a new SMTP attempt.
 var _ worker.MemberRoutingGate = databaseOutcomeStore{}
+
+// databaseOutcomeStore also knows this process's routing registry, so an
+// unrecognized member holds instead of exhausting real retry attempts.
+var _ worker.MemberRegistryGate = databaseOutcomeStore{}
 
 func (s databaseOutcomeStore) Load(ctx context.Context, messageID string) (worker.DurableDeliveryState, error) {
 	durable, err := s.db.LoadDeliveryState(ctx, messageID)
@@ -67,6 +77,11 @@ func (s databaseOutcomeStore) Load(ctx context.Context, messageID string) (worke
 // MemberRoutingEnabled implements worker.MemberRoutingGate.
 func (s databaseOutcomeStore) MemberRoutingEnabled(ctx context.Context, memberID string) (bool, error) {
 	return s.db.MemberRoutingEnabled(ctx, memberID)
+}
+
+// MemberKnownLocally implements worker.MemberRegistryGate.
+func (s databaseOutcomeStore) MemberKnownLocally(memberID string) bool {
+	return s.router != nil && s.router.Known(memberID)
 }
 
 func (s databaseOutcomeStore) Persist(ctx context.Context, messageID string, attempt retry.DeliveryAttempt, outcome retry.Outcome) error {

@@ -60,6 +60,20 @@ func TestRouterKnownMemberIDDispatchesAndSnapshotsIdentity(t *testing.T) {
 	}
 }
 
+func TestRouterKnown(t *testing.T) {
+	base := &fakeDeliverer{name: "base"}
+	r, err := NewRouter(base, map[string]MemberRoute{"m1": {Deliver: &fakeDeliverer{name: "m1"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r.Known("m1") {
+		t.Fatal("m1 was registered and must be reported known")
+	}
+	if r.Known("ghost") {
+		t.Fatal("an unregistered member must be reported unknown")
+	}
+}
+
 func TestRouterUnknownMemberIDNeverUsesBase(t *testing.T) {
 	base := &fakeDeliverer{name: "base"}
 	r, err := NewRouter(base, nil)

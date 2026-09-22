@@ -43,3 +43,17 @@ type MemberRoutingGate interface {
 	// member may be used right now.
 	MemberRoutingEnabled(ctx context.Context, memberID string) (bool, error)
 }
+
+// MemberRegistryGate is implemented by an OutcomeStore that also knows
+// whether memberID is present in THIS process's routing registry (built
+// once at startup from pool/member config — see internal/routing.Router).
+// A member the database reports as enabled can still be locally unknown
+// (created, or given a hostname, after this process started); dispatching
+// it through routing.Router in that state returns a delivery error that
+// would consume a real retry attempt and eventually fail the message
+// permanently. holdIfMemberDisabled checks this FIRST, before any SMTP
+// work, so that case holds/retries for free (no attempt recorded) instead,
+// exactly like a disabled member — see MemberRoutingGate's doc.
+type MemberRegistryGate interface {
+	MemberKnownLocally(memberID string) bool
+}

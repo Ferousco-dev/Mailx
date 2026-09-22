@@ -359,7 +359,7 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o
 
 	workers := envInt("MAILX_WORKERS", 4)
 	opts := append([]worker.Option{worker.WithOnError(o.errLogger("worker")), worker.WithLogger(o.log), worker.WithMetrics(o.metrics)}, abuse.workerOptions()...)
-	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db, metrics: o.metrics}, worker.Config{Workers: workers, ReportingMTA: ident.Name()}, opts...)
+	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db, metrics: o.metrics, router: router}, worker.Config{Workers: workers, ReportingMTA: ident.Name()}, opts...)
 	if err != nil {
 		return nil, err
 	}
