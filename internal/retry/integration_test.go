@@ -86,10 +86,10 @@ func TestIntegrationRetryTemporaryThenSuccessfulDelivery(t *testing.T) {
 	if first.Status != StatusRetryable || state.Count() != 1 {
 		t.Fatalf("first lifecycle = status %v, count %d", first.Status, state.Count())
 	}
-	if first.Schedule == nil || first.Schedule.Attempt != 1 || first.Schedule.Delay != 30*time.Minute {
+	if first.Schedule == nil || first.Schedule.Attempt != 1 || first.Schedule.Delay != 5*time.Second {
 		t.Fatalf("first schedule = %+v", first.Schedule)
 	}
-	if want := now1.Add(30 * time.Minute); !first.Schedule.NextRetryAt.Equal(want) {
+	if want := now1.Add(5 * time.Second); !first.Schedule.NextRetryAt.Equal(want) {
 		t.Fatalf("first NextRetryAt = %s, want %s", first.Schedule.NextRetryAt, want)
 	}
 	if len(first.Result.Attempts) != 1 || first.Result.Attempts[0].Transfer.AttemptID == "" {

@@ -96,6 +96,280 @@ const openAPISpec = `{
         "responses": {"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventList"}}}},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"}}
       }
     },
+    "/broadcasts": {
+      "post": {
+        "summary": "Create a broadcast (bulk send)",
+        "description": "Requires broadcasts:write and emails:send is NOT required (broadcasts still pass through the same suppression/abuse authority as POST /emails). Sends a Template, rendered per recipient with that recipient's own attributes layered over the given variables, to every Contact currently in the given Audience. 202 means the broadcast is DURABLY ACCEPTED and will be expanded/sent asynchronously in bounded steps - it does NOT mean any recipient was queued, delivered, or reached an inbox. The recipient set is a point-in-time SNAPSHOT taken at acceptance: a Contact added to the Audience afterward is never included, however long expansion takes; a Contact removed from the Audience before its snapshot batch is scanned may be excluded (a narrow, documented race). The Template's subject/text/html are copied at acceptance and never re-read from the (possibly later-edited or deleted) Template. Suppression is checked again, per recipient, immediately before that recipient is turned into a message - a suppression created while a broadcast is still expanding still stops any not-yet-processed recipient. audience_id and template_id must belong to this account (404 otherwise). Idempotent via Idempotency-Key exactly like POST /emails.",
+        "parameters": [{"name": "Idempotency-Key", "in": "header", "required": false, "schema": {"type": "string"}, "description": "Optional. Replaying the same key with the same body returns the original broadcast (Idempotency-Replayed: true) instead of creating a second campaign. A different body with the same key is 409."}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateBroadcastRequest"}}}},
+        "responses": {
+          "202": {"description": "Accepted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Broadcast"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "415": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List broadcasts",
+        "description": "Requires broadcasts:read. Newest first, keyset pagination (limit, cursor).",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of broadcasts", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BroadcastList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/broadcasts/{id}": {
+      "get": {
+        "summary": "Get a broadcast",
+        "description": "Requires broadcasts:read. status is an orchestration state (accepted|expanding|completed|failed): 'completed' means every recipient was either suppressed or handed to the normal send pipeline - it does NOT mean delivered, and never means inbox placement. Another account's broadcast is indistinguishable from a missing one (404).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The broadcast", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Broadcast"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/broadcasts/{id}/recipients": {
+      "get": {
+        "summary": "List a broadcast's recipients",
+        "description": "Requires broadcasts:read. Keyset pagination (limit, cursor); the entire recipient set is never returned in one response, however large the audience was. message_id, once present, is a normal /v1/emails id - GET /v1/emails/{message_id} carries that recipient's actual delivery status.",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of recipients", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BroadcastRecipientList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/audiences": {
+      "post": {
+        "summary": "Create an audience",
+        "description": "Requires audiences:write. An audience is a named group of existing Contacts (membership only - v0.35 never sends email). name is unique per account (409 audience_name_taken).",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateAudienceRequest"}}}},
+        "responses": {
+          "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Audience"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}, "415": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List audiences",
+        "description": "Requires audiences:read. Newest first, keyset pagination (limit, cursor).",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of audiences", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AudienceList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/audiences/{id}": {
+      "get": {
+        "summary": "Get an audience",
+        "description": "Requires audiences:read. Another account's audience is indistinguishable from a missing one (404).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The audience", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Audience"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "patch": {
+        "summary": "Rename an audience",
+        "description": "Requires audiences:write. Only name may be changed. Never affects membership, contacts, or suppressions.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpdateAudienceRequest"}}}},
+        "responses": {
+          "200": {"description": "Updated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Audience"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "415": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "delete": {
+        "summary": "Delete an audience",
+        "description": "Requires audiences:write. Deletes the audience and its membership rows ONLY - contacts, suppressions and historical messages are unaffected.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "204": {"description": "Deleted"},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/audiences/{id}/contacts": {
+      "post": {
+        "summary": "Add a contact to an audience",
+        "description": "Requires audiences:write. Both the audience and the contact must belong to the caller's account (404 otherwise, never disclosing which was missing/foreign). Idempotent: adding an existing member is a no-op 204, never a duplicate row or an error. A suppressed contact may be added - membership is not sending permission.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AddMemberRequest"}}}},
+        "responses": {
+          "204": {"description": "Member present (created or already existed)"},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "415": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List an audience's contacts",
+        "description": "Requires audiences:read. Keyset pagination (limit, cursor), ordered by membership creation.",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of contacts", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ContactList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/audiences/{id}/contacts/{contact_id}": {
+      "delete": {
+        "summary": "Remove a contact from an audience",
+        "description": "Requires audiences:write. Removes ONLY the membership row - never the contact, its suppression state, or any historical data.",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "contact_id", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "204": {"description": "Removed"},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/contacts": {
+      "post": {
+        "summary": "Create a contact",
+        "description": "Requires contacts:write. A contact is durable recipient data ('this account knows this address'), independent of suppressions and delivery history. email is unique per account under MailX's contact identity (ASCII, domain lower-cased, LOCAL PART CASE PRESERVED - different from suppression normalization). 409 contact_exists on a duplicate; no upsert in v0.34.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateContactRequest"}}}},
+        "responses": {
+          "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Contact"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}, "415": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List contacts",
+        "description": "Requires contacts:read. Newest first, keyset pagination (limit, cursor).",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of contacts", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ContactList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/contacts/{id}": {
+      "get": {
+        "summary": "Get a contact",
+        "description": "Requires contacts:read. Another account's contact is indistinguishable from a missing one (404).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The contact", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Contact"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "patch": {
+        "summary": "Update a contact",
+        "description": "Requires contacts:write. Partial update. Changing email re-validates and re-checks uniqueness under the new identity; it NEVER migrates or affects suppression state - suppressions key on the original address independently.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpdateContactRequest"}}}},
+        "responses": {
+          "200": {"description": "Updated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Contact"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "415": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "delete": {
+        "summary": "Delete a contact",
+        "description": "Requires contacts:write. Hard delete. Does NOT delete any suppression for the same address, and does not affect historical messages/deliveries.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "204": {"description": "Deleted"},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/templates": {
+      "post": {
+        "summary": "Create a template",
+        "description": "Requires templates:write. name is unique per account (409 template_name_taken on a duplicate). At least one of text/html is required, same rule as POST /v1/emails.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateTemplateRequest"}}}},
+        "responses": {
+          "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Template"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}, "415": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List templates",
+        "description": "Requires templates:read. Newest first, keyset pagination (limit, cursor).",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of templates", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TemplateList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/templates/{id}": {
+      "get": {
+        "summary": "Get a template",
+        "description": "Requires templates:read. Another account's template is indistinguishable from a missing one (404).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The template", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Template"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "patch": {
+        "summary": "Update a template",
+        "description": "Requires templates:write. Partial update. Emails already accepted from this template before the update keep their original rendered content.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpdateTemplateRequest"}}}},
+        "responses": {
+          "200": {"description": "Updated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Template"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "415": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "delete": {
+        "summary": "Delete a template",
+        "description": "Requires templates:write. Hard delete. Emails already sent from this template are unaffected; sending with this template_id afterwards fails with 404.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "204": {"description": "Deleted"},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/suppressions": {
       "post": {
         "summary": "Suppress a recipient address",
@@ -337,11 +611,175 @@ const openAPISpec = `{
           "bcc": {"type": "array", "items": {"type": "string"}},
           "reply_to": {"type": "string"},
           "subject": {"type": "string", "maxLength": 500},
-          "html": {"type": "string", "description": "At least one of html/text is required."},
+          "html": {"type": "string", "description": "At least one of html/text is required. Mutually exclusive with template_id."},
           "text": {"type": "string"},
+          "template_id": {"type": "string", "description": "Alternative to subject/html/text: renders the given template (must belong to this account) with 'variables' before building the message. Cannot be combined with subject/html/text (422 template_and_content_conflict)."},
+          "variables": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Substitution values for the template's {{name}} tokens; requires template_id (422 variables_without_template otherwise). At most 50 entries, 64-char keys, 4096-char values."},
           "scheduled_at": {"type": "string", "format": "date-time", "nullable": true, "description": "RFC 3339. Omit to send immediately."}
         },
         "additionalProperties": false
+      },
+      "Broadcast": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "audience_id": {"type": "string"},
+          "template_id": {"type": "string"},
+          "from": {"type": "string"},
+          "reply_to": {"type": "string"},
+          "status": {"type": "string", "enum": ["accepted", "expanding", "completed", "failed"]},
+          "send_at": {"type": "string", "format": "date-time", "nullable": true, "description": "v0.37: absent/null means expansion began immediately on acceptance. When set, MailX never begins expansion before this instant; expansion may start somewhat after it depending on scheduler polling capacity, never before."},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "CreateBroadcastRequest": {
+        "type": "object", "required": ["name", "audience_id", "template_id", "from"],
+        "properties": {
+          "name": {"type": "string", "maxLength": 200},
+          "audience_id": {"type": "string"},
+          "template_id": {"type": "string"},
+          "from": {"type": "string", "example": "updates@example.com"},
+          "reply_to": {"type": "string"},
+          "variables": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Global template variables, overridden per recipient by that Contact's own attributes/name. Same bounds as POST /emails' template variables."},
+          "send_at": {"type": "string", "format": "date-time", "nullable": true, "description": "v0.37: RFC 3339 absolute instant. Omit to expand immediately (unchanged v0.36 behavior). The Audience snapshot boundary is always acceptance time regardless of send_at - scheduling only delays WHEN expansion may begin, never which recipients are eligible. Suppression is still re-checked at expansion time, not frozen at creation. Part of the idempotency fingerprint: a retry with the same key but a different send_at is a 409 conflict, not a reschedule. Immutable after acceptance - there is no reschedule/cancel endpoint in v0.37."}
+        },
+        "additionalProperties": false
+      },
+      "BroadcastList": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/Broadcast"}},
+          "next_cursor": {"type": "string", "nullable": true}
+        }
+      },
+      "BroadcastRecipient": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "contact_id": {"type": "string"},
+          "email": {"type": "string"},
+          "status": {"type": "string", "enum": ["pending", "suppressed", "materialized", "failed"]},
+          "message_id": {"type": "string", "nullable": true}
+        }
+      },
+      "BroadcastRecipientList": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/BroadcastRecipient"}},
+          "next_cursor": {"type": "string", "nullable": true}
+        }
+      },
+      "Audience": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "CreateAudienceRequest": {
+        "type": "object", "required": ["name"],
+        "properties": {"name": {"type": "string", "maxLength": 200, "example": "Newsletter"}},
+        "additionalProperties": false
+      },
+      "UpdateAudienceRequest": {
+        "type": "object", "required": ["name"],
+        "properties": {"name": {"type": "string", "maxLength": 200}},
+        "additionalProperties": false
+      },
+      "AudienceList": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/Audience"}},
+          "next_cursor": {"type": "string", "nullable": true}
+        }
+      },
+      "AddMemberRequest": {
+        "type": "object", "required": ["contact_id"],
+        "properties": {"contact_id": {"type": "string"}},
+        "additionalProperties": false
+      },
+      "Contact": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "email": {"type": "string"},
+          "name": {"type": "string"},
+          "attributes": {"type": "object", "additionalProperties": {"type": "string"}},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "CreateContactRequest": {
+        "type": "object",
+        "required": ["email"],
+        "properties": {
+          "email": {"type": "string", "example": "person@example.com"},
+          "name": {"type": "string", "maxLength": 200},
+          "attributes": {"type": "object", "additionalProperties": {"type": "string"}, "description": "At most 20 entries, 64-char keys, 500-char values. Flat string map, no nesting."}
+        },
+        "additionalProperties": false
+      },
+      "UpdateContactRequest": {
+        "type": "object",
+        "properties": {
+          "email": {"type": "string"},
+          "name": {"type": "string", "maxLength": 200},
+          "attributes": {"type": "object", "additionalProperties": {"type": "string"}}
+        },
+        "additionalProperties": false,
+        "description": "Partial update: omitted fields are unchanged. Changing email never touches suppression state."
+      },
+      "ContactList": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/Contact"}},
+          "next_cursor": {"type": "string", "nullable": true}
+        }
+      },
+      "Template": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "subject": {"type": "string"},
+          "text": {"type": "string"},
+          "html": {"type": "string"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "CreateTemplateRequest": {
+        "type": "object",
+        "required": ["name", "subject"],
+        "properties": {
+          "name": {"type": "string", "maxLength": 200, "description": "Unique per account."},
+          "subject": {"type": "string", "maxLength": 500},
+          "text": {"type": "string"},
+          "html": {"type": "string"}
+        },
+        "additionalProperties": false
+      },
+      "UpdateTemplateRequest": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string", "maxLength": 200},
+          "subject": {"type": "string", "maxLength": 500},
+          "text": {"type": "string"},
+          "html": {"type": "string"}
+        },
+        "additionalProperties": false,
+        "description": "Partial update: omitted fields are unchanged. Editing or deleting a template never changes emails already sent from it."
+      },
+      "TemplateList": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/Template"}},
+          "next_cursor": {"type": "string", "nullable": true}
+        }
       },
       "Email": {
         "type": "object",

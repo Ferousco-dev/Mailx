@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/auth"
 	"github.com/Ferousco-dev/mailx/internal/dkim"
@@ -21,6 +22,7 @@ type routeServices struct {
 	dmarc    *dmarc.Service
 	metrics  *observability.Metrics
 	abuse    *AbuseControls
+	feedback *feedbackHandler // nil disables the ingestion route
 }
 
 // newMux registers every /v1 route plus health checks. Handlers stay
@@ -74,6 +76,35 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("POST /v1/domains/{id}/spf/verify", requireScope(auth.ScopeDomainsWrite)(spfHandler.handleVerify))
 	v1.HandleFunc("GET /v1/domains/{id}/dmarc", requireScope(auth.ScopeDomainsRead)(dmarcHandler.handleGet))
 	v1.HandleFunc("POST /v1/domains/{id}/dmarc/verify", requireScope(auth.ScopeDomainsWrite)(dmarcHandler.handleVerify))
+	broadcasts := &broadcastHandler{db: h.db, now: func() time.Time { return time.Now().UTC() }}
+	v1.HandleFunc("POST /v1/broadcasts", requireScope(auth.ScopeBroadcastsWrite)(broadcasts.handleCreate))
+	v1.HandleFunc("GET /v1/broadcasts", requireScope(auth.ScopeBroadcastsRead)(broadcasts.handleList))
+	v1.HandleFunc("GET /v1/broadcasts/{id}", requireScope(auth.ScopeBroadcastsRead)(broadcasts.handleGet))
+	v1.HandleFunc("GET /v1/broadcasts/{id}/recipients", requireScope(auth.ScopeBroadcastsRead)(broadcasts.handleListRecipients))
+
+	audiences := &audienceHandler{db: h.db}
+	v1.HandleFunc("POST /v1/audiences", requireScope(auth.ScopeAudiencesWrite)(audiences.handleCreate))
+	v1.HandleFunc("GET /v1/audiences", requireScope(auth.ScopeAudiencesRead)(audiences.handleList))
+	v1.HandleFunc("GET /v1/audiences/{id}", requireScope(auth.ScopeAudiencesRead)(audiences.handleGet))
+	v1.HandleFunc("PATCH /v1/audiences/{id}", requireScope(auth.ScopeAudiencesWrite)(audiences.handleUpdate))
+	v1.HandleFunc("DELETE /v1/audiences/{id}", requireScope(auth.ScopeAudiencesWrite)(audiences.handleDelete))
+	v1.HandleFunc("POST /v1/audiences/{id}/contacts", requireScope(auth.ScopeAudiencesWrite)(audiences.handleAddMember))
+	v1.HandleFunc("GET /v1/audiences/{id}/contacts", requireScope(auth.ScopeAudiencesRead)(audiences.handleListMembers))
+	v1.HandleFunc("DELETE /v1/audiences/{id}/contacts/{contact_id}", requireScope(auth.ScopeAudiencesWrite)(audiences.handleRemoveMember))
+
+	contacts := &contactHandler{db: h.db}
+	v1.HandleFunc("POST /v1/contacts", requireScope(auth.ScopeContactsWrite)(contacts.handleCreate))
+	v1.HandleFunc("GET /v1/contacts", requireScope(auth.ScopeContactsRead)(contacts.handleList))
+	v1.HandleFunc("GET /v1/contacts/{id}", requireScope(auth.ScopeContactsRead)(contacts.handleGet))
+	v1.HandleFunc("PATCH /v1/contacts/{id}", requireScope(auth.ScopeContactsWrite)(contacts.handleUpdate))
+	v1.HandleFunc("DELETE /v1/contacts/{id}", requireScope(auth.ScopeContactsWrite)(contacts.handleDelete))
+
+	templates := &templateHandler{db: h.db}
+	v1.HandleFunc("POST /v1/templates", requireScope(auth.ScopeTemplatesWrite)(templates.handleCreate))
+	v1.HandleFunc("GET /v1/templates", requireScope(auth.ScopeTemplatesRead)(templates.handleList))
+	v1.HandleFunc("GET /v1/templates/{id}", requireScope(auth.ScopeTemplatesRead)(templates.handleGet))
+	v1.HandleFunc("PATCH /v1/templates/{id}", requireScope(auth.ScopeTemplatesWrite)(templates.handleUpdate))
+	v1.HandleFunc("DELETE /v1/templates/{id}", requireScope(auth.ScopeTemplatesWrite)(templates.handleDelete))
 	v1.HandleFunc("POST /v1/suppressions", requireScope(auth.ScopeSuppressionsWrite)(suppressions.handleCreate))
 	v1.HandleFunc("GET /v1/suppressions", requireScope(auth.ScopeSuppressionsRead)(suppressions.handleList))
 	v1.HandleFunc("GET /v1/suppressions/{id}", requireScope(auth.ScopeSuppressionsRead)(suppressions.handleGet))
@@ -114,6 +145,12 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
 
+	if len(extras) > 0 && extras[0].feedback != nil {
+		// Deliberately NOT under /v1 and NOT authenticateMiddleware: this is the
+		// operator-only feedback ingestion boundary (see feedback_handler.go),
+		// not a tenant-facing route.
+		mux.HandleFunc("POST /internal/feedback", extras[0].feedback.handleIngest)
+	}
 	mux.HandleFunc("GET /openapi.json", serveOpenAPI)
 	mux.HandleFunc("GET /docs", serveDocs)
 

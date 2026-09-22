@@ -72,6 +72,23 @@ const (
 	// never implied by emails:* or domains:*.
 	ScopeSuppressionsRead  Scope = "suppressions:read"
 	ScopeSuppressionsWrite Scope = "suppressions:write"
+	// Template management (v0.33), separate from emails:send: creating/editing
+	// templates does not send mail, and sending with a template still requires
+	// emails:send.
+	ScopeTemplatesRead  Scope = "templates:read"
+	ScopeTemplatesWrite Scope = "templates:write"
+	// Contacts (v0.34): independent of emails:*/suppressions:* — a contact is
+	// tenant-known-recipient data, not delivery or suppression state.
+	ScopeContactsRead  Scope = "contacts:read"
+	ScopeContactsWrite Scope = "contacts:write"
+	// Audiences (v0.35): group membership only, no sending permission implied.
+	ScopeAudiencesRead  Scope = "audiences:read"
+	ScopeAudiencesWrite Scope = "audiences:write"
+	// Broadcasts (v0.36): bulk-send orchestration. broadcasts:write does NOT
+	// imply emails:send is unnecessary — a broadcast still passes through the
+	// same abuse controls/suppression authority as a normal send.
+	ScopeBroadcastsRead  Scope = "broadcasts:read"
+	ScopeBroadcastsWrite Scope = "broadcasts:write"
 )
 
 // ValidScopes lists every scope MailX currently understands - grown only
@@ -79,6 +96,8 @@ const (
 var ValidScopes = []Scope{
 	ScopeEmailsSend, ScopeEmailsRead, ScopeDomainsRead, ScopeDomainsWrite,
 	ScopeWebhooksRead, ScopeWebhooksWrite, ScopeSuppressionsRead, ScopeSuppressionsWrite,
+	ScopeTemplatesRead, ScopeTemplatesWrite, ScopeContactsRead, ScopeContactsWrite,
+	ScopeAudiencesRead, ScopeAudiencesWrite, ScopeBroadcastsRead, ScopeBroadcastsWrite,
 }
 
 func ValidScope(s string) bool {

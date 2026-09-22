@@ -197,7 +197,10 @@ func TestBadRelayCredentialsCauseNoRetryStorm(t *testing.T) {
 		if len(attempts) != 1 || attempts[0].Decision != retry.Retry || rig.store.terminal[id] {
 			t.Fatalf("%s: want exactly one retryable attempt, got %d terminal=%v", id, len(attempts), rig.store.terminal[id])
 		}
-		if next := rig.store.next[id]; time.Until(next) < 20*time.Minute {
+		// The front-loaded default's first delay is 5s (intentional — see
+		// DefaultBackoffPolicy's doc); this only needs to prove the RETRY
+		// SCHEDULE was used at all, not a tight zero-delay hammering loop.
+		if next := rig.store.next[id]; time.Until(next) < 3*time.Second {
 			t.Fatalf("%s: retry scheduled too soon (%v)", id, time.Until(next))
 		}
 	}

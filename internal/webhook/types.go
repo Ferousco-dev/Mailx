@@ -14,9 +14,10 @@ const (
 	EventFailed          = "email.failed"
 	EventBounced         = "email.bounced"
 	EventSuppressed      = "email.suppressed"
+	EventComplained      = "email.complained" // v0.32: a verified complaint report matched a recipient
 )
 
-var EventTypes = []string{EventQueued, EventDelivered, EventDeliveryDelayed, EventFailed, EventBounced, EventSuppressed}
+var EventTypes = []string{EventQueued, EventDelivered, EventDeliveryDelayed, EventFailed, EventBounced, EventSuppressed, EventComplained}
 
 func normalizeEventTypes(in []string) ([]string, error) {
 	if len(in) == 0 {

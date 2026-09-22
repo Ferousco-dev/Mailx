@@ -18,7 +18,7 @@ func TestInsertMessageCreatesOutboxRow(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	items, err := db.ListPendingOutbox(ctx, time.Now().Add(time.Minute), 10)
+	items, err := db.ListPendingOutbox(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,6 +36,11 @@ func TestInsertMessageCreatesOutboxRow(t *testing.T) {
 	}
 }
 
+// TestListPendingOutboxExcludesFutureAvailableAt proves the v0.37 no-early-
+// send invariant for normal email: a future AvailableAt must never be
+// listed as due. Due-ness is now decided by PostgreSQL's own now() (not a
+// Go-supplied timestamp — see fairOutboxSQL's doc), so this test controls
+// time by moving the ROW's available_at with SQL, never by faking "now".
 func TestListPendingOutboxExcludesFutureAvailableAt(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
@@ -48,7 +53,7 @@ func TestListPendingOutboxExcludesFutureAvailableAt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	items, err := db.ListPendingOutbox(ctx, time.Now(), 10)
+	items, err := db.ListPendingOutbox(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +63,10 @@ func TestListPendingOutboxExcludesFutureAvailableAt(t *testing.T) {
 		}
 	}
 
-	items, err = db.ListPendingOutbox(ctx, time.Now().Add(2*time.Hour), 10)
+	if _, err := db.pool.Exec(ctx, `UPDATE outbox SET available_at = now() - interval '1 second' WHERE message_id = $1`, msg.ID); err != nil {
+		t.Fatal(err)
+	}
+	items, err = db.ListPendingOutbox(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +95,7 @@ func TestMarkOutboxDispatchedIsIdempotentGuard(t *testing.T) {
 	if err := db.MarkOutboxDispatched(ctx, msg.ID); err != nil {
 		t.Fatal(err)
 	}
-	items, err := db.ListPendingOutbox(ctx, time.Now().Add(time.Minute), 10)
+	items, err := db.ListPendingOutbox(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
 	}

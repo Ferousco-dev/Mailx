@@ -17,32 +17,36 @@ type OutboxItem struct {
 // batch never reads more than maxFairTenants*limit index entries.
 const maxFairTenants = 200
 
-// fairOutboxSQL takes $1 now, $2 limit, $3 the tenant cap.
+// fairOutboxSQL takes $1 limit, $2 the tenant cap. Due-ness is decided by
+// PostgreSQL's own now() (v0.37: same clock-authority lesson v0.36 learned
+// from its acceptance-watermark skew) rather than a Go-supplied timestamp,
+// so a scheduled email's send_at is never compared against a different
+// machine's clock.
 const fairOutboxSQL = `
 		WITH RECURSIVE tenants(tenant_id) AS (
 			(SELECT tenant_id FROM outbox
-			  WHERE dispatched_at IS NULL AND available_at <= $1
+			  WHERE dispatched_at IS NULL AND available_at <= now()
 			  ORDER BY tenant_id LIMIT 1)
 			UNION ALL
 			SELECT (SELECT o.tenant_id FROM outbox o
-			         WHERE o.dispatched_at IS NULL AND o.available_at <= $1 AND o.tenant_id > t.tenant_id
+			         WHERE o.dispatched_at IS NULL AND o.available_at <= now() AND o.tenant_id > t.tenant_id
 			         ORDER BY o.tenant_id LIMIT 1)
 			FROM tenants t WHERE t.tenant_id IS NOT NULL
 		), capped AS (
-			SELECT tenant_id FROM tenants WHERE tenant_id IS NOT NULL LIMIT $3
+			SELECT tenant_id FROM tenants WHERE tenant_id IS NOT NULL LIMIT $2
 		), ranked AS (
 			SELECT o.message_id, o.tenant_id, o.available_at,
 			       row_number() OVER (PARTITION BY o.tenant_id ORDER BY o.available_at) AS rn
 			FROM capped c
 			CROSS JOIN LATERAL (
 				SELECT message_id, tenant_id, available_at FROM outbox
-				WHERE tenant_id = c.tenant_id AND dispatched_at IS NULL AND available_at <= $1
-				ORDER BY available_at LIMIT $2
+				WHERE tenant_id = c.tenant_id AND dispatched_at IS NULL AND available_at <= now()
+				ORDER BY available_at LIMIT $1
 			) o
 		)
 		SELECT message_id, tenant_id, available_at FROM ranked
 		ORDER BY rn, available_at
-		LIMIT $2`
+		LIMIT $1`
 
 // ListPendingOutbox returns up to limit due, undispatched rows, round-robin
 // across tenants: every tenant with due work gets its oldest row first, then
@@ -56,12 +60,12 @@ const fairOutboxSQL = `
 // Enqueue is duplicate-safe by JobID and MarkOutboxDispatched is a guarded
 // idempotent no-op the second time. (v0.31 removed FOR UPDATE SKIP LOCKED: each
 // read was its own implicit transaction, so the lock was released immediately.)
-func (db *DB) ListPendingOutbox(ctx context.Context, now time.Time, limit int) ([]OutboxItem, error) {
+func (db *DB) ListPendingOutbox(ctx context.Context, limit int) ([]OutboxItem, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 	rows, err := db.pool.Query(ctx, fairOutboxSQL,
-		now, limit, maxFairTenants,
+		limit, maxFairTenants,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("database: list pending outbox: %w", normalizeErr(err))

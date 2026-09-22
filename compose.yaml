@@ -46,6 +46,16 @@ services:
       args:
         VERSION: ${MAILX_VERSION:-dev}
         COMMIT: ${MAILX_COMMIT:-unknown}
+    # Go's CGO_ENABLED=0 static build uses its own pure-Go DNS resolver
+    # (never the OS/musl one), which can be flaky against Docker's embedded
+    # DNS proxy (127.0.0.11) for external lookups — outbound MX resolution
+    # can occasionally see spurious ~8s timeouts that don't reproduce with
+    # nslookup/getent in the same container. PR review: do NOT hardcode
+    # public resolvers here — that breaks anyone on a VPN or a network with
+    # split-horizon/internal DNS, and it doesn't even bypass the flaky
+    # component (Compose queries still transit the embedded proxy either
+    # way). If you hit this, layer the optional override instead:
+    #   docker compose -f compose.yaml -f compose.dns-workaround.yaml up
     environment:
       MAILX_SMTP_ADDR: ":2525"
       # v0.23 observability: structured logs plus a separate operator

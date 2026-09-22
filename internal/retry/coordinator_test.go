@@ -69,10 +69,10 @@ func TestCoordinatorTemporaryFirstOperationReturnsSchedule(t *testing.T) {
 	if !errors.Is(outcome.DeliveryError, deliveryErr) {
 		t.Fatalf("DeliveryError = %v", outcome.DeliveryError)
 	}
-	if outcome.Schedule == nil || outcome.Schedule.Attempt != 1 || outcome.Schedule.Delay != 30*time.Minute {
+	if outcome.Schedule == nil || outcome.Schedule.Attempt != 1 || outcome.Schedule.Delay != 5*time.Second {
 		t.Fatalf("Schedule = %+v", outcome.Schedule)
 	}
-	wantNext := fixedNow().Add(30 * time.Minute)
+	wantNext := fixedNow().Add(5 * time.Second)
 	if !outcome.Schedule.NextRetryAt.Equal(wantNext) {
 		t.Fatalf("NextRetryAt = %s, want %s", outcome.Schedule.NextRetryAt, wantNext)
 	}
@@ -145,7 +145,7 @@ func TestCoordinatorContinuesExistingRetryableState(t *testing.T) {
 	if deliverer.calls != 1 || state.Count() != 2 || outcome.Status != StatusRetryable {
 		t.Fatalf("calls=%d count=%d outcome=%+v", deliverer.calls, state.Count(), outcome)
 	}
-	if outcome.Schedule == nil || outcome.Schedule.Attempt != 2 || outcome.Schedule.Delay != time.Hour {
+	if outcome.Schedule == nil || outcome.Schedule.Attempt != 2 || outcome.Schedule.Delay != 5*time.Minute {
 		t.Fatalf("Schedule = %+v", outcome.Schedule)
 	}
 	history := state.History()

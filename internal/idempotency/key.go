@@ -22,6 +22,9 @@ const MaxKeyLen = 255
 // name) so refactors never accidentally change idempotency identity.
 const OperationEmailsCreate = "emails.create"
 
+// OperationBroadcastsCreate scopes idempotency for POST /v1/broadcasts.
+const OperationBroadcastsCreate = "broadcasts.create"
+
 var (
 	ErrEmptyKey       = errors.New("idempotency: key is empty")
 	ErrKeyTooLong     = errors.New("idempotency: key exceeds maximum length")

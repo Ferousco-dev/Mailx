@@ -305,7 +305,7 @@ func TestIntegrationScenarioBTemporaryFailureReleaseAndRetry(t *testing.T) {
 	if first.Schedule == nil {
 		t.Fatal("expected a schedule from retry package, queue must not invent one")
 	}
-	wantNextRetryAt := frozen.Add(retry.DefaultBackoffPolicy().Base) // attempt 1 delay
+	wantNextRetryAt := frozen.Add(retry.DefaultBackoffPolicy().Schedule[0]) // attempt 1 delay
 	if !first.Schedule.NextRetryAt.Equal(wantNextRetryAt) {
 		t.Fatalf("NextRetryAt = %v, want %v (queue must not compute its own delay)", first.Schedule.NextRetryAt, wantNextRetryAt)
 	}

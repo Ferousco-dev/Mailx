@@ -744,3 +744,64 @@ func testRecord(id, raw string) MessageRecord {
 		Message:    mail.Message{Raw: raw},
 	}
 }
+
+// TestFileStoreSaveRepairsCrashPartialRecord proves the PR review fix: if a
+// prior Save crashed after creating the message directory but before
+// writing message.eml/metadata.json, a later Save for the SAME id must not
+// treat "directory already exists" as a completed prior save (ErrRecordExists)
+// — that would let a caller durably reference a record the worker can never
+// load (permanently unsendable, per the finding). Save must instead detect
+// the incompleteness, repair it, and write a complete record.
+func TestFileStoreSaveRepairsCrashPartialRecord(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strings.Repeat("c", 32)
+
+	// Simulate the crash: only the message directory exists, no files in it
+	// (exactly what a crash between os.Mkdir and the raw-message write
+	// leaves behind) — and old enough (older than repairGracePeriod) to be
+	// distinguishable from a genuinely concurrent in-flight writer, which
+	// Save must NOT repair (see TestFileStoreSaveConcurrentSameID).
+	dir := filepath.Join(store.MessagesDir(), id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-repairGracePeriod - time.Second)
+	if err := os.Chtimes(dir, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	record := testRecord(id, "raw content")
+	if err := store.Save(record); err != nil {
+		t.Fatalf("Save must repair a crash-partial record, not fail: %v", err)
+	}
+	loaded, err := store.Load(id)
+	if err != nil || string(loaded.Raw) != "raw content" {
+		t.Fatalf("repaired record must be fully loadable: %+v %v", loaded, err)
+	}
+}
+
+// A genuinely COMPLETE existing record must still return ErrRecordExists
+// (the deliberate idempotent-retry path) — the repair above must not kick
+// in for a real prior successful save.
+func TestFileStoreSaveStillReportsExistsForCompleteRecord(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strings.Repeat("d", 32)
+	record := testRecord(id, "raw content")
+	if err := store.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(record); !errors.Is(err, ErrRecordExists) {
+		t.Fatalf("Save on a genuinely complete record = %v, want ErrRecordExists", err)
+	}
+	// And the original content must survive untouched.
+	loaded, err := store.Load(id)
+	if err != nil || string(loaded.Raw) != "raw content" {
+		t.Fatalf("complete record must not be repaired/overwritten: %+v %v", loaded, err)
+	}
+}

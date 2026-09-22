@@ -79,6 +79,18 @@ func payloadFor(event database.Event) (EventEnvelope, error) {
 	if value, ok := event.Metadata["next_retry_at"]; ok && publicType == EventDeliveryDelayed {
 		data["next_retry_at"] = value
 	}
+	// v0.32: feedback events carry which recipient the feedback was about (the
+	// tenant's own recipient address — not cross-tenant data) and, for bounces,
+	// the RFC 3463 enhanced status. Never the raw DSN/diagnostic text or any
+	// internal correlation token (see docs/design-v0.32.md "Events").
+	if publicType == EventBounced || publicType == EventComplained {
+		if v, ok := event.Metadata["recipient"]; ok {
+			data["recipient"] = v
+		}
+		if v, ok := event.Metadata["enhanced_status"]; ok {
+			data["enhanced_status"] = v
+		}
+	}
 	return EventEnvelope{ID: event.ID, Type: publicType, APIVersion: APIVersion, CreatedAt: event.OccurredAt, Data: data}, nil
 }
 

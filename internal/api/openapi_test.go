@@ -20,6 +20,9 @@ func TestOpenAPISpecParses(t *testing.T) {
 	for _, want := range []string{
 		"/emails", "/emails/{id}", "/domains", "/domains/{id}", "/domains/{id}/verify", "/domains/{id}/dkim", "/domains/{id}/dkim/verify",
 		"/events", "/webhooks", "/webhooks/{id}", "/webhooks/{id}/rotate-secret", "/webhooks/{id}/deliveries",
+		"/templates", "/templates/{id}", "/contacts", "/contacts/{id}",
+		"/audiences", "/audiences/{id}", "/audiences/{id}/contacts", "/audiences/{id}/contacts/{contact_id}",
+		"/broadcasts", "/broadcasts/{id}", "/broadcasts/{id}/recipients",
 	} {
 		if _, ok := paths[want]; !ok {
 			t.Errorf("documented spec is missing path %q", want)
@@ -30,6 +33,10 @@ func TestOpenAPISpecParses(t *testing.T) {
 		"SendEmailRequest", "Email", "EmailList", "CreateDomainRequest", "DNSRecord", "Domain", "DomainList",
 		"CreateWebhookRequest", "Webhook", "WebhookCreated", "WebhookList", "Event", "EventList", "APIError",
 		"WebhookDelivery", "WebhookDeliveryList", "DkimKey", "DkimStatus", "DkimVerifyResult",
+		"Template", "CreateTemplateRequest", "UpdateTemplateRequest", "TemplateList",
+		"Contact", "CreateContactRequest", "UpdateContactRequest", "ContactList",
+		"Audience", "CreateAudienceRequest", "UpdateAudienceRequest", "AudienceList", "AddMemberRequest",
+		"Broadcast", "CreateBroadcastRequest", "BroadcastList", "BroadcastRecipient", "BroadcastRecipientList",
 	} {
 		if _, ok := schemas[want]; !ok {
 			t.Errorf("documented spec is missing schema %q", want)
@@ -82,6 +89,28 @@ func TestOpenAPIRoutesMatchRuntime(t *testing.T) {
 		{"POST", "/v1/emails"},
 		{"GET", "/v1/emails"},
 		{"GET", "/v1/emails/some-id"},
+		{"POST", "/v1/broadcasts"},
+		{"GET", "/v1/broadcasts"},
+		{"GET", "/v1/broadcasts/some-id"},
+		{"GET", "/v1/broadcasts/some-id/recipients"},
+		{"POST", "/v1/audiences"},
+		{"GET", "/v1/audiences"},
+		{"GET", "/v1/audiences/some-id"},
+		{"PATCH", "/v1/audiences/some-id"},
+		{"DELETE", "/v1/audiences/some-id"},
+		{"POST", "/v1/audiences/some-id/contacts"},
+		{"GET", "/v1/audiences/some-id/contacts"},
+		{"DELETE", "/v1/audiences/some-id/contacts/other-id"},
+		{"POST", "/v1/contacts"},
+		{"GET", "/v1/contacts"},
+		{"GET", "/v1/contacts/some-id"},
+		{"PATCH", "/v1/contacts/some-id"},
+		{"DELETE", "/v1/contacts/some-id"},
+		{"POST", "/v1/templates"},
+		{"GET", "/v1/templates"},
+		{"GET", "/v1/templates/some-id"},
+		{"PATCH", "/v1/templates/some-id"},
+		{"DELETE", "/v1/templates/some-id"},
 		{"POST", "/v1/domains"},
 		{"GET", "/v1/domains"},
 		{"GET", "/v1/domains/some-id"},

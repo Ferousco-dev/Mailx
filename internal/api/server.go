@@ -57,6 +57,9 @@ type Config struct {
 	// Abuse configures outbound abuse controls (request/recipient limits, queue
 	// caps, backpressure). Nil disables them; production wiring sets it.
 	Abuse *AbuseControls
+	// Feedback configures the outbound feedback ingestion route (v0.32). Nil
+	// disables /internal/feedback entirely.
+	Feedback *FeedbackConfig
 	// Logger and Metrics are optional; nil disables the corresponding
 	// observation without changing request handling.
 	Logger  *slog.Logger
@@ -123,7 +126,11 @@ func NewServer(cfg Config) (*Server, error) {
 		return cfg.Ready(ctx)
 	}
 	h.abuse = cfg.Abuse
-	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, metrics: cfg.Metrics})
+	var fbHandler *feedbackHandler
+	if cfg.Feedback != nil {
+		fbHandler = &feedbackHandler{db: cfg.DB, correlator: cfg.Feedback.Correlator, ingestToken: cfg.Feedback.IngestToken, now: func() time.Time { return time.Now().UTC() }}
+	}
+	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, metrics: cfg.Metrics, feedback: fbHandler})
 	log := cfg.Logger
 	if log == nil {
 		log = observability.Discard()

@@ -96,3 +96,25 @@ func QualifiesHardBounce(stage string, permanent bool, accepted bool, code int, 
 	}
 	return false
 }
+
+// hardBounceEnhancedStatuses is the narrow set of RFC 3463 enhanced-status
+// codes that, on their own, prove the DESTINATION MAILBOX itself is invalid —
+// shared by QualifiesHardBounce (synchronous RCPT TO rejection) and
+// QualifiesAsyncHardBounce (v0.32 asynchronous DSN feedback) so the two paths
+// can never silently diverge on what "hard bounce" means.
+var hardBounceEnhancedStatuses = map[string]bool{"5.1.1": true, "5.1.6": true}
+
+// QualifiesAsyncHardBounce decides whether a PERMANENT asynchronous bounce
+// (an RFC 3464 DSN with Action: failed) justifies automatic suppression.
+//
+// Deliberately as narrow as QualifiesHardBounce, and for the same reason: a
+// permanent DSN is not automatically a statement about the recipient mailbox —
+// it may concern policy, content, authentication, or the sending
+// reputation/IP, none of which the recipient address itself caused. Only the
+// same two mailbox-invalidity enhanced-status codes qualify. enhanced must
+// already be validated (bounce.ParseEnhancedStatus) and confirmed class 5 by
+// the caller; this function re-checks the canonical string form so a caller
+// cannot accidentally suppress on an unvalidated value.
+func QualifiesAsyncHardBounce(enhanced string) bool {
+	return hardBounceEnhancedStatuses[enhanced]
+}
