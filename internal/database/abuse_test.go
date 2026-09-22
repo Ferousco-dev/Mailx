@@ -197,24 +197,26 @@ func TestReleaseIdempotencyClaimOnlyReleasesOwnInProgressClaim(t *testing.T) {
 	a := newTestTenant(t, db)
 	exp := time.Now().Add(time.Hour)
 	stale := time.Now().Add(-time.Minute)
-	if _, owned, err := db.ClaimIdempotencyKey(ctx, a.ID, "emails.create", "k1", "fp1", exp, stale); err != nil || !owned {
+	rec, owned, err := db.ClaimIdempotencyKey(ctx, a.ID, "emails.create", "k1", "fp1", exp, stale)
+	if err != nil || !owned {
 		t.Fatalf("claim: %v owned=%v", err, owned)
 	}
+	claimedAt := rec.CreatedAt
 	// A different fingerprint must not release it.
-	if err := db.ReleaseIdempotencyClaim(ctx, a.ID, "emails.create", "k1", "other"); err != nil {
+	if err := db.ReleaseIdempotencyClaim(ctx, a.ID, "emails.create", "k1", "other", claimedAt); err != nil {
 		t.Fatal(err)
 	}
 	if _, owned, _ := db.ClaimIdempotencyKey(ctx, a.ID, "emails.create", "k1", "fp1", exp, stale); owned {
 		t.Fatal("claim was released by the wrong fingerprint")
 	}
-	if err := db.ReleaseIdempotencyClaim(ctx, a.ID, "emails.create", "k1", "fp1"); err != nil {
+	if err := db.ReleaseIdempotencyClaim(ctx, a.ID, "emails.create", "k1", "fp1", claimedAt); err != nil {
 		t.Fatal(err)
 	}
 	if _, owned, err := db.ClaimIdempotencyKey(ctx, a.ID, "emails.create", "k1", "fp1", exp, stale); err != nil || !owned {
 		t.Fatalf("key must be claimable again after release: %v owned=%v", err, owned)
 	}
 	// Releasing a key that does not exist is a no-op.
-	if err := db.ReleaseIdempotencyClaim(ctx, a.ID, "emails.create", "nope", "x"); err != nil {
+	if err := db.ReleaseIdempotencyClaim(ctx, a.ID, "emails.create", "nope", "x", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -360,5 +362,75 @@ func TestOutboxIndexMigrationRoundTripKeepsRows(t *testing.T) {
 	items, err := db.ListPendingOutbox(ctx, time.Now().UTC(), 10)
 	if err != nil || len(items) != 1 || items[0].MessageID != id {
 		t.Fatalf("pending row lost across the migration round trip: %v %v", items, err)
+	}
+}
+
+// A retrying message is still undelivered and must count toward the tenant cap.
+func TestRetryingMessagesCountTowardTenantQueueCap(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	a := newTestTenant(t, db)
+	id := insertAt(t, db, a.ID, time.Now().UTC())
+	if err := db.UpdateMessageStatus(ctx, id, StatusRetrying, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := db.CountTenantQueued(ctx, a.ID, 100); err != nil || n != 1 {
+		t.Fatalf("retrying message not counted: %d %v", n, err)
+	}
+}
+
+// An identical retry that reclaims a stale claim must not be deleted by the ORIGINAL request's late release,
+// even though the fingerprint is the same: the claim time identifies the owner.
+func TestReleaseIdempotencyClaimLeavesAReclaimersClaimAlone(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	a := newTestTenant(t, db)
+	exp := time.Now().Add(time.Hour)
+	first, owned, err := db.ClaimIdempotencyKey(ctx, a.ID, "emails.create", "k", "fp", exp, time.Now().Add(-time.Minute))
+	if err != nil || !owned {
+		t.Fatal(err, owned)
+	}
+	time.Sleep(20 * time.Millisecond)
+	// The original stalls past the stale window; an identical retry reclaims (created_at resets).
+	second, owned, err := db.ClaimIdempotencyKey(ctx, a.ID, "emails.create", "k", "fp", exp, time.Now().Add(time.Hour))
+	if err != nil || !owned || !second.CreatedAt.After(first.CreatedAt) {
+		t.Fatalf("reclaim failed: owned=%v err=%v", owned, err)
+	}
+	if err := db.ReleaseIdempotencyClaim(ctx, a.ID, "emails.create", "k", "fp", first.CreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := db.GetIdempotencyKey(ctx, a.ID, "emails.create", "k")
+	if err != nil || rec.Status != IdempotencyInProgress {
+		t.Fatalf("the reclaimer's live claim was deleted: %+v %v", rec, err)
+	}
+	if err := db.ReleaseIdempotencyClaim(ctx, a.ID, "emails.create", "k", "fp", second.CreatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.GetIdempotencyKey(ctx, a.ID, "emails.create", "k"); err == nil {
+		t.Fatal("the owner's own release must delete the claim")
+	}
+}
+
+// The public event list must include the public `suppressed` lifecycle event (email.suppressed).
+func TestPublicEventListIncludesSuppressedEvents(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	a := newTestTenant(t, db)
+	id := insertAt(t, db, a.ID, time.Now().UTC())
+	if err := db.RecordSuppressedRecipients(ctx, id, map[string]bool{"bob@example.com": true, "hidden-bcc@example.com": true}, true); err != nil {
+		t.Fatal(err)
+	}
+	evs, err := db.ListTenantPublicEvents(ctx, a.ID, 50, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, e := range evs {
+		if e.Type == "suppressed" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("GET /v1/events hides suppression events: %+v", evs)
 	}
 }

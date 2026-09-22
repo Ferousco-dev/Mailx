@@ -172,13 +172,13 @@ func (h *emailHandler) admitSend(ctx context.Context, tenantID string, deliverab
 // retries the same key after Retry-After. It uses a fresh short context because
 // the request context may already be canceled, and a failure only means the
 // claim expires by its staleness window instead.
-func (h *emailHandler) releaseClaim(tenantID string, c *database.IdempotencyCompletion) {
+func (h *emailHandler) releaseClaim(tenantID string, c *database.IdempotencyCompletion, claimedAt time.Time) {
 	if c == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(context.Background()), 2*time.Second)
 	defer cancel()
-	if err := h.db.ReleaseIdempotencyClaim(ctx, tenantID, idempotency.OperationEmailsCreate, c.IdempotencyKey, c.Fingerprint); err != nil {
+	if err := h.db.ReleaseIdempotencyClaim(ctx, tenantID, idempotency.OperationEmailsCreate, c.IdempotencyKey, c.Fingerprint, claimedAt); err != nil {
 		h.abuse.log().Warn("idempotency_claim_release_failed")
 	}
 }

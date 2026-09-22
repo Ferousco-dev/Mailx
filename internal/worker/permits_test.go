@@ -310,3 +310,31 @@ func TestCrashedWorkerPermitIsRecoveredByTTL(t *testing.T) {
 		t.Fatalf("attempts = %d", attemptsFor(store.suppStore, "m1"))
 	}
 }
+
+// A job reclaimed after its claim lease expired carries a NEW token; it must hold its own permit rather than
+// refresh the original attempt's, so two concurrent attempts consume two permits.
+func TestReclaimedJobTakesItsOwnPermit(t *testing.T) {
+	store := &tenantStore{suppStore: newSuppStore(), tenant: "tenant-1"}
+	_, mk := permitRig(t, store)
+	perm := newFakePermits()
+	p := mk(1, WithPermits(perm, testPermitPolicy))
+	ctx := context.Background()
+	first := queue.Claim{Job: queue.Job{ID: "job-1", MessageID: "m"}, Token: 1}
+	reclaimed := queue.Claim{Job: queue.Job{ID: "job-1", MessageID: "m"}, Token: 2}
+	done1, ok1 := p.acquirePermits(ctx, first, "dest.example")
+	done2, ok2 := p.acquirePermits(ctx, reclaimed, "dest.example")
+	if !ok1 || !ok2 {
+		t.Fatalf("ok1=%v ok2=%v (limit 2 allows both)", ok1, ok2)
+	}
+	if perm.heldTotal() != 4 { // tenant + destination, twice
+		t.Fatalf("held %d permits, want 4: the reclaimer shared the original attempt's permit", perm.heldTotal())
+	}
+	done1()
+	if perm.heldTotal() != 2 {
+		t.Fatalf("releasing the first attempt must not release the reclaimer's permits: held %d", perm.heldTotal())
+	}
+	done2()
+	if perm.heldTotal() != 0 {
+		t.Fatalf("leak: %d", perm.heldTotal())
+	}
+}

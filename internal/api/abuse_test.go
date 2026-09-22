@@ -105,7 +105,7 @@ func newAbuseRig(t *testing.T, p ratelimit.Policy) *abuseRig {
 
 func (r *abuseRig) advance(d time.Duration) { r.now.Add(d.Microseconds()) }
 
-var abuseScopes = []string{string(auth.ScopeEmailsSend), string(auth.ScopeEmailsRead), string(auth.ScopeSuppressionsWrite), string(auth.ScopeSuppressionsRead)}
+var abuseScopes = []string{string(auth.ScopeEmailsSend), string(auth.ScopeEmailsRead), string(auth.ScopeSuppressionsWrite), string(auth.ScopeSuppressionsRead), string(auth.ScopeDomainsRead), string(auth.ScopeDomainsWrite)}
 
 // tenant creates a tenant with a verified example.com and returns an actor for it.
 func (r *abuseRig) tenant(name string) (database.Tenant, http.Handler) {
@@ -564,3 +564,20 @@ func benchRequestLimit(b *testing.B, withLimiter bool) {
 
 func BenchmarkRequestWithoutLimiter(b *testing.B) { benchRequestLimit(b, false) }
 func BenchmarkRequestWithLimiter(b *testing.B)    { benchRequestLimit(b, true) }
+
+// Every 503 carries Retry-After (the OpenAPI contract says so), including handlers that name none.
+func TestEvery503CarriesRetryAfter(t *testing.T) {
+	rig := newAbuseRig(t, testPolicy())
+	_, h := rig.tenant("acme")
+	// SPF/DMARC/DKIM services are not configured in this rig: their 503s named no interval before.
+	for _, tc := range []struct{ method, path string }{
+		{"GET", "/v1/domains/x/spf"}, {"POST", "/v1/domains/x/spf/verify"},
+		{"GET", "/v1/domains/x/dmarc"}, {"POST", "/v1/domains/x/dmarc/verify"},
+	} {
+		rec := doJSON(t, h, tc.method, tc.path, nil)
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s %s: %d (rig expected 503)", tc.method, tc.path, rec.Code)
+		}
+		retryAfter(t, rec)
+	}
+}

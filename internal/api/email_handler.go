@@ -159,13 +159,14 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// ClaimIdempotencyKey's doc for the concurrency design; PostgreSQL,
 	// not this handler, is what actually arbitrates concurrent claims.
 	var idemCompletion *database.IdempotencyCompletion
+	var idemClaimedAt time.Time
 	if idemKey != "" {
 		fingerprint, ferr := idempotency.Fingerprint(req)
 		if ferr != nil {
 			writeError(w, r, newError(ErrInternal, "internal_error", "failed to fingerprint request"))
 			return
 		}
-		resp, handled, herr := h.resolveIdempotency(r.Context(), tenantID, idemKey, fingerprint, now)
+		resp, handled, claimedAt, herr := h.resolveIdempotency(r.Context(), tenantID, idemKey, fingerprint, now)
 		if herr != nil {
 			writeError(w, r, herr)
 			return
@@ -175,6 +176,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusAccepted, resp)
 			return
 		}
+		idemClaimedAt = claimedAt
 		idemCompletion = &database.IdempotencyCompletion{Operation: idempotency.OperationEmailsCreate, IdempotencyKey: idemKey, Fingerprint: fingerprint}
 	}
 
@@ -182,7 +184,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// replays (handled above) and 409s never reach here, so they are never
 	// charged. A refusal releases the idempotency claim it owns.
 	if aerr := h.admitSend(r.Context(), tenantID, deliverable); aerr != nil {
-		h.releaseClaim(tenantID, idemCompletion)
+		h.releaseClaim(tenantID, idemCompletion, idemClaimedAt)
 		writeError(w, r, aerr)
 		return
 	}
@@ -250,20 +252,20 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 // immediately with resp (a replay) or err (a conflict/timeout) and must
 // NOT proceed to create a message; handled=false means the caller now
 // owns the claim and must complete it via IdempotencyCompletion.
-func (h *emailHandler) resolveIdempotency(ctx context.Context, tenantID, idemKey, fingerprint string, now time.Time) (resp email, handled bool, err *apiError) {
+func (h *emailHandler) resolveIdempotency(ctx context.Context, tenantID, idemKey, fingerprint string, now time.Time) (resp email, handled bool, claimedAt time.Time, err *apiError) {
 	claim, owned, dbErr := h.db.ClaimIdempotencyKey(ctx, tenantID, idempotency.OperationEmailsCreate, idemKey, fingerprint,
 		now.Add(idempotencyRetention), now.Add(-idempotencyStaleAfter))
 	if dbErr != nil {
-		return email{}, false, newError(ErrInternal, "internal_error", "failed to process idempotency key")
+		return email{}, false, time.Time{}, newError(ErrInternal, "internal_error", "failed to process idempotency key")
 	}
 	if owned {
-		return email{}, false, nil
+		return email{}, false, claim.CreatedAt, nil
 	}
 
 	if claim.Fingerprint != fingerprint {
 		// Never echo the original request back — only confirm reuse
 		// happened, not what the original payload contained.
-		return email{}, true, newError(ErrConflictType, "idempotency_key_conflict",
+		return email{}, true, time.Time{}, newError(ErrConflictType, "idempotency_key_conflict",
 			"this Idempotency-Key was already used with a different request")
 	}
 
@@ -271,7 +273,7 @@ func (h *emailHandler) resolveIdempotency(ctx context.Context, tenantID, idemKey
 		var perr *apiError
 		claim, perr = h.pollIdempotencyCompletion(ctx, tenantID, idemKey)
 		if perr != nil {
-			return email{}, true, perr
+			return email{}, true, time.Time{}, perr
 		}
 	}
 
@@ -283,9 +285,9 @@ func (h *emailHandler) resolveIdempotency(ctx context.Context, tenantID, idemKey
 	// status code itself are guaranteed stable across replays).
 	resp, ok := h.loadReplay(ctx, tenantID, claim)
 	if !ok {
-		return email{}, true, newError(ErrInternal, "internal_error", "failed to load the original result for this idempotency key")
+		return email{}, true, time.Time{}, newError(ErrInternal, "internal_error", "failed to load the original result for this idempotency key")
 	}
-	return resp, true, nil
+	return resp, true, time.Time{}, nil
 }
 
 // replayIfCompleted is the recovery path for a caller that lost the

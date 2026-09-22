@@ -155,7 +155,7 @@ func (db *DB) listTenantEvents(ctx context.Context, tenantID string, limit int, 
 		FROM events
 		WHERE tenant_id = $1
 		  AND ($2::timestamptz IS NULL OR (occurred_at, id) < ($2, $3))
-		  AND (NOT $5 OR event_type IN ('queued','delivered','deferred','failed','bounced'))
+		  AND (NOT $5 OR event_type IN ('queued','delivered','deferred','failed','bounced','suppressed'))
 		ORDER BY occurred_at DESC, id DESC
 		LIMIT $4`,
 		tenantID, afterTime, afterID, limit, publicOnly,

@@ -69,7 +69,10 @@ func (p *Pool) acquirePermits(ctx context.Context, c queue.Claim, domain string)
 	if p.permits == nil {
 		return noop, true
 	}
-	holder := c.Job.ID
+	// Unique per claim, not per job: a job reclaimed after its lease expired gets a
+	// new token, so the reclaiming worker takes its OWN permit instead of refreshing
+	// the original attempt's (which would let both send under one permit).
+	holder := fmt.Sprintf("%s:%d", c.Job.ID, c.Token)
 	var held []string
 	release := func() {
 		// Fresh context: the pool's own context may already be canceled on shutdown,

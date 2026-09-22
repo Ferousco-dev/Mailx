@@ -4,19 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
 // CountTenantQueued returns how many of a tenant's messages are not finished
-// (queued or processing), counting at most limit rows so the query cost is
+// (queued, processing or retrying: a retrying message is still undelivered), counting at most limit rows so the query cost is
 // bounded by the cap it is compared against, never by the size of the backlog.
 func (db *DB) CountTenantQueued(ctx context.Context, tenantID string, limit int) (int, error) {
 	var n int
 	err := db.pool.QueryRow(ctx, `
 		SELECT count(*) FROM (
 			SELECT 1 FROM messages
-			WHERE tenant_id = $1 AND status IN ('queued','processing')
+			WHERE tenant_id = $1 AND status IN ('queued','processing','retrying')
 			LIMIT $2
 		) s`, tenantID, limit).Scan(&n)
 	if err != nil {
@@ -56,15 +57,15 @@ func (db *DB) MessageTenant(ctx context.Context, messageID string) (string, erro
 
 // ReleaseIdempotencyClaim deletes an in-progress claim this request owns, used
 // when the request is refused AFTER claiming (a rate or capacity refusal). The
-// fingerprint guard means a claim that was reclaimed by another request is left
-// alone, and a completed key is never touched. A refused request must not
+// fingerprint AND claim-time guard mean a claim that was reclaimed by another
+// request (even an identical retry: a reclaim resets created_at) is left alone, and a completed key is never touched. A refused request must not
 // consume its key: the client retries the same key after Retry-After.
-func (db *DB) ReleaseIdempotencyClaim(ctx context.Context, tenantID, operation, key, fingerprint string) error {
+func (db *DB) ReleaseIdempotencyClaim(ctx context.Context, tenantID, operation, key, fingerprint string, claimedAt time.Time) error {
 	_, err := db.pool.Exec(ctx, `
 		DELETE FROM idempotency_keys
 		WHERE tenant_id = $1 AND operation = $2 AND idempotency_key = $3
-		  AND fingerprint = $4 AND status = 'in_progress'`,
-		tenantID, operation, key, fingerprint)
+		  AND fingerprint = $4 AND created_at = $5 AND status = 'in_progress'`,
+		tenantID, operation, key, fingerprint, claimedAt)
 	if err != nil {
 		return fmt.Errorf("database: release idempotency claim: %w", normalizeErr(err))
 	}

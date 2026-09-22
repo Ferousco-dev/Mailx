@@ -173,3 +173,6 @@ fmt, vet, builds (darwin, linux/amd64), `go test -count=1 ./...` and `-race` wit
 
 ## 2026-09-22 | G6-G8 | release-manager | GATE PASS (local)
 v0.31 complete pending commit. Not pushed. Next: v0.32 complaint/feedback loops (not started). OPERATIONAL NOTE: the running dev container still runs the v0.30 image; rebuilding it applies migration 000014 and turns the default limits ON (relevant to any script that sends fast).
+
+## 2026-09-22 | G5 | verifier | PR #16 REVIEW FIXES
+Greptile found 5 valid issues (DEF-023..027), all fixed with regression tests that each fail against the old code (mutation-checked). Full `go test -race ./...` with real PostgreSQL/Redis green. Architecture updated: queue cap counts retrying; permit holder is per claim; idempotency release is owner-guarded; every 503 carries Retry-After.

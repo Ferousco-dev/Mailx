@@ -69,6 +69,9 @@ type errorBody struct {
 	} `json:"error"`
 }
 
+// defaultUnavailableRetryAfter is the Retry-After (seconds) of a 503 that names none.
+const defaultUnavailableRetryAfter = 5
+
 func writeError(w http.ResponseWriter, r *http.Request, err *apiError) {
 	status, ok := errorStatus[err.Type]
 	if !ok {
@@ -81,8 +84,13 @@ func writeError(w http.ResponseWriter, r *http.Request, err *apiError) {
 	body.Error.RequestID = requestIDFromContext(r.Context())
 
 	w.Header().Set("Content-Type", "application/json")
-	if err.RetryAfter > 0 {
-		w.Header().Set("Retry-After", strconv.Itoa(err.RetryAfter))
+	retryAfter := err.RetryAfter
+	if retryAfter <= 0 && status == http.StatusServiceUnavailable {
+		// Every 503 carries Retry-After, as the OpenAPI contract states.
+		retryAfter = defaultUnavailableRetryAfter
+	}
+	if retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
