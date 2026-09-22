@@ -34,19 +34,25 @@ func TestBackoffPolicyExponentialDelaysAndCap(t *testing.T) {
 	}
 }
 
+// TestDefaultBackoffPolicy proves the front-loaded schedule (fast first
+// retries, slow later) applied to EVERY send — no separate "urgent" tier,
+// no opt-in field. Delay(1) is fast enough that a momentary transient
+// failure (e.g. a DNS timeout) is retried almost immediately, which is
+// what makes time-critical mail (OTPs, resets) survive a blip without the
+// caller doing anything differently.
 func TestDefaultBackoffPolicy(t *testing.T) {
 	policy := DefaultBackoffPolicy()
-	if policy.Base != 30*time.Minute || policy.Max != 4*time.Hour {
+	wants := []time.Duration{
+		5 * time.Second,
+		5 * time.Minute,
+		30 * time.Minute,
+		2 * time.Hour,
+		5 * time.Hour,
+	}
+	if len(policy.Schedule) != len(wants) {
 		t.Fatalf("DefaultBackoffPolicy() = %+v", policy)
 	}
-
-	wants := []time.Duration{
-		30 * time.Minute,
-		time.Hour,
-		2 * time.Hour,
-		4 * time.Hour,
-		4 * time.Hour,
-	}
+	var total time.Duration
 	for i, want := range wants {
 		got, err := policy.Delay(i + 1)
 		if err != nil {
@@ -55,7 +61,19 @@ func TestDefaultBackoffPolicy(t *testing.T) {
 		if got != want {
 			t.Fatalf("Delay(%d) = %s, want %s", i+1, got, want)
 		}
+		total += got
 	}
+	// Delay(1) must be fast enough to matter for a 5-minute OTP window —
+	// the whole point of front-loading.
+	if wants[0] >= 5*time.Minute {
+		t.Fatalf("first retry (%s) is not fast enough to help a 5-minute OTP", wants[0])
+	}
+	// Beyond the schedule's length, the last entry repeats (never grows
+	// unbounded, never wraps to zero/negative).
+	if got, err := policy.Delay(len(wants) + 5); err != nil || got != wants[len(wants)-1] {
+		t.Fatalf("Delay beyond schedule length = %s, %v; want %s repeated", got, err, wants[len(wants)-1])
+	}
+	t.Logf("total exhaustion across %d attempts: %s", len(wants), total)
 }
 
 func TestBackoffPolicyRejectsInvalidInput(t *testing.T) {

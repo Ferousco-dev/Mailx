@@ -16,9 +16,19 @@ var (
 )
 
 // BackoffPolicy calculates deterministic delays between delivery operations.
+//
+// Two mutually exclusive shapes: an explicit Schedule (front-loaded delays,
+// one per attempt, the last entry repeating for any attempt beyond its
+// length — see DefaultBackoffPolicy), or the older Base/Max exponential-
+// doubling shape (kept for callers that construct a BackoffPolicy
+// themselves rather than using DefaultBackoffPolicy). Delay checks Schedule
+// first.
 type BackoffPolicy struct {
-	Base time.Duration
-	Max  time.Duration
+	// Schedule, if non-empty, is used instead of Base/Max: Schedule[attempt-1],
+	// clamped to Schedule[len(Schedule)-1] for any attempt beyond it.
+	Schedule []time.Duration
+	Base     time.Duration
+	Max      time.Duration
 	// JitterPercent spreads retry times by up to +/- this percent (0-50) so many
 	// messages that failed at the same moment (a remote outage) do not all retry at
 	// the same moment again (a retry storm). Zero disables jitter. Jitter never
@@ -57,22 +67,52 @@ func (p BackoffPolicy) Jitter(delay time.Duration, seed int64) time.Duration {
 	return out
 }
 
-// DefaultBackoffPolicy returns RFC-aligned initial defaults. They remain
-// explicit policy values and can be replaced as MailX deployment needs evolve.
+// DefaultBackoffPolicy is front-loaded (fast first retries, slow later),
+// applied to EVERY send — there is no separate "urgent" opt-in. A transient
+// failure (a momentary DNS timeout, a brief MX outage) is retried almost
+// immediately, so time-critical mail (OTPs, password resets, magic links)
+// recovers from a blip fast enough to still be useful, without requiring
+// the caller to remember to flag anything. It still backs off to hours for
+// a genuinely down destination, so this is not a retry-storm risk for bulk
+// mail either — only the FIRST few retries are fast, same as every prior
+// schedule considered for this project (Resend's webhook-retry schedule is
+// the pattern this follows, front-loaded then slow: see the design
+// discussion). Total exhaustion across DefaultAttemptLimit's 5 operations:
+// ~7h35m — a genuinely broken destination still gets abandoned in about the
+// same overall window as the previous exponential default, it just spends
+// that window very differently.
 func DefaultBackoffPolicy() BackoffPolicy {
 	return BackoffPolicy{
-		Base: 30 * time.Minute,
-		Max:  4 * time.Hour,
+		Schedule: []time.Duration{
+			5 * time.Second,
+			5 * time.Minute,
+			30 * time.Minute,
+			2 * time.Hour,
+			5 * time.Hour,
+		},
 	}
 }
 
 // Delay returns the wait after completed delivery operation attempt and before
 // operation attempt+1. Public attempt numbering starts at one, matching State.
-// The uncapped formula is Base * 2^(attempt-1); Max caps every result, including
-// configurations where Max is smaller than Base.
+// If Schedule is set it is used directly (clamped to its last entry beyond
+// its length); otherwise the uncapped formula is Base * 2^(attempt-1), with
+// Max capping every result, including configurations where Max is smaller
+// than Base.
 func (p BackoffPolicy) Delay(attempt int) (time.Duration, error) {
 	if attempt <= 0 {
 		return 0, fmt.Errorf("%w: got %d", ErrInvalidAttempt, attempt)
+	}
+	if len(p.Schedule) > 0 {
+		idx := attempt - 1
+		if idx >= len(p.Schedule) {
+			idx = len(p.Schedule) - 1
+		}
+		d := p.Schedule[idx]
+		if d <= 0 {
+			return 0, fmt.Errorf("%w: schedule[%d] is %s", ErrInvalidBackoff, idx, d)
+		}
+		return d, nil
 	}
 	if p.Base <= 0 {
 		return 0, fmt.Errorf("%w: base is %s", ErrInvalidBackoff, p.Base)

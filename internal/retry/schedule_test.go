@@ -26,9 +26,9 @@ func TestNextScheduleUsesRetryLevelAttemptNumber(t *testing.T) {
 		delay time.Duration
 		next  time.Time
 	}{
+		{delay: 5 * time.Second, next: time.Date(2026, time.September, 14, 10, 0, 5, 0, time.UTC)},
+		{delay: 5 * time.Minute, next: time.Date(2026, time.September, 14, 10, 5, 0, 0, time.UTC)},
 		{delay: 30 * time.Minute, next: time.Date(2026, time.September, 14, 10, 30, 0, 0, time.UTC)},
-		{delay: time.Hour, next: time.Date(2026, time.September, 14, 11, 0, 0, 0, time.UTC)},
-		{delay: 2 * time.Hour, next: time.Date(2026, time.September, 14, 12, 0, 0, 0, time.UTC)},
 	}
 
 	for i, want := range wants {
@@ -126,7 +126,7 @@ func TestNextScheduleIsDeterministicAndNormalizesUTC(t *testing.T) {
 	state := temporaryState(t, 1)
 	zone := time.FixedZone("WAT", 60*60)
 	now := time.Date(2026, time.September, 14, 11, 0, 0, 123, zone)
-	want := time.Date(2026, time.September, 14, 10, 30, 0, 123, time.UTC)
+	want := time.Date(2026, time.September, 14, 10, 0, 5, 123, time.UTC)
 
 	first, err := NextSchedule(state, DefaultBackoffPolicy(), DefaultAttemptLimit(), now)
 	if err != nil {
