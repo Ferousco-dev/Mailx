@@ -73,9 +73,18 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	// DialTimeout is already enforced via dialCtx in Send (see below); the
+	// Dialer itself only needs LocalAddr, never a duplicate Timeout field.
+	dialer := &net.Dialer{}
+	if normalized.SourceIP != nil {
+		// Port 0: let the OS pick an ephemeral source port, only the IP is
+		// pinned. A bad/unassigned SourceIP fails at Dial time with a clear
+		// "bind: cannot assign requested address" — never silently ignored.
+		dialer.LocalAddr = &net.TCPAddr{IP: normalized.SourceIP}
+	}
 	return &Client{
 		config: normalized,
-		dialer: (&net.Dialer{}).DialContext,
+		dialer: dialer.DialContext,
 	}, nil
 }
 

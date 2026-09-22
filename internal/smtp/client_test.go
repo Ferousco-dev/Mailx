@@ -847,3 +847,67 @@ func asDelivery(err error, out **DeliveryError) bool {
 	}
 	return false
 }
+
+// TestClientSourceIPIsWiredIntoDialer proves ClientConfig.SourceIP actually
+// binds the outbound connection's local address, rather than merely being
+// recorded. A second loopback alias (e.g. 127.0.0.2) isn't reliably bindable
+// on every dev machine (macOS doesn't alias all of 127.0.0.0/8 to lo0 the way
+// Linux does), so instead this uses a TEST-NET-3 address (RFC 5737,
+// 203.0.113.0/24) that is guaranteed to never be a local address anywhere. If
+// SourceIP were ignored by the dialer, the dial would proceed normally and
+// fail only on connect/timeout; because it's wired into net.Dialer.LocalAddr,
+// the OS rejects the bind before any connection attempt is made.
+func TestClientSourceIPIsWiredIntoDialer(t *testing.T) {
+	srv := startScripted(t, normalHandler)
+	defer srv.stop()
+
+	cfg := testClientConfig()
+	cfg.SourceIP = net.ParseIP("203.0.113.1")
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.Send(context.Background(), DeliveryRequest{
+		Address: srv.address(),
+		Envelope: mail.Envelope{
+			MailFrom:   "<alice@example.com>",
+			Recipients: []string{"<bob@example.com>"},
+		},
+		Raw: "From: <alice@example.com>\r\nTo: <bob@example.com>\r\nSubject: hi\r\n\r\nbody\r\n",
+	})
+	if err == nil {
+		t.Fatal("expected dial to fail binding an unassigned SourceIP, got nil error")
+	}
+	if !strings.Contains(err.Error(), "assign") && !strings.Contains(err.Error(), "bind") {
+		t.Fatalf("expected a bind/assign error proving SourceIP reached the dialer, got: %v", err)
+	}
+}
+
+// TestClientSourceIPLoopbackStillWorks confirms the common case: an explicit
+// SourceIP that IS locally assignable (127.0.0.1, always bindable) still
+// completes a normal delivery end-to-end.
+func TestClientSourceIPLoopbackStillWorks(t *testing.T) {
+	srv := startScripted(t, normalHandler)
+	defer srv.stop()
+
+	cfg := testClientConfig()
+	cfg.SourceIP = net.ParseIP("127.0.0.1")
+	c, err := NewClient(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.Send(context.Background(), DeliveryRequest{
+		Address: srv.address(),
+		Envelope: mail.Envelope{
+			MailFrom:   "<alice@example.com>",
+			Recipients: []string{"<bob@example.com>"},
+		},
+		Raw: "From: <alice@example.com>\r\nTo: <bob@example.com>\r\nSubject: hi\r\n\r\nbody\r\n",
+	})
+	if err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if !res.Accepted || res.FinalCode != 250 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+}

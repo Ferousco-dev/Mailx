@@ -71,6 +71,19 @@ type NewDeliveryAttempt struct {
 	// the SAME transaction (a qualifying recipient hard bounce; the policy lives in
 	// internal/suppression). It is ignored unless the decision is terminal failure.
 	SuppressRecipient bool
+	// SendingMemberID, TransportKind, EffectiveHostname and
+	// EffectiveSourceIP (v0.39) are a historical snapshot of the outbound
+	// infrastructure THIS attempt actually used, taken at attempt time.
+	// They are deliberately denormalized (no FK to sending_pool_members):
+	// unlike messages.sending_member_id (the durable routing decision,
+	// which can be looked up live), these must keep answering "what
+	// actually sent this" even after the member/pool config later
+	// changes. All empty/zero on the legacy no-pool path. Never a
+	// secret/credential.
+	SendingMemberID   string
+	TransportKind     string
+	EffectiveHostname string
+	EffectiveSourceIP string
 }
 
 func (n NewDeliveryAttempt) validate() error {
@@ -110,6 +123,14 @@ type DeliveryAttempt struct {
 	StartedAt      time.Time
 	FinishedAt     time.Time
 	CreatedAt      time.Time
+	// SendingMemberID, TransportKind, EffectiveHostname and
+	// EffectiveSourceIP are the historical outbound-infrastructure
+	// snapshot described on NewDeliveryAttempt. Nil on the legacy
+	// no-pool path.
+	SendingMemberID   *string
+	TransportKind     *string
+	EffectiveHostname *string
+	EffectiveSourceIP *string
 }
 
 // InsertDeliveryAttempt persists one retry-level delivery operation.
@@ -134,16 +155,21 @@ func (db *DB) InsertDeliveryAttempt(ctx context.Context, in NewDeliveryAttempt) 
 	err = db.pool.QueryRow(ctx, `
 		INSERT INTO delivery_attempts
 			(id, message_id, attempt_number, decision, kind, accepted, final_code, enhanced_status,
-			 remote_message, failure_stage, recipient, quit_error, mx_attempts, started_at, finished_at)
-		VALUES ($1,$2,$3,$4,$5,$6, NULLIF($7,0), NULLIF($8,''), NULLIF($9,''), NULLIF($10,''), NULLIF($11,''), NULLIF($12,''), $13,$14,$15)
+			 remote_message, failure_stage, recipient, quit_error, mx_attempts, started_at, finished_at,
+			 sending_member_id, transport_kind, effective_hostname, effective_source_ip)
+		VALUES ($1,$2,$3,$4,$5,$6, NULLIF($7,0), NULLIF($8,''), NULLIF($9,''), NULLIF($10,''), NULLIF($11,''), NULLIF($12,''), $13,$14,$15,
+			NULLIF($16,''), NULLIF($17,''), NULLIF($18,''), NULLIF($19,'')::inet)
 		RETURNING id, message_id, attempt_number, decision, kind, accepted, final_code, enhanced_status,
-			remote_message, failure_stage, recipient, quit_error, mx_attempts, started_at, finished_at, created_at`,
+			remote_message, failure_stage, recipient, quit_error, mx_attempts, started_at, finished_at, created_at,
+			sending_member_id, transport_kind, effective_hostname, host(effective_source_ip)`,
 		id, in.MessageID, in.AttemptNumber, in.Decision, in.Kind, in.Accepted,
 		in.FinalCode, in.EnhancedStatus, in.RemoteMessage, in.FailureStage, in.Recipient, in.QuitError,
 		mxJSON, in.StartedAt, in.FinishedAt,
+		in.SendingMemberID, in.TransportKind, in.EffectiveHostname, in.EffectiveSourceIP,
 	).Scan(&out.ID, &out.MessageID, &out.AttemptNumber, &out.Decision, &out.Kind, &out.Accepted,
 		&out.FinalCode, &out.EnhancedStatus, &out.RemoteMessage, &out.FailureStage, &out.Recipient, &out.QuitError,
-		&mxRaw, &out.StartedAt, &out.FinishedAt, &out.CreatedAt)
+		&mxRaw, &out.StartedAt, &out.FinishedAt, &out.CreatedAt,
+		&out.SendingMemberID, &out.TransportKind, &out.EffectiveHostname, &out.EffectiveSourceIP)
 	if err != nil {
 		return DeliveryAttempt{}, fmt.Errorf("database: insert delivery attempt: %w", normalizeErr(err))
 	}
@@ -158,7 +184,8 @@ func (db *DB) InsertDeliveryAttempt(ctx context.Context, in NewDeliveryAttempt) 
 func (db *DB) ListDeliveryAttempts(ctx context.Context, messageID string) ([]DeliveryAttempt, error) {
 	rows, err := db.pool.Query(ctx, `
 		SELECT id, message_id, attempt_number, decision, kind, accepted, final_code, enhanced_status,
-			remote_message, failure_stage, recipient, quit_error, mx_attempts, started_at, finished_at, created_at
+			remote_message, failure_stage, recipient, quit_error, mx_attempts, started_at, finished_at, created_at,
+			sending_member_id, transport_kind, effective_hostname, host(effective_source_ip)
 		FROM delivery_attempts WHERE message_id = $1 ORDER BY attempt_number`,
 		messageID,
 	)
@@ -173,7 +200,8 @@ func (db *DB) ListDeliveryAttempts(ctx context.Context, messageID string) ([]Del
 		var mxRaw []byte
 		if err := rows.Scan(&a.ID, &a.MessageID, &a.AttemptNumber, &a.Decision, &a.Kind, &a.Accepted,
 			&a.FinalCode, &a.EnhancedStatus, &a.RemoteMessage, &a.FailureStage, &a.Recipient, &a.QuitError,
-			&mxRaw, &a.StartedAt, &a.FinishedAt, &a.CreatedAt); err != nil {
+			&mxRaw, &a.StartedAt, &a.FinishedAt, &a.CreatedAt,
+			&a.SendingMemberID, &a.TransportKind, &a.EffectiveHostname, &a.EffectiveSourceIP); err != nil {
 			return nil, fmt.Errorf("database: scan delivery attempt: %w", err)
 		}
 		if err := json.Unmarshal(mxRaw, &a.MXAttempts); err != nil {

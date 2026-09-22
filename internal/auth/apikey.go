@@ -89,6 +89,11 @@ const (
 	// same abuse controls/suppression authority as a normal send.
 	ScopeBroadcastsRead  Scope = "broadcasts:read"
 	ScopeBroadcastsWrite Scope = "broadcasts:write"
+	// Analytics (v0.38): read-only derived facts over existing durable data.
+	// No analytics:write — analytics has no writable resource of its own,
+	// and emails:read/broadcasts:read do NOT imply it (a key scoped to read
+	// one message should not automatically see tenant-wide aggregates).
+	ScopeAnalyticsRead Scope = "analytics:read"
 )
 
 // ValidScopes lists every scope MailX currently understands - grown only
@@ -98,6 +103,7 @@ var ValidScopes = []Scope{
 	ScopeWebhooksRead, ScopeWebhooksWrite, ScopeSuppressionsRead, ScopeSuppressionsWrite,
 	ScopeTemplatesRead, ScopeTemplatesWrite, ScopeContactsRead, ScopeContactsWrite,
 	ScopeAudiencesRead, ScopeAudiencesWrite, ScopeBroadcastsRead, ScopeBroadcastsWrite,
+	ScopeAnalyticsRead,
 }
 
 func ValidScope(s string) bool {

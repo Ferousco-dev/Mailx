@@ -2,6 +2,7 @@ package smtp
 
 import (
 	"fmt"
+	"net"
 	"strings"
 	"time"
 )
@@ -41,6 +42,13 @@ type ClientConfig struct {
 	// AuthObserver receives one bounded event per Send that carried
 	// credentials. Nil disables it; a panicking observer cannot affect delivery.
 	AuthObserver AuthObserver
+	// SourceIP, if set, binds the outbound TCP connection's local address
+	// (v0.39 sending pools: a direct-delivery pool member's configured
+	// egress IP). Nil means the OS chooses — unchanged pre-v0.39 behavior.
+	// Actually dialing from this address (not just recording it) matters:
+	// PTR/SPF/reputation are properties of the IP a receiver's TCP stack
+	// actually observes, not of a database column (see client.go's dialer).
+	SourceIP net.IP
 }
 
 // DefaultClientConfig returns the finite default configuration.

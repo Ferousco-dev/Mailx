@@ -106,11 +106,24 @@ type coordOutcome struct {
 }
 
 type fakeOutcomeStore struct {
-	mu       sync.Mutex
-	terminal map[string]bool
-	attempts map[string][]retry.DeliveryAttempt
-	next     map[string]time.Time
-	persist  func(context.Context, string, retry.DeliveryAttempt, retry.Outcome) error
+	mu            sync.Mutex
+	terminal      map[string]bool
+	attempts      map[string][]retry.DeliveryAttempt
+	next          map[string]time.Time
+	sendingMember map[string]string
+	persist       func(context.Context, string, retry.DeliveryAttempt, retry.Outcome) error
+}
+
+// setSendingMember gives messageID a durable v0.39 routing decision, as
+// InsertMessage would — tests use this to exercise
+// worker.holdIfMemberDisabled's gates.
+func (s *fakeOutcomeStore) setSendingMember(messageID, memberID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sendingMember == nil {
+		s.sendingMember = map[string]string{}
+	}
+	s.sendingMember[messageID] = memberID
 }
 
 func newFakeOutcomeStore() *fakeOutcomeStore {
@@ -136,7 +149,11 @@ func (s *fakeOutcomeStore) Load(_ context.Context, messageID string) (DurableDel
 	if at, ok := s.next[messageID]; ok {
 		next = &at
 	}
-	return DurableDeliveryState{RetryState: state, Terminal: s.terminal[messageID], NextRetryAt: next}, nil
+	var sendingMember *string
+	if m, ok := s.sendingMember[messageID]; ok {
+		sendingMember = &m
+	}
+	return DurableDeliveryState{RetryState: state, Terminal: s.terminal[messageID], NextRetryAt: next, SendingMemberID: sendingMember}, nil
 }
 
 func (s *fakeOutcomeStore) Persist(ctx context.Context, messageID string, attempt retry.DeliveryAttempt, outcome retry.Outcome) error {

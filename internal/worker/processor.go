@@ -35,6 +35,9 @@ func (p *Pool) processOne(ctx context.Context, c queue.Claim) {
 		p.release(c, *durable.NextRetryAt)
 		return
 	}
+	if durable.SendingMemberID != nil && p.holdIfMemberDisabled(ctx, c, *durable.SendingMemberID) {
+		return
+	}
 	state := p.states.getOrSet(c.Job.ID, durable.RetryState)
 
 	loaded, err := p.loader.Load(c.Job.MessageID)
@@ -65,13 +68,18 @@ func (p *Pool) processOne(ctx context.Context, c queue.Claim) {
 	}
 	defer donePermits()
 
+	var memberID string
+	if durable.SendingMemberID != nil {
+		memberID = *durable.SendingMemberID
+	}
 	req := delivery.Request{
 		Domain: domain,
 		Envelope: mail.Envelope{
 			MailFrom:   loaded.Metadata.Envelope.MailFrom,
 			Recipients: recipients,
 		},
-		Raw: string(loaded.Raw),
+		Raw:      string(loaded.Raw),
+		MemberID: memberID,
 	}
 
 	outcome, attemptErr := p.coordinator.Attempt(ctx, state, req, p.now())

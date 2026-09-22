@@ -150,6 +150,49 @@ const openAPISpec = `{
         }
       }
     },
+    "/analytics/overview": {
+      "get": {
+        "summary": "Sending analytics overview",
+        "description": "Requires analytics:read. Derived facts over MailX's own durable events (queued/delivered/deferred/bounced/failed/suppressed/complained), never a second delivery-truth source. 'delivered' means the remote SMTP server accepted final DATA (2xx) - it is NOT inbox placement, not spam-folder avoidance, and not proof a human read the message; MailX cannot observe any of those. An earlier accepted fact is never erased by a later async bounce/complaint - both remain true and both are counted (email.bounced is reused for both a synchronous rejection and v0.32's asynchronous DSN feedback). from/to are RFC 3339 and required; the range is [from, to) (half-open: an event at exactly 'to' is excluded) and capped at 90 days. currently_suppressed is a CURRENT-STATE snapshot (how many addresses are suppressed for this account right now), not a time-bucketed historical count like the other fields - it does not depend on from/to.",
+        "parameters": [
+          {"name": "from", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}},
+          {"name": "to", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}}
+        ],
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AnalyticsOverview"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/analytics/timeseries": {
+      "get": {
+        "summary": "Sending analytics timeseries",
+        "description": "Requires analytics:read. Same event-derived counts as the overview, bucketed by interval (UTC). A bucket with no events in it is simply ABSENT from the response (sparse - not zero-filled); build a zero-filled chart client-side if needed. Range is capped (90 days) and bucket count is capped (744, e.g. 31 days hourly or ~2 years daily) - an oversized range/interval combination is rejected (422), never silently returning tens of thousands of points.",
+        "parameters": [
+          {"name": "from", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}},
+          {"name": "to", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}},
+          {"name": "interval", "in": "query", "required": true, "schema": {"type": "string", "enum": ["hour", "day"]}}
+        ],
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/AnalyticsBucket"}}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/analytics/broadcasts/{id}": {
+      "get": {
+        "summary": "Broadcast analytics",
+        "description": "Requires analytics:read. Recipient/orchestration counts come from the Broadcast's OWN durable snapshot (broadcast_recipients, frozen at acceptance - see v0.36) - never live Audience membership, which may have changed since. intended is the full snapshotted recipient count and is NOT a delivery guarantee: some may still be pending/suppressed/recipient_failed. delivered/bounced/complained/failed are the events-table breakdown for recipients that reached materialization, with the same semantics as the overview endpoint's fields. Another account's broadcast is indistinguishable from a missing one (404).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BroadcastAnalytics"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/audiences": {
       "post": {
         "summary": "Create an audience",
@@ -563,6 +606,34 @@ const openAPISpec = `{
         }
       }
     },
+    "/domains/{id}/bimi": {
+      "get": {
+        "summary": "BIMI (brand indicator) readiness identity model for a domain",
+        "description": "Requires domains:read. NO DNS query is made (readiness 'unchecked'). BIMI (Brand Indicators for Message Identification, see draft-brand-indicators-for-message-identification) lets a mailbox provider show a brand logo next to a message, IF that provider chooses to and IF its own checks pass. MailX only reports its OWN checks; it never claims a logo will actually display. See the 'disclaimer' field, present on every response.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "BIMI identity model", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BimiStatus"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/domains/{id}/bimi/verify": {
+      "post": {
+        "summary": "Inspect the domain's published BIMI record and MailX's readiness",
+        "description": "Requires domains:write and a VERIFIED domain (409 domain_not_verified otherwise, with no DNS query). Queries the default selector's TXT record (default._bimi.<domain>), falling back to the DMARC Organizational Domain if the domain itself published nothing. Also runs one full DMARC verification, since BIMI's DNS prerequisite is: the domain's DMARC effective policy must not be 'none' (MailX's DMARC follows RFC 9989, which removed the pct= partial-rollout tag entirely, so no separate pct check applies). Pass ?validate_assets=true to additionally fetch (HTTPS only, bounded size/time, no redirects followed, SSRF/DNS-rebinding protected — private, loopback and link-local addresses are always rejected even after DNS resolution) and structurally validate the referenced logo (SVG Tiny Portable/Secure profile: version=1.2, baseProfile=tiny-ps, a square viewBox, a title element, and none of script/foreignObject/image/style/animate elements or any external href) and, if published, the authority certificate (VMC/CMC) — parsed with crypto/x509 for structural facts (subject, issuer, validity window) ONLY; MailX has no BIMI-authority trust store, builds no certificate chain, and does not check revocation. 'dns.status': 'found', 'not_configured', 'invalid' (malformed record, or more than one BIMI-tagged TXT record at one name), 'temporary_error'. 'readiness': 'not_configured', 'declined' (the domain published l= empty, an explicit statement of no logo), 'invalid_record', 'dmarc_prerequisite_failed', 'logo_issue' / 'certificate_issue' (only meaningful when validate_assets=true), 'ready', or 'unknown' (DNS failure; nothing concluded). READINESS IS MAILX'S OWN CHECKS ONLY: see the mandatory 'disclaimer' field on every response — 'ready' never means any mailbox provider will display the logo; providers retain full discretion. This call stores nothing and changes no domain or DMARC state; it never blocks or slows sending.",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "validate_assets", "in": "query", "required": false, "schema": {"type": "boolean", "default": false}, "description": "Also fetch and structurally validate the logo and, if published, the certificate. Adds up to two bounded outbound HTTPS requests."}
+        ],
+        "responses": {
+          "200": {"description": "Verification result", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BimiStatus"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/domains/{id}/spf": {
       "get": {
         "summary": "SPF guidance for a domain",
@@ -669,6 +740,50 @@ const openAPISpec = `{
         "properties": {
           "data": {"type": "array", "items": {"$ref": "#/components/schemas/BroadcastRecipient"}},
           "next_cursor": {"type": "string", "nullable": true}
+        }
+      },
+      "AnalyticsCounts": {
+        "type": "object",
+        "description": "Event-derived counts. Not mutually exclusive with each other for the SAME message: e.g. queued=1 and bounced=1 can both be true (an accepted message that later bounced). See /analytics/overview's description for exact semantics of each field.",
+        "properties": {
+          "queued": {"type": "integer", "description": "Message accepted BY MAILX (durable acceptance). Not inbox placement."},
+          "delivered": {"type": "integer", "description": "Remote SMTP server accepted final DATA (2xx). Not inbox placement."},
+          "deferred": {"type": "integer", "description": "A temporary failure occurred on an attempt; the message may still succeed on retry."},
+          "bounced": {"type": "integer", "description": "Reused for both a synchronous rejection and v0.32 asynchronous DSN feedback."},
+          "failed": {"type": "integer", "description": "A permanent (non-retriable) delivery failure."},
+          "suppressed": {"type": "integer", "description": "This specific send was skipped because the recipient was already suppressed at send time."},
+          "complained": {"type": "integer", "description": "v0.32 asynchronous complaint feedback matched a recipient of this message."}
+        }
+      },
+      "AnalyticsOverview": {
+        "type": "object",
+        "properties": {
+          "from": {"type": "string", "format": "date-time"},
+          "to": {"type": "string", "format": "date-time"},
+          "counts": {"$ref": "#/components/schemas/AnalyticsCounts"},
+          "currently_suppressed": {"type": "integer", "description": "CURRENT-STATE snapshot of how many addresses are suppressed for this account right now - independent of from/to, not a historical/time-bucketed count."}
+        }
+      },
+      "AnalyticsBucket": {
+        "type": "object",
+        "properties": {
+          "timestamp": {"type": "string", "format": "date-time", "description": "The bucket's start, UTC, truncated to the requested interval."},
+          "counts": {"$ref": "#/components/schemas/AnalyticsCounts"}
+        }
+      },
+      "BroadcastAnalytics": {
+        "type": "object",
+        "properties": {
+          "broadcast_id": {"type": "string"},
+          "intended": {"type": "integer", "description": "Total snapshotted recipient count from the Broadcast's own durable snapshot (never live Audience membership). NOT a delivery guarantee."},
+          "pending": {"type": "integer"},
+          "suppressed": {"type": "integer", "description": "Suppressed at broadcast-materialization time (recipient-level historical fact)."},
+          "materialized": {"type": "integer", "description": "Handed off to the normal send pipeline (database.InsertMessage) - see delivered/bounced/complained/failed below for their outcome."},
+          "recipient_failed": {"type": "integer", "description": "Reached the bounded materialization-retry limit (migration 000021) - a terminal per-recipient state, distinct from the events-derived 'failed' field below."},
+          "delivered": {"type": "integer"},
+          "bounced": {"type": "integer"},
+          "complained": {"type": "integer"},
+          "failed": {"type": "integer"}
         }
       },
       "Audience": {
@@ -894,6 +1009,35 @@ const openAPISpec = `{
             "type": {"type": "string", "enum": ["TXT"]}, "name": {"type": "string"},
             "value": {"type": "string", "description": "Only set for create: 'v=DMARC1; p=none'. An existing policy is never rewritten."}}},
           "warnings": {"type": "array", "items": {"type": "string", "enum": ["deprecated_tag", "ignored_report_uri", "policy_defaulted_from_rua", "policy_not_enforcing", "testing_mode", "failure_reporting_enabled", "external_report_destination", "relay_may_alter_signed_content"]}}
+        }
+      },
+      "BimiStatus": {
+        "type": "object", "required": ["domain_id", "domain", "selector", "readiness", "dns", "dmarc", "logo", "certificate", "disclaimer"],
+        "properties": {
+          "domain_id": {"type": "string"}, "domain": {"type": "string"},
+          "selector": {"type": "string", "enum": ["default"], "description": "MailX only checks the domain-wide default selector; it does not add a per-message BIMI-Selector header."},
+          "readiness": {"type": "string", "enum": ["unchecked", "not_configured", "declined", "invalid_record", "dmarc_prerequisite_failed", "logo_issue", "certificate_issue", "ready", "unknown"], "description": "MailX's OWN checks only. Never a display guarantee — see 'disclaimer'."},
+          "dns": {"type": "object", "required": ["status", "declined"], "properties": {
+            "status": {"type": "string", "enum": ["unchecked", "not_configured", "found", "invalid", "temporary_error"]},
+            "reason": {"type": "string"}, "source": {"type": "string", "enum": ["domain", "organizational_domain"]},
+            "record_name": {"type": "string"}, "published_record": {"type": "string"},
+            "logo_location": {"type": "string", "description": "The l= URL (HTTPS)."},
+            "authority_location": {"type": "string", "description": "The a= URL (HTTPS), if published."},
+            "declined": {"type": "boolean", "description": "l= was published empty: an explicit statement of no logo."}}},
+          "dmarc": {"type": "object", "required": ["checked"], "properties": {
+            "checked": {"type": "boolean"},
+            "effective_policy": {"type": "string", "enum": ["none", "quarantine", "reject"]},
+            "organizational_domain": {"type": "string"}}},
+          "logo": {"type": "object", "required": ["checked"], "properties": {
+            "checked": {"type": "boolean", "description": "False unless ?validate_assets=true was passed."},
+            "valid": {"type": "boolean"}, "fetch_error": {"type": "string"},
+            "reasons": {"type": "array", "items": {"type": "string"}, "description": "SVG Tiny Portable/Secure structural check failures, e.g. contains_script_element, missing_title_element, viewbox_not_square."}}},
+          "certificate": {"type": "object", "required": ["checked"], "properties": {
+            "checked": {"type": "boolean"}, "parseable": {"type": "boolean"},
+            "fetch_error": {"type": "string"}, "parse_error": {"type": "string"},
+            "subject": {"type": "string"}, "issuer": {"type": "string"},
+            "currently_valid": {"type": "boolean", "description": "NotBefore/NotAfter window only — not chain-of-trust or revocation."}}},
+          "disclaimer": {"type": "string", "description": "MailX readiness is not a guarantee of mailbox-provider display."}
         }
       },
       "CreateSuppressionRequest": {

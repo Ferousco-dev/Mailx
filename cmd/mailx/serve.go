@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/queue"
 	"github.com/Ferousco-dev/mailx/internal/retry"
+	"github.com/Ferousco-dev/mailx/internal/routing"
 	"github.com/Ferousco-dev/mailx/internal/smtp"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 	"github.com/Ferousco-dev/mailx/internal/transfer"
@@ -103,6 +105,10 @@ func runFull() error {
 	if err != nil {
 		return err
 	}
+	bimiSvc, err := buildBIMI(db, dmarcSvc)
+	if err != nil {
+		return err
+	}
 	webhookRuntime, err := buildWebhookRuntime(db, o)
 	if err != nil {
 		return err
@@ -113,7 +119,7 @@ func runFull() error {
 	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
-		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, MessageIDDomain: ident.Name(), Abuse: abuse.apiControls(o),
+		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, BIMI: bimiSvc, MessageIDDomain: ident.Name(), Abuse: abuse.apiControls(o),
 		Feedback: fbCfg,
 		Ready:    ready.Check,
 		Logger:   o.log, Metrics: o.metrics,
@@ -340,20 +346,108 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o
 	if err != nil {
 		return nil, err
 	}
+	router, err := buildRouter(db, engine, relay != nil, tlsCfg, o.metrics)
+	if err != nil {
+		return nil, err
+	}
 	backoff := retry.DefaultBackoffPolicy()
 	backoff.JitterPercent = abuse.retryJitter()
-	coordinator, err := retry.NewCoordinator(engine, backoff, retry.DefaultAttemptLimit())
+	coordinator, err := retry.NewCoordinator(router, backoff, retry.DefaultAttemptLimit())
 	if err != nil {
 		return nil, err
 	}
 
 	workers := envInt("MAILX_WORKERS", 4)
 	opts := append([]worker.Option{worker.WithOnError(o.errLogger("worker")), worker.WithLogger(o.log), worker.WithMetrics(o.metrics)}, abuse.workerOptions()...)
-	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db, metrics: o.metrics}, worker.Config{Workers: workers, ReportingMTA: ident.Name()}, opts...)
+	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db, metrics: o.metrics, router: router}, worker.Config{Workers: workers, ReportingMTA: ident.Name()}, opts...)
 	if err != nil {
 		return nil, err
 	}
 	return pool, nil
+}
+
+// buildRouter builds the v0.39 sending-pool dispatch layer once at startup
+// from current pool/member config: one delivery.Engine per enabled-or-not
+// direct member (its own EHLO identity and, if configured, dial-source IP;
+// disabled members still get an Engine here — the enabled/pool-enabled kill
+// switch is enforced earlier, in worker.holdIfMemberDisabled, never here),
+// and a shared alias to the existing base engine for every relay member
+// (relay members carry no separate identity — see database.SendingPoolMember's
+// doc). base becomes both the legacy (MemberID=="") and the unknown-member
+// fallback target. This is process-local: an operator's pool/member change
+// via the CLI takes effect on the next server restart, not live.
+func buildRouter(db *database.DB, base *delivery.Engine, relayConfigured bool, tlsCfg smtp.TLSConfig, metrics *observability.Metrics) (*routing.Router, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pools, err := db.ListSendingPools(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("build sending pool router: list pools: %w", err)
+	}
+	members := make(map[string]routing.MemberRoute)
+	for _, p := range pools {
+		poolMembers, err := db.ListSendingPoolMembers(ctx, p.ID)
+		if err != nil {
+			return nil, fmt.Errorf("build sending pool router: list members of pool %s: %w", p.ID, err)
+		}
+		for _, m := range poolMembers {
+			switch m.Kind {
+			case database.SendingPoolMemberRelay:
+				// A relay member means "use the process's single configured
+				// relay" — base only actually IS a relay engine when one is
+				// configured. Mapping it to base unconditionally would let a
+				// relay member silently perform direct MX delivery on a
+				// process running in direct mode, contradicting the
+				// operator's declared intent. Omitted here, it becomes an
+				// "unknown member" at dispatch time (see routing.Router),
+				// which holds/retries rather than sending wrong.
+				if !relayConfigured {
+					slog.Warn("sending_pool_member_relay_without_relay_configured", "member_id", m.ID, "pool_id", p.ID,
+						"detail", "this process has no MAILX_RELAY_* configured; this relay member will never be selected as a Router target")
+					continue
+				}
+				members[m.ID] = routing.MemberRoute{Deliver: base, Kind: string(m.Kind)}
+			case database.SendingPoolMemberDirect:
+				if m.Hostname == nil || *m.Hostname == "" {
+					slog.Warn("sending_pool_member_missing_hostname", "member_id", m.ID, "pool_id", p.ID, "detail", "direct member has no hostname; it will never be selected as a Router target with a usable identity")
+					continue
+				}
+				clientCfg := smtp.ClientConfig{Identity: *m.Hostname, TLS: tlsCfg}
+				if metrics != nil {
+					clientCfg.AuthObserver = metrics
+				}
+				var sourceIP string
+				if m.SourceIP != nil && *m.SourceIP != "" {
+					ip := net.ParseIP(*m.SourceIP)
+					if ip == nil {
+						slog.Warn("sending_pool_member_invalid_source_ip", "member_id", m.ID, "pool_id", p.ID, "source_ip", *m.SourceIP)
+					} else {
+						clientCfg.SourceIP = ip
+						sourceIP = *m.SourceIP
+					}
+				}
+				client, err := smtp.NewClient(clientCfg)
+				if err != nil {
+					return nil, fmt.Errorf("build sending pool router: member %s: %w", m.ID, err)
+				}
+				svc, err := transfer.NewService(client)
+				if err != nil {
+					return nil, fmt.Errorf("build sending pool router: member %s: %w", m.ID, err)
+				}
+				// Direct members always dial MX directly — a member's whole
+				// purpose is choosing among direct-delivery identities, never
+				// the global relay, which relay-kind members already cover.
+				engine, err := delivery.NewEngine(dns.NewResolver(), svc, engineConfig(nil))
+				if err != nil {
+					return nil, fmt.Errorf("build sending pool router: member %s: %w", m.ID, err)
+				}
+				members[m.ID] = routing.MemberRoute{Deliver: engine, Kind: string(m.Kind), Hostname: *m.Hostname, SourceIP: sourceIP}
+			default:
+				return nil, fmt.Errorf("build sending pool router: member %s: unrecognized kind %q", m.ID, m.Kind)
+			}
+		}
+	}
+	return routing.NewRouter(base, members)
 }
 
 func httpAddr() string {
