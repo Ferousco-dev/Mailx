@@ -44,10 +44,34 @@ type emailHandler struct {
 	// requires it).
 	dkim *dkim.Service
 	now  func() time.Time
+	// abuse holds outbound abuse controls; nil disables them.
+	abuse *AbuseControls
+	// msgDomain is the right-hand side of generated Message-IDs (RFC 5322 3.6.4:
+	// a domain of the generating host). It is MailX's infrastructure hostname,
+	// never a tenant domain, and defaults to the local development identity.
+	msgDomain string
+}
+
+// recipientLimit is the per-message recipient cap: the abuse policy's value when
+// configured, otherwise the built-in default.
+func (h *emailHandler) recipientLimit() int {
+	if h.abuse != nil && h.abuse.Policy.MaxRecipientsPerMessage > 0 {
+		return h.abuse.Policy.MaxRecipientsPerMessage
+	}
+	return defaultMaxRecipients
+}
+
+const defaultMessageIDDomain = "mailx.local"
+
+// messageID is the ONE place a Message-ID is built, used for both the message
+// header and the stored metadata so they can never differ. It is generated before
+// DKIM signing, so the signature covers it and no stored byte changes afterwards.
+func (h *emailHandler) messageID(id string) string {
+	return "<" + id + "@" + h.msgDomain + ">"
 }
 
 func newEmailHandler(db *database.DB, store *storage.FileStore) *emailHandler {
-	return &emailHandler{db: db, store: store, now: func() time.Time { return time.Now().UTC() }}
+	return &emailHandler{db: db, store: store, now: func() time.Time { return time.Now().UTC() }, msgDomain: defaultMessageIDDomain}
 }
 
 // handleSend implements POST /v1/emails. See the v0.18 report's "Acceptance
@@ -82,7 +106,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := h.now()
-	scheduledAt, verr := req.validate(now)
+	scheduledAt, verr := req.validate(now, h.recipientLimit())
 	if verr != nil {
 		writeError(w, r, verr)
 		return
@@ -97,7 +121,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	built, err := outbound.Build(outbound.Request{
 		From: req.From, To: req.To, Cc: req.Cc, Bcc: req.Bcc, ReplyTo: req.ReplyTo,
 		Subject: req.Subject, Text: req.Text, HTML: req.HTML,
-		MessageID: fmt.Sprintf("<%s@mailx.local>", id), Date: now,
+		MessageID: h.messageID(id), Date: now,
 	})
 	if err != nil {
 		writeError(w, r, newError(ErrValidation, "invalid_message", err.Error()))
@@ -110,6 +134,10 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	tenantID := tenantFromContext(r.Context())
 	fromDomain, raw, ok := h.authorizeAndSign(w, r, tenantID, built.From, built.Raw)
+	if !ok {
+		return
+	}
+	deliverable, ok := h.checkRecipientsForAcceptance(w, r, tenantID, built.Envelope)
 	if !ok {
 		return
 	}
@@ -131,13 +159,14 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// ClaimIdempotencyKey's doc for the concurrency design; PostgreSQL,
 	// not this handler, is what actually arbitrates concurrent claims.
 	var idemCompletion *database.IdempotencyCompletion
+	var idemClaimedAt time.Time
 	if idemKey != "" {
 		fingerprint, ferr := idempotency.Fingerprint(req)
 		if ferr != nil {
 			writeError(w, r, newError(ErrInternal, "internal_error", "failed to fingerprint request"))
 			return
 		}
-		resp, handled, herr := h.resolveIdempotency(r.Context(), tenantID, idemKey, fingerprint, now)
+		resp, handled, claimedAt, herr := h.resolveIdempotency(r.Context(), tenantID, idemKey, fingerprint, now)
 		if herr != nil {
 			writeError(w, r, herr)
 			return
@@ -147,7 +176,17 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusAccepted, resp)
 			return
 		}
+		idemClaimedAt = claimedAt
 		idemCompletion = &database.IdempotencyCompletion{Operation: idempotency.OperationEmailsCreate, IdempotencyKey: idemKey, Fingerprint: fingerprint}
+	}
+
+	// Abuse controls run only for a request that will really create a message:
+	// replays (handled above) and 409s never reach here, so they are never
+	// charged. A refusal releases the idempotency claim it owns.
+	if aerr := h.admitSend(r.Context(), tenantID, deliverable); aerr != nil {
+		h.releaseClaim(tenantID, idemCompletion, idemClaimedAt)
+		writeError(w, r, aerr)
+		return
 	}
 
 	// FileStore write happens BEFORE the durable DB transaction: if this
@@ -174,7 +213,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	msg, err := h.db.InsertMessage(r.Context(), database.NewMessage{
 		ID: id, TenantID: tenantID, MailFrom: built.From, FromHeader: req.From,
-		Subject: req.Subject, MessageIDHeader: fmt.Sprintf("<%s@mailx.local>", id),
+		Subject: req.Subject, MessageIDHeader: h.messageID(id),
 		Recipients: recipients, AvailableAt: scheduledAt, IdempotencyCompletion: idemCompletion,
 		SenderDomain: fromDomain,
 	})
@@ -213,20 +252,20 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 // immediately with resp (a replay) or err (a conflict/timeout) and must
 // NOT proceed to create a message; handled=false means the caller now
 // owns the claim and must complete it via IdempotencyCompletion.
-func (h *emailHandler) resolveIdempotency(ctx context.Context, tenantID, idemKey, fingerprint string, now time.Time) (resp email, handled bool, err *apiError) {
+func (h *emailHandler) resolveIdempotency(ctx context.Context, tenantID, idemKey, fingerprint string, now time.Time) (resp email, handled bool, claimedAt time.Time, err *apiError) {
 	claim, owned, dbErr := h.db.ClaimIdempotencyKey(ctx, tenantID, idempotency.OperationEmailsCreate, idemKey, fingerprint,
 		now.Add(idempotencyRetention), now.Add(-idempotencyStaleAfter))
 	if dbErr != nil {
-		return email{}, false, newError(ErrInternal, "internal_error", "failed to process idempotency key")
+		return email{}, false, time.Time{}, newError(ErrInternal, "internal_error", "failed to process idempotency key")
 	}
 	if owned {
-		return email{}, false, nil
+		return email{}, false, claim.CreatedAt, nil
 	}
 
 	if claim.Fingerprint != fingerprint {
 		// Never echo the original request back — only confirm reuse
 		// happened, not what the original payload contained.
-		return email{}, true, newError(ErrConflictType, "idempotency_key_conflict",
+		return email{}, true, time.Time{}, newError(ErrConflictType, "idempotency_key_conflict",
 			"this Idempotency-Key was already used with a different request")
 	}
 
@@ -234,7 +273,7 @@ func (h *emailHandler) resolveIdempotency(ctx context.Context, tenantID, idemKey
 		var perr *apiError
 		claim, perr = h.pollIdempotencyCompletion(ctx, tenantID, idemKey)
 		if perr != nil {
-			return email{}, true, perr
+			return email{}, true, time.Time{}, perr
 		}
 	}
 
@@ -246,9 +285,9 @@ func (h *emailHandler) resolveIdempotency(ctx context.Context, tenantID, idemKey
 	// status code itself are guaranteed stable across replays).
 	resp, ok := h.loadReplay(ctx, tenantID, claim)
 	if !ok {
-		return email{}, true, newError(ErrInternal, "internal_error", "failed to load the original result for this idempotency key")
+		return email{}, true, time.Time{}, newError(ErrInternal, "internal_error", "failed to load the original result for this idempotency key")
 	}
-	return resp, true, nil
+	return resp, true, time.Time{}, nil
 }
 
 // replayIfCompleted is the recovery path for a caller that lost the

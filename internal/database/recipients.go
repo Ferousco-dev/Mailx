@@ -17,11 +17,14 @@ const (
 	RecipientPending   RecipientStatus = "pending"
 	RecipientDelivered RecipientStatus = "delivered"
 	RecipientFailed    RecipientStatus = "failed"
+	// RecipientSuppressed means the recipient was skipped by suppression policy:
+	// no SMTP attempt named it. Not failed, not bounced.
+	RecipientSuppressed RecipientStatus = "suppressed"
 )
 
 func (s RecipientStatus) valid() bool {
 	switch s {
-	case RecipientPending, RecipientDelivered, RecipientFailed:
+	case RecipientPending, RecipientDelivered, RecipientFailed, RecipientSuppressed:
 		return true
 	}
 	return false

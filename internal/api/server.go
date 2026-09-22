@@ -10,8 +10,10 @@ import (
 
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/dkim"
+	"github.com/Ferousco-dev/mailx/internal/dmarc"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
 	"github.com/Ferousco-dev/mailx/internal/observability"
+	"github.com/Ferousco-dev/mailx/internal/spf"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 	"github.com/Ferousco-dev/mailx/internal/webhook"
 )
@@ -43,6 +45,18 @@ type Config struct {
 	// the API would accept mail from a domain with an active key and send it
 	// unsigned.
 	DKIM *dkim.Service
+	// SPF guides SPF DNS setup. Optional: nil makes the SPF endpoints answer 503
+	// and changes nothing else (sending never consults SPF).
+	SPF *spf.Service
+	// DMARC gives sender-side DMARC readiness. Optional: nil makes the DMARC
+	// endpoints answer 503 and changes nothing else (sending never consults it).
+	DMARC *dmarc.Service
+	// MessageIDDomain is the domain used in generated Message-IDs: MailX's public
+	// SMTP hostname when configured. Empty keeps the local development default.
+	MessageIDDomain string
+	// Abuse configures outbound abuse controls (request/recipient limits, queue
+	// caps, backpressure). Nil disables them; production wiring sets it.
+	Abuse *AbuseControls
 	// Logger and Metrics are optional; nil disables the corresponding
 	// observation without changing request handling.
 	Logger  *slog.Logger
@@ -54,6 +68,10 @@ type Config struct {
 }
 
 func (c Config) validate() error {
+	// First, so a bad value is reported as itself and not hidden by an earlier check.
+	if c.MessageIDDomain != "" && !validMessageIDDomain(c.MessageIDDomain) {
+		return errors.New("api: MessageIDDomain is not a plain domain name")
+	}
 	if c.Addr == "" {
 		return errors.New("api: Addr is empty")
 	}
@@ -91,6 +109,9 @@ func NewServer(cfg Config) (*Server, error) {
 		return nil, err
 	}
 	h := newEmailHandler(cfg.DB, cfg.Store)
+	if cfg.MessageIDDomain != "" {
+		h.msgDomain = cfg.MessageIDDomain
+	}
 	resolver := cfg.DomainResolver
 	if resolver == nil {
 		resolver = maildomain.NewNetTXTResolver()
@@ -101,7 +122,8 @@ func NewServer(cfg Config) (*Server, error) {
 		defer cancel()
 		return cfg.Ready(ctx)
 	}
-	mux := newMux(h, cfg.Auth, readiness, routeServices{domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM})
+	h.abuse = cfg.Abuse
+	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, metrics: cfg.Metrics})
 	log := cfg.Logger
 	if log == nil {
 		log = observability.Discard()
@@ -140,4 +162,19 @@ func (s *Server) Run(ctx context.Context) error {
 		return fmt.Errorf("api: shutdown: %w", err)
 	}
 	return nil
+}
+
+// validMessageIDDomain is defense in depth for a value that ends up inside a
+// message header: printable ASCII, no angle brackets, '@', whitespace or control
+// characters. The real validation happens once at startup (smtpidentity).
+func validMessageIDDomain(d string) bool {
+	if d == "" || len(d) > 253 {
+		return false
+	}
+	for i := 0; i < len(d); i++ {
+		if c := d[i]; c <= 0x20 || c >= 0x7f || c == '<' || c == '>' || c == '@' {
+			return false
+		}
+	}
+	return true
 }

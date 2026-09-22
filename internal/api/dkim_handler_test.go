@@ -21,7 +21,9 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/auth"
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/dkim"
+	"github.com/Ferousco-dev/mailx/internal/dmarc"
 	"github.com/Ferousco-dev/mailx/internal/secretbox"
+	"github.com/Ferousco-dev/mailx/internal/spf"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 )
 
@@ -67,7 +69,20 @@ type actor struct {
 	h      http.Handler
 }
 
-func newDKIMAPI(t *testing.T) *dkimAPI {
+// testMessageIDDomain, when set by a test, is the Message-ID domain of the shared harness.
+var testMessageIDDomain string
+
+func newDKIMAPI(t *testing.T) *dkimAPI { return newAPIWithSPF(t, nil) }
+
+// newAPIWithSPF builds the shared test API; mkSPF (optional) receives the
+// shared DNS fake so SPF and DKIM/ownership see the same published records.
+func newAPIWithSPF(t *testing.T, mkSPF func(*database.DB, *publishedDNS) *spf.Service) *dkimAPI {
+	return newAPIFull(t, mkSPF, nil)
+}
+
+// newAPIFull additionally builds a DMARC service from the shared fakes.
+func newAPIFull(t *testing.T, mkSPF func(*database.DB, *publishedDNS) *spf.Service,
+	mkDMARC func(*database.DB, *publishedDNS, *dkim.Service, *spf.Service) *dmarc.Service) *dkimAPI {
 	t.Helper()
 	db := newTestDB(t)
 	store, err := storage.NewFileStore(t.TempDir())
@@ -83,7 +98,19 @@ func newDKIMAPI(t *testing.T) *dkimAPI {
 		t.Fatal(err)
 	}
 	authSvc := auth.NewService(db, nil)
-	mux := newMux(newEmailHandler(db, store), authSvc, func() error { return nil }, routeServices{dkim: svc})
+	var spfSvc *spf.Service
+	if mkSPF != nil {
+		spfSvc = mkSPF(db, dns)
+	}
+	var dmarcSvc *dmarc.Service
+	if mkDMARC != nil {
+		dmarcSvc = mkDMARC(db, dns, svc, spfSvc)
+	}
+	eh := newEmailHandler(db, store)
+	if testMessageIDDomain != "" {
+		eh.msgDomain = testMessageIDDomain
+	}
+	mux := newMux(eh, authSvc, func() error { return nil }, routeServices{dkim: svc, spf: spfSvc, dmarc: dmarcSvc})
 	return &dkimAPI{t: t, db: db, store: store, authSvc: authSvc, box: box, dns: dns, mux: mux}
 }
 

@@ -18,11 +18,12 @@ const (
 	EventDeferred          EventType = "deferred"
 	EventBounced           EventType = "bounced"
 	EventFailed            EventType = "failed"
+	EventSuppressed        EventType = "suppressed" // recipients were skipped by suppression policy
 )
 
 func (e EventType) valid() bool {
 	switch e {
-	case EventQueued, EventDeliveryAttempted, EventDelivered, EventDeferred, EventBounced, EventFailed:
+	case EventQueued, EventDeliveryAttempted, EventDelivered, EventDeferred, EventBounced, EventFailed, EventSuppressed:
 		return true
 	}
 	return false
@@ -43,6 +44,8 @@ func PublicEventType(e EventType) (string, bool) {
 		return "email.failed", true
 	case EventBounced:
 		return "email.bounced", true
+	case EventSuppressed:
+		return "email.suppressed", true
 	default:
 		return "", false
 	}
@@ -152,7 +155,7 @@ func (db *DB) listTenantEvents(ctx context.Context, tenantID string, limit int, 
 		FROM events
 		WHERE tenant_id = $1
 		  AND ($2::timestamptz IS NULL OR (occurred_at, id) < ($2, $3))
-		  AND (NOT $5 OR event_type IN ('queued','delivered','deferred','failed','bounced'))
+		  AND (NOT $5 OR event_type IN ('queued','delivered','deferred','failed','bounced','suppressed'))
 		ORDER BY occurred_at DESC, id DESC
 		LIMIT $4`,
 		tenantID, afterTime, afterID, limit, publicOnly,

@@ -20,6 +20,9 @@ const (
 	StatusDelivered  MessageStatus = "delivered"
 	StatusFailed     MessageStatus = "failed"
 	StatusBounced    MessageStatus = "bounced"
+	// StatusSuppressed is terminal: every recipient was suppressed, so no SMTP
+	// attempt was made. It is not a failure and not a bounce.
+	StatusSuppressed MessageStatus = "suppressed"
 )
 
 // Valid reports whether s is one of the known message statuses, for
@@ -29,7 +32,7 @@ func (s MessageStatus) Valid() bool { return s.valid() }
 
 func (s MessageStatus) valid() bool {
 	switch s {
-	case StatusQueued, StatusProcessing, StatusRetrying, StatusDelivered, StatusFailed, StatusBounced:
+	case StatusQueued, StatusProcessing, StatusRetrying, StatusDelivered, StatusFailed, StatusBounced, StatusSuppressed:
 		return true
 	}
 	return false

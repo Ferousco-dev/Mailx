@@ -1,0 +1,59 @@
+# OPT-IN low-memory PostgreSQL profile for small MailX deployments (about 1 GB of
+# RAM in total, for example an AWS Lightsail 1 GB plan running MailX, PostgreSQL
+# and Redis on one host). It is NOT the default: `docker compose up` keeps the
+# stock PostgreSQL settings, which local development and the test suite use.
+#
+#   docker compose -f compose.yaml -f compose.low-memory.yaml up -d
+#
+# What it changes (memory only; measured on postgres:16 with a small pgbench load:
+# about 122 MiB with defaults versus about 51 MiB with these settings):
+#   shared_buffers 128MB -> 32MB, max_connections 100 -> 20, work_mem 4MB -> 2MB,
+#   maintenance_work_mem 64MB -> 16MB, wal_buffers 4MB -> 1MB, max_wal_size 1GB ->
+#   256MB, plus fewer autovacuum/background/parallel workers.
+#
+# What it deliberately does NOT change: durability. MailX persists a delivery
+# outcome before acknowledging a queue job and accepts an email only after its rows
+# are committed, so fsync, synchronous_commit and full_page_writes are pinned ON
+# here on purpose. Do not turn them off to save memory: it would risk losing
+# acknowledged data on a crash. MailX warns at startup (db_settings_warning) if the
+# server it connects to has them off.
+#
+# max_connections=20 is enough: MailX uses at most 10 pool connections, PostgreSQL
+# keeps 3 in reserve, and the migrate service and admin CLI use a few more.
+# With a small cache PostgreSQL reads from disk more often; at low volume that costs
+# milliseconds, not correctness. Also give the host a swap file (for example 1 GB)
+# as a safety net, and take nightly pg_dump backups: this profile is a memory
+# trade-off, not a resilience feature. Re-measure on your own host (docker stats).
+services:
+  postgres:
+    command:
+      - postgres
+      - -c
+      - shared_buffers=32MB
+      - -c
+      - max_connections=20
+      - -c
+      - work_mem=2MB
+      - -c
+      - maintenance_work_mem=16MB
+      - -c
+      - effective_cache_size=128MB
+      - -c
+      - wal_buffers=1MB
+      - -c
+      - max_wal_size=256MB
+      - -c
+      - autovacuum_max_workers=2
+      - -c
+      - max_worker_processes=4
+      - -c
+      - max_parallel_workers=2
+      - -c
+      - max_parallel_workers_per_gather=0
+      # Durability, pinned on explicitly (these are also PostgreSQL's defaults).
+      - -c
+      - fsync=on
+      - -c
+      - synchronous_commit=on
+      - -c
+      - full_page_writes=on

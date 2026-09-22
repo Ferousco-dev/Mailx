@@ -55,6 +55,19 @@ func runFull() error {
 		return err
 	}
 	defer db.Close()
+	warnDatabaseSettings(o, db)
+
+	ident, err := loadSMTPIdentity()
+	if err != nil {
+		return err
+	}
+	o.log.Info("smtp_identity_configured", "public", ident.Public, "mode", identityMode(ident))
+
+	abuse, err := openAbuseControls(o)
+	if err != nil {
+		return err
+	}
+	defer abuse.Close()
 
 	q, err := openRedisQueue()
 	if err != nil {
@@ -72,12 +85,20 @@ func runFull() error {
 
 	disp := dispatch.New(db, q, dispatch.WithOnError(o.errLogger("dispatch")),
 		dispatch.WithLogger(o.log), dispatch.WithMetrics(o.metrics))
-	pool, err := buildWorkerPool(q, store, db, o)
+	pool, err := buildWorkerPool(q, store, db, o, ident, abuse)
 	if err != nil {
 		return err
 	}
 	authSvc := auth.NewService(db, apiKeyPepper())
 	dkimSvc, err := buildDKIM(db, o)
+	if err != nil {
+		return err
+	}
+	spfSvc, err := buildSPF(db, o)
+	if err != nil {
+		return err
+	}
+	dmarcSvc, err := buildDMARC(db, dkimSvc, spfSvc, o)
 	if err != nil {
 		return err
 	}
@@ -87,7 +108,7 @@ func runFull() error {
 	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
-		Webhooks: webhookRuntime.service, DKIM: dkimSvc,
+		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, MessageIDDomain: ident.Name(), Abuse: abuse.apiControls(o),
 		Ready:  ready.Check,
 		Logger: o.log, Metrics: o.metrics,
 	})
@@ -268,7 +289,7 @@ func engineConfig(relay *delivery.Relay) delivery.Config {
 	return cfg
 }
 
-func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o obs) (*worker.Pool, error) {
+func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o obs, ident smtpID, abuse *abuseRuntime) (*worker.Pool, error) {
 	tlsCfg, err := outboundTLS(o)
 	if err != nil {
 		return nil, err
@@ -283,7 +304,10 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o
 		transport = "relay"
 	}
 	o.log.Info("smtp_transport_configured", "transport", transport, "auth", relay != nil && relay.Auth != nil)
-	clientCfg := smtp.ClientConfig{Identity: "mailx.local", TLS: tlsCfg}
+	if relay != nil && !ident.Public {
+		o.log.Warn("smtp_identity_local_with_relay", "hint", "set MAILX_SMTP_HOSTNAME so EHLO, Message-ID and bounce identity are public")
+	}
+	clientCfg := smtp.ClientConfig{Identity: ident.Name(), TLS: tlsCfg}
 	if o.metrics != nil {
 		clientCfg.AuthObserver = o.metrics
 	}
@@ -299,15 +323,16 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o
 	if err != nil {
 		return nil, err
 	}
-	coordinator, err := retry.NewCoordinator(engine, retry.DefaultBackoffPolicy(), retry.DefaultAttemptLimit())
+	backoff := retry.DefaultBackoffPolicy()
+	backoff.JitterPercent = abuse.retryJitter()
+	coordinator, err := retry.NewCoordinator(engine, backoff, retry.DefaultAttemptLimit())
 	if err != nil {
 		return nil, err
 	}
 
 	workers := envInt("MAILX_WORKERS", 4)
-	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db}, worker.Config{Workers: workers},
-		worker.WithOnError(o.errLogger("worker")), worker.WithLogger(o.log), worker.WithMetrics(o.metrics),
-	)
+	opts := append([]worker.Option{worker.WithOnError(o.errLogger("worker")), worker.WithLogger(o.log), worker.WithMetrics(o.metrics)}, abuse.workerOptions()...)
+	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db, metrics: o.metrics}, worker.Config{Workers: workers, ReportingMTA: ident.Name()}, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -346,4 +371,12 @@ func envBool(key string) bool {
 	default:
 		return false
 	}
+}
+
+// identityMode names the bounded identity mode for logs (never the hostname).
+func identityMode(i smtpID) string {
+	if i.Public {
+		return "public"
+	}
+	return "local"
 }

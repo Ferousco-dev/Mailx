@@ -60,6 +60,7 @@ func NextSchedule(state *State, policy BackoffPolicy, limit AttemptLimit, now ti
 	}
 
 	reference := now.UTC()
+	delay = policy.Jitter(delay, reference.UnixNano())
 	if reference.Before(minScheduleTime) || reference.After(maxScheduleTime) {
 		return Schedule{}, ErrInvalidScheduleTime
 	}

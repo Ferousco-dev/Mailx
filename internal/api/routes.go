@@ -6,8 +6,10 @@ import (
 
 	"github.com/Ferousco-dev/mailx/internal/auth"
 	"github.com/Ferousco-dev/mailx/internal/dkim"
+	"github.com/Ferousco-dev/mailx/internal/dmarc"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
 	"github.com/Ferousco-dev/mailx/internal/observability"
+	"github.com/Ferousco-dev/mailx/internal/spf"
 	"github.com/Ferousco-dev/mailx/internal/webhook"
 )
 
@@ -15,6 +17,10 @@ type routeServices struct {
 	domains  *maildomain.Service
 	webhooks *webhook.Service
 	dkim     *dkim.Service
+	spf      *spf.Service
+	dmarc    *dmarc.Service
+	metrics  *observability.Metrics
+	abuse    *AbuseControls
 }
 
 // newMux registers every /v1 route plus health checks. Handlers stay
@@ -39,6 +45,16 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		h.dkim = extras[0].dkim
 	}
 	dkimHandler := &dkimHandler{service: h.dkim}
+	suppressions := &suppressionHandler{db: h.db}
+	if len(extras) > 0 {
+		suppressions.metrics = extras[0].metrics
+	}
+	spfHandler := &spfHandler{}
+	dmarcHandler := &dmarcHandler{}
+	if len(extras) > 0 {
+		spfHandler.service = extras[0].spf
+		dmarcHandler.service = extras[0].dmarc
+	}
 	domains := newDomainHandler(domainService)
 	webhooks := &webhookHandler{service: webhookService, db: h.db}
 
@@ -54,6 +70,14 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("GET /v1/domains/{id}/dkim", requireScope(auth.ScopeDomainsRead)(dkimHandler.handleStatus))
 	v1.HandleFunc("POST /v1/domains/{id}/dkim", requireScope(auth.ScopeDomainsWrite)(dkimHandler.handleCreate))
 	v1.HandleFunc("POST /v1/domains/{id}/dkim/verify", requireScope(auth.ScopeDomainsWrite)(dkimHandler.handleVerify))
+	v1.HandleFunc("GET /v1/domains/{id}/spf", requireScope(auth.ScopeDomainsRead)(spfHandler.handleGet))
+	v1.HandleFunc("POST /v1/domains/{id}/spf/verify", requireScope(auth.ScopeDomainsWrite)(spfHandler.handleVerify))
+	v1.HandleFunc("GET /v1/domains/{id}/dmarc", requireScope(auth.ScopeDomainsRead)(dmarcHandler.handleGet))
+	v1.HandleFunc("POST /v1/domains/{id}/dmarc/verify", requireScope(auth.ScopeDomainsWrite)(dmarcHandler.handleVerify))
+	v1.HandleFunc("POST /v1/suppressions", requireScope(auth.ScopeSuppressionsWrite)(suppressions.handleCreate))
+	v1.HandleFunc("GET /v1/suppressions", requireScope(auth.ScopeSuppressionsRead)(suppressions.handleList))
+	v1.HandleFunc("GET /v1/suppressions/{id}", requireScope(auth.ScopeSuppressionsRead)(suppressions.handleGet))
+	v1.HandleFunc("DELETE /v1/suppressions/{id}", requireScope(auth.ScopeSuppressionsWrite)(suppressions.handleDelete))
 	v1.HandleFunc("POST /v1/webhooks", requireScope(auth.ScopeWebhooksWrite)(webhooks.handleCreate))
 	v1.HandleFunc("GET /v1/webhooks", requireScope(auth.ScopeWebhooksRead)(webhooks.handleList))
 	v1.HandleFunc("GET /v1/webhooks/{id}", requireScope(auth.ScopeWebhooksRead)(webhooks.handleGet))
@@ -62,7 +86,14 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("GET /v1/webhooks/{id}/deliveries", requireScope(auth.ScopeWebhooksRead)(webhooks.handleDeliveries))
 	v1.HandleFunc("GET /v1/events", requireScope(auth.ScopeWebhooksRead)(webhooks.handleEvents))
 
-	authenticated := chain(recordRoute(v1), authenticateMiddleware(authSvc))
+	var abuse *AbuseControls
+	if len(extras) > 0 {
+		abuse = extras[0].abuse
+	}
+	// Order matters: authenticate first (the limiter needs the tenant and key),
+	// then the request limiter, then the route. Unauthenticated requests are
+	// rejected before they can touch a tenant bucket.
+	authenticated := chain(recordRoute(v1), authenticateMiddleware(authSvc), requestLimitMiddleware(abuse))
 	mux.Handle("/v1/", authenticated)
 
 	mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, r *http.Request) {

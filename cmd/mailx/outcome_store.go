@@ -7,14 +7,27 @@ import (
 
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/delivery"
+	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/retry"
+	"github.com/Ferousco-dev/mailx/internal/suppression"
 	"github.com/Ferousco-dev/mailx/internal/worker"
 )
 
 // databaseOutcomeStore translates worker/retry domain values into the
 // database package's infrastructure-level representation. Keeping this adapter
 // at composition root avoids making database depend on delivery or retry.
-type databaseOutcomeStore struct{ db *database.DB }
+type databaseOutcomeStore struct {
+	db      *database.DB
+	metrics *observability.Metrics // optional
+}
+
+// Compile-time guarantee that the production outcome store enforces suppression:
+// the worker only enforces it for stores implementing worker.SuppressionGate.
+var _ worker.SuppressionGate = databaseOutcomeStore{}
+
+// databaseOutcomeStore also names a message's tenant, so per-tenant delivery
+// permits work in production.
+var _ worker.TenantLookup = databaseOutcomeStore{}
 
 func (s databaseOutcomeStore) Load(ctx context.Context, messageID string) (worker.DurableDeliveryState, error) {
 	durable, err := s.db.LoadDeliveryState(ctx, messageID)
@@ -62,6 +75,13 @@ func (s databaseOutcomeStore) Persist(ctx context.Context, messageID string, att
 		QuitError:      result.QuitError,
 		StartedAt:      result.StartedAt,
 		FinishedAt:     result.FinishedAt,
+		// A recipient hard bounce also suppresses that recipient, atomically with
+		// this outcome. Structured fields only: a permanent RCPT TO rejection with
+		// an enhanced status about the destination MAILBOX (5.1.1, 5.1.6). Temporary
+		// failures, sender/policy/authentication failures and every other stage do
+		// not qualify (see suppression.QualifiesHardBounce).
+		SuppressRecipient: attempt.Decision == retry.TerminalFailure && result.Kind == delivery.KindTransferPermanent &&
+			suppression.QualifiesHardBounce(result.FailureStage, true, result.Accepted, result.FinalCode, result.EnhancedStatus, result.Recipient),
 	}
 	for _, mx := range result.Attempts {
 		in.MXAttempts = append(in.MXAttempts, database.MXAttempt{
@@ -92,6 +112,28 @@ func (s databaseOutcomeStore) Persist(ctx context.Context, messageID string, att
 		metadata["next_retry_at"] = outcome.Schedule.NextRetryAt
 	}
 	err := s.db.PersistDeliveryOutcome(ctx, in, outcome.Status == retry.StatusExhausted, metadata)
+	if errors.Is(err, database.ErrMessageTerminal) {
+		return worker.ErrOutcomeAlreadyTerminal
+	}
+	if err == nil && in.SuppressRecipient {
+		s.metrics.SuppressionWrite(string(suppression.ReasonHardBounce), string(suppression.SourceDelivery))
+	}
+	return err
+}
+
+// SuppressedRecipients implements worker.SuppressionGate.
+func (s databaseOutcomeStore) SuppressedRecipients(ctx context.Context, messageID string, keys []string) (map[string]bool, error) {
+	return s.db.SuppressedForMessage(ctx, messageID, keys)
+}
+
+// MessageTenant implements worker.TenantLookup.
+func (s databaseOutcomeStore) MessageTenant(ctx context.Context, messageID string) (string, error) {
+	return s.db.MessageTenant(ctx, messageID)
+}
+
+// RecordSuppressed implements worker.SuppressionGate.
+func (s databaseOutcomeStore) RecordSuppressed(ctx context.Context, messageID string, suppressed map[string]bool, all bool) error {
+	err := s.db.RecordSuppressedRecipients(ctx, messageID, suppressed, all)
 	if errors.Is(err, database.ErrMessageTerminal) {
 		return worker.ErrOutcomeAlreadyTerminal
 	}

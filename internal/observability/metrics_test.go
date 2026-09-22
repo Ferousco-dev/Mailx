@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -59,13 +60,17 @@ func TestEveryMetricFamilyIsExposed(t *testing.T) {
 	m.TLSResult("opportunistic", "established", "1.3")
 	m.AuthResult("plain", "success")
 	m.SignResult("rsa-sha256", "signed")
+	m.SPFResult("direct", "verified")
+	m.DMARCResult("monitoring", "ready")
+	m.SuppressionCheck("clear")
+	m.SuppressionWrite("manual", "api")
 	names := gather(t, m)
 	for _, want := range []string{
 		"mailx_build_info", "mailx_http_requests_total", "mailx_http_request_duration_seconds",
 		"mailx_smtp_sessions_total", "mailx_smtp_active_sessions", "mailx_smtp_messages_total",
 		"mailx_delivery_attempts_total", "mailx_delivery_attempt_duration_seconds",
 		"mailx_queue_operations_total", "mailx_queue_depth", "mailx_webhook_attempts_total",
-		"mailx_webhook_attempt_duration_seconds", "mailx_smtp_tls_sessions_total", "mailx_smtp_auth_attempts_total", "mailx_dkim_signatures_total", "go_goroutines",
+		"mailx_webhook_attempt_duration_seconds", "mailx_smtp_tls_sessions_total", "mailx_smtp_auth_attempts_total", "mailx_dkim_signatures_total", "mailx_spf_verifications_total", "mailx_dmarc_verifications_total", "mailx_suppression_checks_total", "mailx_suppression_writes_total", "go_goroutines",
 	} {
 		if !names[want] {
 			t.Errorf("family %s missing", want)
@@ -222,7 +227,9 @@ func TestAuthMetricLabelsAreBounded(t *testing.T) {
 			t.Errorf("missing %s", want)
 		}
 	}
-	for _, banned := range []string{"alice", "user@example.com", "535"} {
+	// "535" is matched as a label value: the dump also holds runtime/process
+	// samples (memory sizes, timestamps) whose digits can contain it by chance.
+	for _, banned := range []string{"alice", "user@example.com", `="535"`} {
 		if strings.Contains(out, banned) {
 			t.Fatalf("unbounded AUTH label value %q reached exposition", banned)
 		}
@@ -256,4 +263,121 @@ func TestDKIMMetricLabelsAreBounded(t *testing.T) {
 	gather(t, m)
 	var nilMetrics *Metrics
 	nilMetrics.SignResult("rsa-sha256", "signed")
+}
+
+func TestSPFMetricLabelsAreBounded(t *testing.T) {
+	m := newTestMetrics(t)
+	m.SPFResult("direct", "verified")
+	m.SPFResult("relay", "temporary_error")
+	// Hostile values (domains, addresses, raw records, DNS errors) must collapse.
+	m.SPFResult("example.com", "v=spf1 ip4:203.0.113.9 -all lookup failed on 10.0.0.1")
+	out := scrape(m)
+	for _, want := range []string{
+		`mailx_spf_verifications_total{mode="direct",outcome="verified"} 1`,
+		`mailx_spf_verifications_total{mode="relay",outcome="temporary_error"} 1`,
+		`mailx_spf_verifications_total{mode="other",outcome="other"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, banned := range []string{"example.com", "203.0.113", "10.0.0.1", "v=spf1"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unbounded SPF label value %q reached exposition", banned)
+		}
+	}
+	var nilMetrics *Metrics
+	nilMetrics.SPFResult("direct", "verified")
+}
+
+func TestDMARCMetricLabelsAreBounded(t *testing.T) {
+	m := newTestMetrics(t)
+	m.DMARCResult("monitoring", "ready")
+	m.DMARCResult("conflict", "dns_action_required")
+	// Hostile values (domains, records, URIs, resolver text) must collapse.
+	m.DMARCResult("v=DMARC1; p=none; rua=mailto:x@example.com", "victim.example.org 203.0.113.9")
+	out := scrape(m)
+	for _, want := range []string{
+		`mailx_dmarc_verifications_total{outcome="monitoring",readiness="ready"} 1`,
+		`mailx_dmarc_verifications_total{outcome="conflict",readiness="dns_action_required"} 1`,
+		`mailx_dmarc_verifications_total{outcome="other",readiness="other"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, banned := range []string{"example", "203.0.113", "DMARC1", "mailto"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unbounded DMARC label value %q reached exposition", banned)
+		}
+	}
+	var nilMetrics *Metrics
+	nilMetrics.DMARCResult("monitoring", "ready")
+}
+
+func TestSuppressionMetricLabelsAreBounded(t *testing.T) {
+	m := newTestMetrics(t)
+	m.SuppressionCheck("clear")
+	m.SuppressionCheck("error")
+	m.SuppressionCheck("person@example.com") // hostile value must collapse
+	m.SuppressionWrite("hard_bounce", "delivery")
+	m.SuppressionWrite("manual", "api")
+	m.SuppressionWrite("victim@example.org", "tenant-123 message-456")
+	out := scrape(m)
+	for _, want := range []string{
+		`mailx_suppression_checks_total{result="clear"} 1`,
+		`mailx_suppression_checks_total{result="error"} 1`,
+		`mailx_suppression_checks_total{result="other"} 1`,
+		`mailx_suppression_writes_total{reason="hard_bounce",source="delivery"} 1`,
+		`mailx_suppression_writes_total{reason="manual",source="api"} 1`,
+		`mailx_suppression_writes_total{reason="other",source="other"} 1`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	for _, banned := range []string{"person@", "victim@", "tenant-123", "message-456", "example.org"} {
+		if strings.Contains(out, banned) {
+			t.Fatalf("unbounded suppression label value %q reached exposition", banned)
+		}
+	}
+	var nilMetrics *Metrics
+	nilMetrics.SuppressionCheck("clear")
+	nilMetrics.SuppressionWrite("manual", "api")
+}
+
+// v0.31: abuse-control metrics have a closed label set. Unknown control/outcome values (which could carry a
+// tenant, key, address or domain if a caller ever passed one) collapse to "other", so cardinality is bounded.
+func TestAbuseDecisionMetricIsBoundedAndPrivate(t *testing.T) {
+	m := newTestMetrics(t)
+	for i := 0; i < 500; i++ {
+		m.AbuseDecision(fmt.Sprintf("tenant-%d@example.com", i), fmt.Sprintf("key_%d", i))
+	}
+	m.AbuseDecision("request", "allowed")
+	m.AbuseDecision("recipient", "limited")
+	m.AbuseDecision("tenant_permit", "deferred")
+	var nilMetrics *Metrics
+	nilMetrics.AbuseDecision("request", "allowed") // a nil sink is a safe no-op
+
+	fams, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	series := 0
+	for _, f := range fams {
+		if f.GetName() != "mailx_abuse_control_decisions_total" {
+			continue
+		}
+		for _, mt := range f.GetMetric() {
+			series++
+			for _, l := range mt.GetLabel() {
+				if strings.ContainsAny(l.GetValue(), "@-0123456789") {
+					t.Fatalf("label %s=%q looks like caller data", l.GetName(), l.GetValue())
+				}
+			}
+		}
+	}
+	if series != 4 { // other/other, request/allowed, recipient/limited, tenant_permit/deferred
+		t.Fatalf("%d series after 503 calls, want 4", series)
+	}
 }

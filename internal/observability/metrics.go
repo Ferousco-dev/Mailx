@@ -34,8 +34,16 @@ var (
 	dkimAlgs     = []string{"rsa-sha256"}
 	dkimOutcomes = []string{"signed", "unsigned_no_key", "key_unavailable", "key_decrypt_failed", "key_invalid",
 		"sign_failed", "domain_mismatch"}
-	authMechs    = []string{"plain", "login", "none"}
-	authOutcomes = []string{"success", "rejected", "temporary", "no_tls", "not_advertised", "no_mechanism",
+	spfModes    = []string{"direct", "relay"}
+	spfOutcomes = []string{"unchecked", "verified", "not_configured", "mismatch", "conflict", "invalid", "temporary_error",
+		"sending_infrastructure_unknown"}
+	dmarcStatuses = []string{"unchecked", "not_configured", "monitoring", "enforcing", "conflict", "invalid", "temporary_error"}
+	dmarcReady    = []string{"unchecked", "ready", "dns_action_required", "authentication_incomplete", "unknown"}
+	suppResults   = []string{"clear", "partial", "all", "error"}
+	suppReasons   = []string{"manual", "hard_bounce", "complaint", "unsubscribe"}
+	suppSources   = []string{"api", "delivery", "feedback"}
+	authMechs     = []string{"plain", "login", "none"}
+	authOutcomes  = []string{"success", "rejected", "temporary", "no_tls", "not_advertised", "no_mechanism",
 		"protocol_error", "connection_lost", "timeout", "canceled"}
 )
 
@@ -70,6 +78,11 @@ type Metrics struct {
 	tlsSessions  *prometheus.CounterVec
 	authAttempts *prometheus.CounterVec
 	dkimSigs     *prometheus.CounterVec
+	spfVerifs    *prometheus.CounterVec
+	suppChecks   *prometheus.CounterVec
+	abuse        *prometheus.CounterVec
+	suppWrites   *prometheus.CounterVec
+	dmarcVerifs  *prometheus.CounterVec
 	depthFn      DepthFunc
 	depthDesc    *prometheus.Desc
 }
@@ -105,13 +118,23 @@ func NewMetrics(info buildinfo.Info) (*Metrics, error) {
 		Help: "Outbound SMTP AUTH results by bounded mechanism and outcome."}, []string{"mechanism", "outcome"})
 	m.dkimSigs = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "dkim_signatures_total",
 		Help: "DKIM signing attempts by bounded algorithm and outcome."}, []string{"algorithm", "outcome"})
+	m.spfVerifs = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "spf_verifications_total",
+		Help: "SPF verifications by bounded mode and outcome."}, []string{"mode", "outcome"})
+	m.dmarcVerifs = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "dmarc_verifications_total",
+		Help: "DMARC readiness verifications by bounded DNS status and readiness."}, []string{"outcome", "readiness"})
+	m.suppChecks = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "suppression_checks_total",
+		Help: "Delivery-time suppression checks by bounded result."}, []string{"result"})
+	m.abuse = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "abuse_control_decisions_total",
+		Help: "Outbound abuse-control decisions by bounded control and outcome."}, []string{"control", "outcome"})
+	m.suppWrites = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "suppression_writes_total",
+		Help: "Suppression writes requested, by bounded reason and source."}, []string{"reason", "source"})
 	m.depthDesc = prometheus.NewDesc(ns+"_queue_depth", "Queue jobs available plus claimed.", nil, nil)
 	build := prometheus.NewGaugeVec(prometheus.GaugeOpts{Namespace: ns, Name: "build_info",
 		Help: "Build identity; value is always 1."}, []string{"version", "commit"})
 	build.WithLabelValues(info.Version, info.Commit).Set(1)
 
 	for _, c := range []prometheus.Collector{m.httpTotal, m.httpDuration, m.smtpSessions, m.smtpActive, m.smtpMessages,
-		m.deliveries, m.deliveryDur, m.queueOps, m.tlsSessions, m.authAttempts, m.dkimSigs, m.webhooks, m.webhookDur, build, m,
+		m.deliveries, m.deliveryDur, m.queueOps, m.tlsSessions, m.authAttempts, m.dkimSigs, m.spfVerifs, m.suppChecks, m.suppWrites, m.abuse, m.dmarcVerifs, m.webhooks, m.webhookDur, build, m,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})} {
 		if err := m.reg.Register(c); err != nil {
 			return nil, err
@@ -266,5 +289,58 @@ func (m *Metrics) SignResult(algorithm, outcome string) {
 	if m != nil {
 		defer guard()
 		m.dkimSigs.WithLabelValues(pick(algorithm, dkimAlgs), pick(outcome, dkimOutcomes)).Inc()
+	}
+}
+
+// SPFResult records one SPF verification. It satisfies spf.Observer. Labels are
+// allowlisted: no domain, tenant, address, DNS text or record can become a label.
+func (m *Metrics) SPFResult(mode, outcome string) {
+	if m != nil {
+		defer guard()
+		m.spfVerifs.WithLabelValues(pick(mode, spfModes), pick(outcome, spfOutcomes)).Inc()
+	}
+}
+
+// DMARCResult records one DMARC verification. It satisfies dmarc.Observer.
+// Labels are allowlisted: no domain, tenant, record, URI or error text can
+// become a label.
+func (m *Metrics) DMARCResult(dnsStatus, readiness string) {
+	if m != nil {
+		defer guard()
+		m.dmarcVerifs.WithLabelValues(pick(dnsStatus, dmarcStatuses), pick(readiness, dmarcReady)).Inc()
+	}
+}
+
+// SuppressionCheck records one delivery-time suppression check. result is one of
+// clear, partial, all, error; anything else becomes "other". No address, tenant,
+// domain or message identifier can become a label.
+func (m *Metrics) SuppressionCheck(result string) {
+	if m != nil {
+		defer guard()
+		m.suppChecks.WithLabelValues(pick(result, suppResults)).Inc()
+	}
+}
+
+// SuppressionWrite records one suppression write request by bounded reason and
+// source (created or already present: the database decides).
+func (m *Metrics) SuppressionWrite(reason, source string) {
+	if m != nil {
+		defer guard()
+		m.suppWrites.WithLabelValues(pick(reason, suppReasons), pick(source, suppSources)).Inc()
+	}
+}
+
+var (
+	abuseControls = []string{"request", "recipient", "tenant_queue", "backpressure", "tenant_permit", "destination_permit"}
+	abuseOutcomes = []string{"allowed", "limited", "unavailable", "impossible", "deferred"}
+)
+
+// AbuseDecision records one outbound abuse-control decision. control and outcome
+// are closed sets (anything else becomes "other"); no tenant, key, address,
+// domain or message id can become a label, so cardinality is 6x5 at most.
+func (m *Metrics) AbuseDecision(control, outcome string) {
+	if m != nil {
+		defer guard()
+		m.abuse.WithLabelValues(pick(control, abuseControls), pick(outcome, abuseOutcomes)).Inc()
 	}
 }

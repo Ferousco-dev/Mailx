@@ -193,12 +193,18 @@ func TestDKIMMigrationUpgradesExistingDomainData(t *testing.T) {
 	ctx := context.Background()
 	tn := newTestTenant(t, db)
 	d := dkimFixture(t, db, tn.ID, "example.com")
-	// Downgrade just this migration, then upgrade: domain data survives, table returns empty.
-	if err := db.MigrateDownOne(ctx); err != nil {
-		t.Fatal(err)
-	}
+	// Roll back until the DKIM migration is undone (later migrations sit above it),
+	// then upgrade: domain data survives, the table returns empty.
 	var exists bool
-	_ = db.pool.QueryRow(ctx, `SELECT to_regclass('dkim_keys') IS NOT NULL`).Scan(&exists)
+	for i := 0; i < 10; i++ {
+		if err := db.MigrateDownOne(ctx); err != nil {
+			t.Fatal(err)
+		}
+		_ = db.pool.QueryRow(ctx, `SELECT to_regclass('dkim_keys') IS NOT NULL`).Scan(&exists)
+		if !exists {
+			break
+		}
+	}
 	if exists {
 		t.Fatal("down migration must drop dkim_keys")
 	}

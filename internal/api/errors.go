@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 )
 
 // ErrorType is the small, stable public error taxonomy every /v1 error
@@ -22,6 +23,7 @@ const (
 	ErrUnsupportedMediaType   ErrorType = "unsupported_media_type"
 	ErrInternal               ErrorType = "internal_error"
 	ErrTemporarilyUnavailable ErrorType = "temporarily_unavailable"
+	ErrRateLimited            ErrorType = "rate_limited"
 )
 
 var errorStatus = map[ErrorType]int{
@@ -35,6 +37,7 @@ var errorStatus = map[ErrorType]int{
 	ErrUnsupportedMediaType:   http.StatusUnsupportedMediaType,
 	ErrInternal:               http.StatusInternalServerError,
 	ErrTemporarilyUnavailable: http.StatusServiceUnavailable,
+	ErrRateLimited:            http.StatusTooManyRequests,
 }
 
 // apiError is a handler-raised error carrying everything writeError needs.
@@ -45,6 +48,9 @@ type apiError struct {
 	Type    ErrorType
 	Code    string
 	Message string
+	// RetryAfter, when positive, is sent as a Retry-After header in whole seconds
+	// (RFC 9110 10.2.3) on 429 and 503 refusals.
+	RetryAfter int
 }
 
 func (e *apiError) Error() string { return e.Message }
@@ -63,6 +69,9 @@ type errorBody struct {
 	} `json:"error"`
 }
 
+// defaultUnavailableRetryAfter is the Retry-After (seconds) of a 503 that names none.
+const defaultUnavailableRetryAfter = 5
+
 func writeError(w http.ResponseWriter, r *http.Request, err *apiError) {
 	status, ok := errorStatus[err.Type]
 	if !ok {
@@ -75,6 +84,14 @@ func writeError(w http.ResponseWriter, r *http.Request, err *apiError) {
 	body.Error.RequestID = requestIDFromContext(r.Context())
 
 	w.Header().Set("Content-Type", "application/json")
+	retryAfter := err.RetryAfter
+	if retryAfter <= 0 && status == http.StatusServiceUnavailable {
+		// Every 503 carries Retry-After, as the OpenAPI contract states.
+		retryAfter = defaultUnavailableRetryAfter
+	}
+	if retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
+	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }

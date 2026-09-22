@@ -51,8 +51,13 @@ commit dates (all v0.1-v0.15 work is dated 2026-09-13..15).
 - v0.23 Logs / Observability: **COMPLETE** (merged; `37b384d`).
 - v0.24 Outbound SMTP STARTTLS: **COMPLETE** (`d0cbda6`).
 - v0.25 SMTP AUTH / trusted relay: **COMPLETE** (`631836c`).
-- v0.26 DKIM / verified-From: **COMPLETE** once the feat commit lands (validated 2026-09-21; see `git log`).
-- v0.27 SPF: **NEXT, NOT STARTED.**
+- v0.26 DKIM / verified-From: **COMPLETE** (`ce40839`, PR #15 fixes `06f3c3e`, `48939d0`).
+- v0.27 SPF sending-authorization guidance: **COMPLETE** (`cc8c178`, local, not pushed). Design `docs/design-v0.27.md`. No schema change.
+- v0.28 DMARC policy, alignment and DNS readiness: **COMPLETE** (`c4b5882`, corrected to the RFC 9989 tree walk in `5d60bc4`; local, not pushed). Design `docs/design-v0.28.md`. No schema change.
+- v0.29 public SMTP identity, PTR/rDNS, EHLO and DNS readiness: **COMPLETE** (`2e7e747`; opt-in low-memory PostgreSQL profile `0b215ba`; local, not pushed). Design `docs/design-v0.29.md`. No schema change.
+- v0.30 recipient suppression management: **COMPLETE** (validated 2026-09-21; commit `feat: add recipient suppression management`, local, not pushed). Design `docs/design-v0.30.md`. Migration 000013.
+- v0.31 outbound abuse controls & sending safety: **COMPLETE** (validated 2026-09-22; commit `feat: add outbound abuse controls`, local, not pushed). Design `docs/design-v0.31.md`. Migration 000014.
+- v0.32 complaint/feedback loops: **NEXT, NOT STARTED.** A separate controlled Internet-delivery test is a separate explicit action.
 
 ## Uncertain / unavailable
 
