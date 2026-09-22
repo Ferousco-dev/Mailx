@@ -182,26 +182,33 @@ func decodeSuppressionCursor(token string) (database.SuppressionCursor, error) {
 // delivery time and records that truthfully, and it re-checks anyway because a
 // suppression can appear after acceptance. A failing lookup refuses the request
 // (never "assume not suppressed").
-func (h *emailHandler) checkRecipientsForAcceptance(w http.ResponseWriter, r *http.Request, tenantID string, envelope []string) bool {
+//
+// It returns the number of recipients that will actually be delivered (not
+// suppressed): the recipient rate limit charges exactly that number, so a
+// suppressed address costs the sender nothing.
+func (h *emailHandler) checkRecipientsForAcceptance(w http.ResponseWriter, r *http.Request, tenantID string, envelope []string) (deliverable int, ok bool) {
 	keys := make([]string, 0, len(envelope))
 	for _, rcpt := range envelope {
 		k, err := suppression.Normalize(rcpt)
 		if err != nil {
 			writeError(w, r, newError(ErrValidation, "invalid_recipient", "every recipient must be a plain ASCII address such as person@example.com"))
-			return false
+			return 0, false
 		}
 		keys = append(keys, k)
 	}
 	suppressed, err := h.db.SuppressedForTenant(r.Context(), tenantID, keys)
 	if err != nil {
 		writeError(w, r, newError(ErrInternal, "internal_error", "failed to check recipient suppression"))
-		return false
+		return 0, false
 	}
 	for _, k := range keys {
 		if !suppressed[k] {
-			return true
+			deliverable++
 		}
 	}
+	if deliverable > 0 {
+		return deliverable, true
+	}
 	writeError(w, r, newError(ErrValidation, "all_recipients_suppressed", "every recipient is on this account's suppression list; nothing was sent"))
-	return false
+	return 0, false
 }

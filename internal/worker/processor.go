@@ -56,6 +56,15 @@ func (p *Pool) processOne(ctx context.Context, c queue.Claim) {
 		return
 	}
 
+	// Concurrency permits come AFTER suppression (a suppressed job never holds a
+	// slot) and BEFORE the coordinator/transport. On refusal the job is already
+	// released with a jittered delay and no attempt is recorded.
+	donePermits, permitted := p.acquirePermits(ctx, c, domain)
+	if !permitted {
+		return
+	}
+	defer donePermits()
+
 	req := delivery.Request{
 		Domain: domain,
 		Envelope: mail.Envelope{

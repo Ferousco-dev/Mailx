@@ -24,7 +24,7 @@ One binary `cmd/mailx`.
 Developer -> REST API (auth, scope, validate, optional Idempotency-Key)
   -> FileStore write of raw MIME (BEFORE the DB tx; orphan file possible if tx fails)
   -> PostgreSQL tx: message + recipients + 'queued' event + outbox row (+ idempotency completion)   => HTTP 202
-  -> dispatch poller: due outbox rows -> Redis queue (duplicate-safe Enqueue; MarkOutboxDispatched)
+  -> dispatch poller: due outbox rows, ROUND-ROBIN across tenants (v0.31) -> Redis queue (duplicate-safe Enqueue; MarkOutboxDispatched)
   -> worker pool (N goroutines): claim -> load DURABLE state -> retry.Coordinator.Attempt
        -> delivery.Engine (DNS/MX -> transfer -> SMTP client)
   -> OutcomeStore.Persist (ONE PG tx): delivery_attempts row + messages.status + immutable event
@@ -62,6 +62,7 @@ SMTP receive path (`:2525`) only parses and stores to FileStore; it does NOT cre
 | `internal/dmarc` | v0.28 sender-side DMARC readiness (RFC 9989): bounded parser, RFC 9989 DNS Tree Walk (`treewalk.go`, one walk gives policy and Organizational Domain), alignment (`align.go`), pure readiness model (`readiness.go`), service I/O (`service.go`); imports no dkim/spf/transport/PSL/`internal/domain` package (adapters live in `cmd/mailx/dmarcconfig.go`) |
 | `internal/smtpidentity` | v0.29 public SMTP infrastructure identity: strict hostname validation and PTR / forward-confirmed reverse-DNS readiness (operator diagnostic); imports no transport/DKIM/DMARC/API package and nothing but `cmd/mailx` imports it (tested) |
 | `internal/suppression` | v0.30 pure suppression policy: reason/source vocabulary, the ONE address normalization (`Normalize`), the hard-bounce qualification rule (`QualifiesHardBounce`); no I/O, no DB import. Persistence in `internal/database/suppressions.go`; worker enforcement in `internal/worker/suppression.go` |
+| `internal/ratelimit` | v0.31 outbound abuse-control primitives on Redis: `Store` (GCRA multi-bucket `Allow` in one atomic Lua script; lease-based concurrency permits `Acquire/Release/Held`; key builders) and `Policy` (defaults, `Validate`, `RetryAfterSeconds`). No PostgreSQL, HTTP or queue import. API wiring in `internal/api/abuse.go`, worker permits in `internal/worker/permits.go`, config in `cmd/mailx/abuseconfig.go` |
 | `cmd/mailx` | Composition root (`databaseOutcomeStore` adapter lives here so `database` does not import `delivery`/`retry`) |
 
 ## HTTP surface (v1)
@@ -73,14 +74,14 @@ Routes: `POST /v1/emails`, `GET /v1/emails[/{id}]`, `/v1/domains` (+`/{id}`, `/{
 `POST /v1/emails` in v0.22: text/html body, to/cc/bcc, reply-to; **all recipients must share one domain (422 `mixed_recipient_domains`)**; attachments/tags/custom headers deferred.
 OpenAPI is hand-written (`internal/api/openapi.go`) and guarded by a runtime drift test: API changes must update it.
 
-## Database (PostgreSQL 16; migrations 000001-000013; forward-only fixes, applied migrations never edited)
+## Database (PostgreSQL 16; migrations 000001-000014; forward-only fixes, applied migrations never edited)
 
 Tables: `tenants`, `messages`, `recipients`, `delivery_attempts`, `events`, `outbox`, `api_keys`, `idempotency_keys`, `domains`,
 `webhook_subscriptions`, `webhook_deliveries`, `webhook_delivery_attempts`, `dkim_keys`, `suppressions`. Message statuses: `queued, processing, retrying, delivered, failed, bounced, suppressed`; recipient statuses: `pending, delivered, failed, suppressed`.
 Event types (internal): `queued, delivery_attempted, delivered, deferred, bounced, failed, suppressed`; public mapping: `email.queued, email.delivered, email.delivery_delayed, email.failed, email.bounced, email.suppressed` (`delivery_attempted` is never public).
 IDs: application-generated crypto-random hex TEXT (no sequential IDs; avoids enumeration/volume leaks). `tenant_id` on every tenant-owned table.
 Raw MIME and attachments are not in PostgreSQL. Indexes are justified by query patterns and checked by EXPLAIN tests (`explain_test.go`).
-Note: migration 000011 `webhook_deliveries` FKs `events(tenant_id,id) ON DELETE CASCADE`; subscriptions use `ON DELETE RESTRICT` (history retained; disable, not delete).
+Note: migration 000014 (v0.31) replaced `idx_outbox_pending (available_at)` with `idx_outbox_pending_tenant (tenant_id, available_at) WHERE dispatched_at IS NULL` (see Abuse controls); its down migration restores the old index. Migration 000011 `webhook_deliveries` FKs `events(tenant_id,id) ON DELETE CASCADE`; subscriptions use `ON DELETE RESTRICT` (history retained; disable, not delete).
 
 ## Configuration (environment)
 
@@ -88,6 +89,7 @@ Note: migration 000011 `webhook_deliveries` FKs `events(tenant_id,id) ON DELETE 
 `MAILX_STORAGE_ROOT`, `MAILX_WORKERS` (4), `MAILX_QUEUE_CAPACITY` (1000), `MAILX_CLAIM_LEASE` (2m), `MAILX_API_KEY_PEPPER` (optional; warns if unset),
 `MAILX_WEBHOOK_MASTER_KEY` (**required** in full mode; base64 32 bytes), `MAILX_WEBHOOK_ALLOW_INSECURE` (dev only: allows HTTP + private IPs), `MAILX_WEBHOOK_WORKERS` (4), `MAILX_LOG_LEVEL` (info), `MAILX_LOG_FORMAT` (json|text), `MAILX_OBSERVABILITY_ADDR` (:9090; explicitly empty disables), `MAILX_SENDING_IPS` / `MAILX_SPF_RELAY_INCLUDE` (v0.27, optional SPF declarations; see below), `MAILX_SMTP_HOSTNAME` (v0.29 public SMTP identity; required when `MAILX_SENDING_IPS` is set).
 Tests: `MAILX_TEST_DATABASE_URL` (PostgreSQL DSN; if unset, a local default is tried and tests skip when unreachable) and `REDIS_ADDR` (Redis tests fail loudly rather than skip). CI runs `go test -race ./...` with Postgres/Redis services + govulncheck.
+Abuse controls (v0.31), all optional, invalid value FAILS STARTUP: `MAILX_ABUSE_CONTROLS` (on|off), `MAILX_LIMIT_TENANT_RPS/_BURST` (50/100), `MAILX_LIMIT_KEY_RPS/_BURST` (25/50), `MAILX_LIMIT_RECIPIENTS_PER_SEC/_BURST` (20/500), `MAILX_LIMIT_MAX_RECIPIENTS` (50), `MAILX_LIMIT_TENANT_MAX_QUEUED` (10000), `MAILX_LIMIT_MAX_PENDING_DISPATCH` (100000), `MAILX_LIMIT_TENANT_CONCURRENCY` (16), `MAILX_LIMIT_DESTINATION_CONCURRENCY` (16), `MAILX_LIMIT_PERMIT_TTL` (10m), `MAILX_RETRY_JITTER_PERCENT` (10).
 `.env` and `.claude` are gitignored; `.env.example` holds dev-only placeholders.
 
 ## Correctness invariants (each verified in code/tests/history)
@@ -206,6 +208,21 @@ Tests: `MAILX_TEST_DATABASE_URL` (PostgreSQL DSN; if unset, a local default is t
 - Observability: `mailx_suppression_checks_total{result clear|partial|all|error}`, `mailx_suppression_writes_total{reason,source}` (allowlisted); no address/tenant/domain/message label; health unchanged; no Redis cache (PostgreSQL is the only source of truth).
 - Measured (EXPLAIN ANALYZE, BUFFERS, 120,000 rows over two tenants): recipient lookup Index Only Scan on the unique index 0.031 ms/14 buffers; worker join 0.016 ms; list index-ordered, no sort, 0.014 ms; end-to-end benchmark ~0.36 ms per delivery attempt including the PostgreSQL round trip.
 
+## Abuse controls (v0.31; design: `docs/design-v0.31.md`)
+
+- Purpose: make legitimate sending safer (limit blast radius of a compromised key, runaway client, or one tenant starving others). NOT a reputation system, content filter, ML, billing, or warm-up.
+- Tenant is the primary boundary. `requestLimitMiddleware` (after `authenticateMiddleware`, so unauthenticated requests never spend a bucket) charges a TENANT bucket and the API KEY's guard bucket in ONE atomic call (all-or-nothing); key limit <= tenant limit is validated, and every key charges the tenant bucket, so extra keys never raise a limit. 429 `tenant_rate_limited` / `api_key_rate_limited`.
+- Algorithm: GCRA (token-bucket equivalent) in one Redis Lua script; time is Redis `TIME` (one clock); exactly ONE `EVALSHA` per decision; `{tenant}` hash tags for Cluster; every key has a PX TTL (idle keys vanish); per-call timeout.
+- Send path (`POST /v1/emails`), after validation/signing/suppression and after the idempotency claim is owned: `admitSend` = tenant undelivered cap (`CountTenantQueued`, bounded count; 429 `tenant_queue_full`) -> global backlog (`CountPendingOutbox`; 503 `system_busy`) -> recipient bucket charged per DELIVERABLE recipient (suppressed recipients are free; 429 `recipient_rate_limited`). Any refusal calls `ReleaseIdempotencyClaim` (fingerprint-guarded) so the same Idempotency-Key is reusable after Retry-After. Replays and same-key/different-body 409s are decided BEFORE any charge. Per-message recipient max = `MAILX_LIMIT_MAX_RECIPIENTS`.
+- 429 = the tenant/key exceeded its limit (Retry-After exact for rate limits; fixed 30 s for queue-full). 503 = system capacity or the limiter cannot answer (Retry-After 5 or 30). Both send `Retry-After` in whole seconds; bodies use the standard error shape and never carry tenant/key/address data.
+- Failure policy: limiter (Redis) error on a send or any mutating request => FAIL CLOSED 503 `rate_limiter_unavailable`; on GET => fail open (metric + log). PostgreSQL count errors => 500. Worker permit state unknown => defer 15 s, no attempt. `MAILX_ABUSE_CONTROLS=off` is the only opt-out (loud warning); any other non-`on` value fails startup.
+- Delivery: `worker.acquirePermits` (after suppression, before coordinator/transport; needs `worker.TenantLookup`, implemented by `databaseOutcomeStore`) takes a per-tenant then per-destination-domain lease (ZSET holder->expiry). Refused => `p.release` with a jittered 5 s delay: NO attempt recorded, retry counters unmoved, no SMTP. Permits are released with a fresh context (cancellation/shutdown safe); a crashed worker's permit expires by `MAILX_LIMIT_PERMIT_TTL`.
+- Fair dispatch: `ListPendingOutbox` = recursive loose index scan of tenants (cap 200) + LATERAL per-tenant oldest rows + rank interleave (round robin); `FOR UPDATE SKIP LOCKED` removed (implicit tx made it a no-op; Enqueue is duplicate-safe, MarkOutboxDispatched guarded). Migration 000014 swaps the index (both indexes together made the planner filter 15,000 rows behind a big backlog; tenant-index-only: 0.062 ms at 30,000 rows).
+- Retry jitter: `BackoffPolicy.JitterPercent` (0-50) applied in `NextSchedule` via `Jitter(delay, seed)` (FNV of the scheduling instant: deterministic, <= Max, >= 1 s); same helper spreads permit deferrals.
+- Observability: `mailx_abuse_control_decisions_total{control request|recipient|tenant_queue|backpressure|tenant_permit|destination_permit, outcome allowed|limited|unavailable|impossible|deferred}` (unknown -> `other`; max 30 series); logs never carry tenant/key/address/domain.
+- OpenAPI (`openAPIServed`) adds `429 RateLimited` to every operation and `503 Unavailable` to every mutating one, both with a `Retry-After` header, plus the idempotency/abuse text on POST /emails; drift-tested.
+- Measured: limiter adds ~0.31 ms/request serially (Redis round trip in a Docker VM; 0.09 ms at 4 CPUs), +30 allocs/1.4 KB; fair dispatch 1.2 ms per 100-row batch (20 tenants); bounded queued count 0.30 ms (500 rows). Low-memory profile: unaffected (PostgreSQL 34.6 MiB, Redis 4.2 MiB, app 8.1 MiB during a 60-send smoke).
+
 ## Security decisions (verified)
 
 - API secrets never stored raw: only `key_id` + HMAC-SHA256(pepper, secret); 256-bit random secret makes slow password hashing pointless; unkeyed SHA-256 fallback without pepper is a documented dev-only choice. All auth failures collapse to one generic 401; DB error on auth fails closed. No public key-creation endpoint (CLI bootstrap).
@@ -234,12 +251,14 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 8. **No inbound STARTTLS and no inbound SMTP AUTH** (outbound STARTTLS exists since v0.24); IDN/A-label domains unsupported in DNS and domain ownership. Outbound TLS gaps: no DANE/MTA-STS, so MX-to-domain binding relies on DNS; default opportunistic policy fails closed on a peer that advertises STARTTLS with an untrusted or mismatched certificate (no unverified-encryption mode); TLS facts are logs/metrics only, not persisted per attempt.
 9. **FileStore write precedes DB commit** in the API path: a failed tx can leave an orphan message directory (deliberate and documented as harmless in `email_handler.go`: the reverse, a DB row without bytes, cannot happen; no reaper exists). Raw MIME lives on local disk (single-node storage).
 10. **SMTP receiver is not wired to the outbox/queue**: inbound mail is stored, not relayed.
-11. Attempt limits/backoff are fixed defaults (5 ops, 30m/4h), not configurable via env.
+11. Attempt limits/backoff are fixed defaults (5 ops, 30m/4h); only the jitter spread is configurable (`MAILX_RETRY_JITTER_PERCENT`, v0.31).
 12. PostgreSQL integration tests use `MAILX_TEST_DATABASE_URL` when set, otherwise a local default DSN, and **skip** if unreachable; Redis tests **fail** if Redis is unreachable. Neither self-provisions. Validation runs must set the DSN explicitly or DB coverage is silently lost.
 13. `newMux` (`internal/api/routes.go`) falls back to a zero-key `SecretBox` when no `routeServices` are passed. Production always passes a real webhook service (`api.Config.Webhooks` is required), so this is a test-scaffold footgun, not an active bug.
 14. Webhook secret has a single master key and no key-versioning/rotation path for the master key.
 
 ## Superseded (do not treat as current)
+
+- Pre-v0.31: the dispatcher read the outbox in global `available_at` order under `FOR UPDATE SKIP LOCKED` on `idx_outbox_pending`, so one tenant's backlog could delay every other tenant's messages; there were no request, recipient, queue-depth or concurrency limits and retry times were exactly `Base*2^n`. Superseded by round-robin dispatch (migration 000014), abuse controls and jittered retries.
 
 - Pre-v0.30: every accepted recipient could be sent to regardless of history; a permanent RCPT rejection only failed that one message and the same dead address would be tried again by the next message. Superseded by tenant suppression (auto hard-bounce + manual).
 
@@ -261,4 +280,5 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 19. Hosted Redis: `queue.RedisConfig` has a `Password` field and `redis.Options` could take TLS, but `cmd/mailx/serve.go` passes only `REDIS_ADDR` (host:port): no password, no TLS. A managed Redis/Valkey that requires TLS and a password (for example Aiven) is unsupported without a code change. PostgreSQL works with a hosted service through `DATABASE_URL` (pgx accepts `sslmode`); the pool default is 10 connections (`database.defaultMaxConns`), relevant for plans with a low `max_connections` (Aiven free: 20).
 19b. SMTP identity (v0.29): egress IP is unproven (RSK-020); the inbound receiver greeting is still `220 localhost MailX SMTP Server` (inbound out of scope; no Received headers are generated); PTR targets that are CNAMEs are not detected (RFC 1912); DSNs are not transmitted so bounce identity is not exercised; one identity is used for direct and relay.
 20. Suppression (v0.30): RCPT is still all-or-error, so one bad recipient fails the whole message (v0.30 only prevents the repeat by suppressing it); per-recipient delivered/failed states are not modeled; no complaint/unsubscribe/feedback producer (v0.32); no bulk import/export; hard delete leaves no audit trail of removals; no global/cross-tenant suppression (v0.31 abuse controls); case variants of a local part are one key by design; messages accepted before v0.30 with unkeyable recipients stay deliverable.
+21. Abuse controls (v0.31): limits are per ACCOUNT (destination concurrency is per domain, destination RATE is not limited); no per-route weights, warm-up, automatic suspension, or complaint/bounce-rate breaker; charged recipient tokens are not refunded if PostgreSQL fails after the charge; more than 200 simultaneously backlogged tenants are served in tenant-id order per dispatch batch (RSK-031); sending and delivery depend on Redis for limiting (fail closed, RSK-032); a permit TTL shorter than one attempt lets that tenant briefly exceed its concurrency limit (RSK-034); RSK-029 (one bad recipient fails a multi-recipient message) is unchanged.
 16. DKIM master key lives in the environment like the webhook key (no `_FILE` input, no re-encryption tooling for master-key rotation); losing it makes stored DKIM keys undecryptable and domains with an active key refuse to send until rekeyed.

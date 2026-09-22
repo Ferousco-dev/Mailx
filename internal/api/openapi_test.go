@@ -143,3 +143,46 @@ func TestHealthEndpoints(t *testing.T) {
 		t.Fatalf("ready: got %d", rec.Code)
 	}
 }
+
+// v0.31: every operation documents 429, every mutating operation documents 503, both with Retry-After,
+// and every abuse-control error code the runtime can emit is named in the served contract.
+func TestServedOpenAPIDocumentsRateLimitContract(t *testing.T) {
+	mux, _, _ := setupMux(t)
+	rec := doJSON(t, mux, "GET", "/openapi.json", nil)
+	var doc map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+		t.Fatal(err)
+	}
+	for path, item := range doc["paths"].(map[string]any) {
+		for method, opAny := range item.(map[string]any) {
+			resp := opAny.(map[string]any)["responses"].(map[string]any)
+			if ref, _ := resp["429"].(map[string]any)["$ref"].(string); ref != "#/components/responses/RateLimited" {
+				t.Errorf("%s %s does not document 429", method, path)
+			}
+			if method != "get" {
+				if ref, _ := resp["503"].(map[string]any)["$ref"].(string); ref != "#/components/responses/Unavailable" {
+					t.Errorf("%s %s does not document 503", method, path)
+				}
+			}
+		}
+	}
+	responses := doc["components"].(map[string]any)["responses"].(map[string]any)
+	for _, name := range []string{"RateLimited", "Unavailable"} {
+		hdrs := responses[name].(map[string]any)["headers"].(map[string]any)
+		if _, ok := hdrs["Retry-After"]; !ok {
+			t.Errorf("%s response does not document Retry-After", name)
+		}
+	}
+	body := rec.Body.String()
+	for _, code := range []string{"tenant_rate_limited", "api_key_rate_limited", "recipient_rate_limited", "tenant_queue_full", "system_busy", "rate_limiter_unavailable"} {
+		if !strings.Contains(body, code) {
+			t.Errorf("served contract never mentions the runtime error code %q", code)
+		}
+	}
+	if !strings.Contains(body, "Idempotency-Key") || !strings.Contains(body, "not charged") {
+		t.Error("the contract must state how limits interact with idempotency")
+	}
+	if errorStatus[ErrRateLimited] != http.StatusTooManyRequests {
+		t.Error("rate_limited must map to 429")
+	}
+}

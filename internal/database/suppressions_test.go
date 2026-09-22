@@ -436,20 +436,32 @@ func TestConcurrentHardBouncesOfOneRecipientCreateOneSuppression(t *testing.T) {
 	}
 }
 
+// rollBackPastSuppressions rolls back one migration at a time until the
+// suppressions table is gone, so the test never assumes the v0.30 migration is the
+// newest one (later migrations sit above it).
+func rollBackPastSuppressions(t *testing.T, db *DB) {
+	t.Helper()
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		if err := db.MigrateDownOne(ctx); err != nil {
+			t.Fatalf("down migration: %v", err)
+		}
+		var exists bool
+		_ = db.pool.QueryRow(ctx, `SELECT to_regclass('suppressions') IS NOT NULL`).Scan(&exists)
+		if !exists {
+			return
+		}
+	}
+	t.Fatal("down migrations must drop suppressions")
+}
+
 // The v0.30 migration upgrades a v0.29 database in place and its down migration is safe.
 func TestSuppressionMigrationUpgradesAndDowngradesExistingData(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 	tn := newTestTenant(t, db)
 	// Roll back to the v0.29 schema, create v0.29-era data, then upgrade.
-	if err := db.MigrateDownOne(ctx); err != nil {
-		t.Fatal(err)
-	}
-	var exists bool
-	_ = db.pool.QueryRow(ctx, `SELECT to_regclass('suppressions') IS NOT NULL`).Scan(&exists)
-	if exists {
-		t.Fatal("down migration must drop suppressions")
-	}
+	rollBackPastSuppressions(t, db)
 	legacy, err := db.InsertMessage(ctx, sampleNewMessage(t, tn.ID))
 	if err != nil {
 		t.Fatal(err)
@@ -474,9 +486,7 @@ func TestSuppressionMigrationUpgradesAndDowngradesExistingData(t *testing.T) {
 	if err := db.RecordSuppressedRecipients(ctx, sup.ID, map[string]bool{"bob@example.com": true, "hidden-bcc@example.com": true}, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.MigrateDownOne(ctx); err != nil {
-		t.Fatalf("downgrade with suppressed rows: %v", err)
-	}
+	rollBackPastSuppressions(t, db)
 	var status string
 	_ = db.pool.QueryRow(ctx, `SELECT status FROM messages WHERE id = $1`, sup.ID).Scan(&status)
 	if status != "failed" {

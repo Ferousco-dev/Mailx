@@ -25,6 +25,10 @@ type databaseOutcomeStore struct {
 // the worker only enforces it for stores implementing worker.SuppressionGate.
 var _ worker.SuppressionGate = databaseOutcomeStore{}
 
+// databaseOutcomeStore also names a message's tenant, so per-tenant delivery
+// permits work in production.
+var _ worker.TenantLookup = databaseOutcomeStore{}
+
 func (s databaseOutcomeStore) Load(ctx context.Context, messageID string) (worker.DurableDeliveryState, error) {
 	durable, err := s.db.LoadDeliveryState(ctx, messageID)
 	if err != nil {
@@ -120,6 +124,11 @@ func (s databaseOutcomeStore) Persist(ctx context.Context, messageID string, att
 // SuppressedRecipients implements worker.SuppressionGate.
 func (s databaseOutcomeStore) SuppressedRecipients(ctx context.Context, messageID string, keys []string) (map[string]bool, error) {
 	return s.db.SuppressedForMessage(ctx, messageID, keys)
+}
+
+// MessageTenant implements worker.TenantLookup.
+func (s databaseOutcomeStore) MessageTenant(ctx context.Context, messageID string) (string, error) {
+	return s.db.MessageTenant(ctx, messageID)
 }
 
 // RecordSuppressed implements worker.SuppressionGate.

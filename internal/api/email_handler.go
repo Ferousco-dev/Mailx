@@ -44,10 +44,21 @@ type emailHandler struct {
 	// requires it).
 	dkim *dkim.Service
 	now  func() time.Time
+	// abuse holds outbound abuse controls; nil disables them.
+	abuse *AbuseControls
 	// msgDomain is the right-hand side of generated Message-IDs (RFC 5322 3.6.4:
 	// a domain of the generating host). It is MailX's infrastructure hostname,
 	// never a tenant domain, and defaults to the local development identity.
 	msgDomain string
+}
+
+// recipientLimit is the per-message recipient cap: the abuse policy's value when
+// configured, otherwise the built-in default.
+func (h *emailHandler) recipientLimit() int {
+	if h.abuse != nil && h.abuse.Policy.MaxRecipientsPerMessage > 0 {
+		return h.abuse.Policy.MaxRecipientsPerMessage
+	}
+	return defaultMaxRecipients
 }
 
 const defaultMessageIDDomain = "mailx.local"
@@ -95,7 +106,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := h.now()
-	scheduledAt, verr := req.validate(now)
+	scheduledAt, verr := req.validate(now, h.recipientLimit())
 	if verr != nil {
 		writeError(w, r, verr)
 		return
@@ -126,7 +137,8 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if !h.checkRecipientsForAcceptance(w, r, tenantID, built.Envelope) {
+	deliverable, ok := h.checkRecipientsForAcceptance(w, r, tenantID, built.Envelope)
+	if !ok {
 		return
 	}
 
@@ -164,6 +176,15 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		idemCompletion = &database.IdempotencyCompletion{Operation: idempotency.OperationEmailsCreate, IdempotencyKey: idemKey, Fingerprint: fingerprint}
+	}
+
+	// Abuse controls run only for a request that will really create a message:
+	// replays (handled above) and 409s never reach here, so they are never
+	// charged. A refusal releases the idempotency claim it owns.
+	if aerr := h.admitSend(r.Context(), tenantID, deliverable); aerr != nil {
+		h.releaseClaim(tenantID, idemCompletion)
+		writeError(w, r, aerr)
+		return
 	}
 
 	// FileStore write happens BEFORE the durable DB transaction: if this

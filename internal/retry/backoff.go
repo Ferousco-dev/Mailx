@@ -3,6 +3,7 @@ package retry
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"time"
 )
 
@@ -18,6 +19,42 @@ var (
 type BackoffPolicy struct {
 	Base time.Duration
 	Max  time.Duration
+	// JitterPercent spreads retry times by up to +/- this percent (0-50) so many
+	// messages that failed at the same moment (a remote outage) do not all retry at
+	// the same moment again (a retry storm). Zero disables jitter. Jitter never
+	// pushes a delay above Max or below one second.
+	JitterPercent int
+}
+
+// Jitter returns delay spread by the policy's JitterPercent. It is deterministic in
+// (delay, seed) so tests are exact; callers pass a seed that differs between
+// messages (the retry scheduling instant does), which is what breaks
+// synchronization. The result is always within [delay*(1-p), delay*(1+p)], at most
+// Max and at least one second.
+func (p BackoffPolicy) Jitter(delay time.Duration, seed int64) time.Duration {
+	if p.JitterPercent <= 0 || delay <= 0 {
+		return delay
+	}
+	pct := p.JitterPercent
+	if pct > 50 {
+		pct = 50
+	}
+	h := fnv.New64a()
+	var b [8]byte
+	for i := range b {
+		b[i] = byte(uint64(seed) >> (8 * i))
+	}
+	_, _ = h.Write(b[:])
+	// u in [-1000, 1000] -> a fraction of the jitter span.
+	u := int64(h.Sum64()%2001) - 1000
+	out := delay + time.Duration(int64(delay)/100*int64(pct)*u/1000)
+	if p.Max > 0 && out > p.Max {
+		out = p.Max
+	}
+	if out < time.Second {
+		out = time.Second
+	}
+	return out
 }
 
 // DefaultBackoffPolicy returns RFC-aligned initial defaults. They remain

@@ -100,9 +100,12 @@ type suppRig struct {
 	q      *orderedQueue
 	base   *queue.MemoryQueue
 	client *smtp.Client // trusts the rig's fake MX certificate
+	// outcomes is the store handed to pools; it defaults to store and lets a test
+	// substitute a wrapper (e.g. one that also implements TenantLookup).
+	outcomes OutcomeStore
 }
 
-func newSuppRig(t *testing.T, mxOpts smtptest.Options, relay bool, store *suppStore) (*suppRig, func(workers int) *Pool) {
+func newSuppRig(t *testing.T, mxOpts smtptest.Options, relay bool, store *suppStore) (*suppRig, func(workers int, opts ...Option) *Pool) {
 	t.Helper()
 	pki := smtptest.NewPKI(t)
 	cert := pki.Leaf(t, []string{"localhost"}, nil, time.Hour)
@@ -130,9 +133,9 @@ func newSuppRig(t *testing.T, mxOpts smtptest.Options, relay bool, store *suppSt
 	coord, _ := retry.NewCoordinator(engine, retry.DefaultBackoffPolicy(), retry.DefaultAttemptLimit())
 	base := mustQ(t, 64)
 	q := &orderedQueue{Queue: base, notify: make(chan struct{}, 64)}
-	r := &suppRig{t: t, mx: mx, store: store, loader: newFakeLoader(), q: q, base: base, client: client}
-	return r, func(workers int) *Pool {
-		p, err := NewPool(q, r.loader, coord, store, Config{Workers: workers})
+	r := &suppRig{t: t, mx: mx, store: store, loader: newFakeLoader(), q: q, base: base, client: client, outcomes: store}
+	return r, func(workers int, opts ...Option) *Pool {
+		p, err := NewPool(q, r.loader, coord, r.outcomes, Config{Workers: workers}, opts...)
 		if err != nil {
 			t.Fatal(err)
 		}

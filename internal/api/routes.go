@@ -20,6 +20,7 @@ type routeServices struct {
 	spf      *spf.Service
 	dmarc    *dmarc.Service
 	metrics  *observability.Metrics
+	abuse    *AbuseControls
 }
 
 // newMux registers every /v1 route plus health checks. Handlers stay
@@ -85,7 +86,14 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("GET /v1/webhooks/{id}/deliveries", requireScope(auth.ScopeWebhooksRead)(webhooks.handleDeliveries))
 	v1.HandleFunc("GET /v1/events", requireScope(auth.ScopeWebhooksRead)(webhooks.handleEvents))
 
-	authenticated := chain(recordRoute(v1), authenticateMiddleware(authSvc))
+	var abuse *AbuseControls
+	if len(extras) > 0 {
+		abuse = extras[0].abuse
+	}
+	// Order matters: authenticate first (the limiter needs the tenant and key),
+	// then the request limiter, then the route. Unauthenticated requests are
+	// rejected before they can touch a tenant bucket.
+	authenticated := chain(recordRoute(v1), authenticateMiddleware(authSvc), requestLimitMiddleware(abuse))
 	mux.Handle("/v1/", authenticated)
 
 	mux.HandleFunc("GET /health/live", func(w http.ResponseWriter, r *http.Request) {

@@ -161,3 +161,15 @@ fmt, vet, builds (darwin, linux/amd64), `go test -count=1 ./...` and `-race` wit
 
 ## 2026-09-21 | G6-G8 | release-manager | GATE PASS (local)
 v0.30 complete pending commit. Not pushed. Next: v0.31 abuse controls (not started).
+
+## 2026-09-22 | G0-G3 | conductor | v0.31 PLAN
+Scope CR-014: outbound abuse controls (tenant/key request limits, recipient-volume limit, per-tenant queue cap, global backpressure, per-tenant/destination concurrency permits, fair dispatch, retry jitter). Baseline at `cd75bc6` green (26 packages, plain and race). Audit findings that shaped the design: `ListPendingOutbox` ordered globally by `available_at` (head-of-line starvation); Redis queue `Enqueue` blocks at capacity; idempotency claim precedes the FileStore write so a post-claim refusal must release it; suppression returns the deliverable count for charging; auth already fails closed on dependency errors (precedent). Research: RFC 6585 (429), RFC 9110 10.2.3 (Retry-After), GCRA/token-bucket references, RFC 5321 (100-recipient minimum), Redis Lua atomicity/Cluster hash tags. Design `docs/design-v0.31.md`; migration 000014 justified by EXPLAIN evidence.
+
+## 2026-09-22 | G4 | constructor | GATE PASS
+`internal/ratelimit` (GCRA `Allow`, lease permits, `Policy`), `internal/api/abuse.go` (middleware, `admitSend`, claim release), `database/abuse.go` + migration 000014 + fair `ListPendingOutbox`, `worker/permits.go`, `retry` jitter, `cmd/mailx/abuseconfig.go`, metrics, programmatic OpenAPI 429/503 with Retry-After, compose/.env docs.
+
+## 2026-09-22 | G5 | verifier | GATE PASS
+fmt, vet, builds (darwin, linux/amd64), `go test -count=1 ./...` and `-race` with real PostgreSQL and Redis: 27 packages, 1533 passes, 0 skipped. Mutation checks (8 deliberate breakages: claim release skipped, recipient cost 0, write fail-open, worker permits skipped, request limiter unwired, queue cap off, backpressure off, round robin broken) each fail tests. Concurrency: 40 parallel sends across 3 keys against a 10-token bucket accept exactly 10; two-process GCRA atomicity accepts exactly 100 of 400. Fuzzers: policy validation/Retry-After (10 s) and config loader (8 s) clean. Real `docker compose build` exit 0; a COPY of the dev database migrated 13 -> 14 (index swap verified) in throwaway containers on a private network (nothing sent; recipients `.invalid`), normal and low-memory profiles: 429 with Retry-After, queue cap 429 `tenant_queue_full` with the refused key reusable, invalid config exits 1 naming the variable, `off` warns loudly, limiter metrics bounded; the real dev containers and database were untouched. Defects DEF-020..022 (fixed). New risks RSK-031..034; RSK-029 remains open.
+
+## 2026-09-22 | G6-G8 | release-manager | GATE PASS (local)
+v0.31 complete pending commit. Not pushed. Next: v0.32 complaint/feedback loops (not started). OPERATIONAL NOTE: the running dev container still runs the v0.30 image; rebuilding it applies migration 000014 and turns the default limits ON (relevant to any script that sends fast).

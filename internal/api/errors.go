@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 )
 
 // ErrorType is the small, stable public error taxonomy every /v1 error
@@ -22,6 +23,7 @@ const (
 	ErrUnsupportedMediaType   ErrorType = "unsupported_media_type"
 	ErrInternal               ErrorType = "internal_error"
 	ErrTemporarilyUnavailable ErrorType = "temporarily_unavailable"
+	ErrRateLimited            ErrorType = "rate_limited"
 )
 
 var errorStatus = map[ErrorType]int{
@@ -35,6 +37,7 @@ var errorStatus = map[ErrorType]int{
 	ErrUnsupportedMediaType:   http.StatusUnsupportedMediaType,
 	ErrInternal:               http.StatusInternalServerError,
 	ErrTemporarilyUnavailable: http.StatusServiceUnavailable,
+	ErrRateLimited:            http.StatusTooManyRequests,
 }
 
 // apiError is a handler-raised error carrying everything writeError needs.
@@ -45,6 +48,9 @@ type apiError struct {
 	Type    ErrorType
 	Code    string
 	Message string
+	// RetryAfter, when positive, is sent as a Retry-After header in whole seconds
+	// (RFC 9110 10.2.3) on 429 and 503 refusals.
+	RetryAfter int
 }
 
 func (e *apiError) Error() string { return e.Message }
@@ -75,6 +81,9 @@ func writeError(w http.ResponseWriter, r *http.Request, err *apiError) {
 	body.Error.RequestID = requestIDFromContext(r.Context())
 
 	w.Header().Set("Content-Type", "application/json")
+	if err.RetryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(err.RetryAfter))
+	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }

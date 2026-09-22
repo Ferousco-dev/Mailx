@@ -63,6 +63,12 @@ func runFull() error {
 	}
 	o.log.Info("smtp_identity_configured", "public", ident.Public, "mode", identityMode(ident))
 
+	abuse, err := openAbuseControls(o)
+	if err != nil {
+		return err
+	}
+	defer abuse.Close()
+
 	q, err := openRedisQueue()
 	if err != nil {
 		return err
@@ -79,7 +85,7 @@ func runFull() error {
 
 	disp := dispatch.New(db, q, dispatch.WithOnError(o.errLogger("dispatch")),
 		dispatch.WithLogger(o.log), dispatch.WithMetrics(o.metrics))
-	pool, err := buildWorkerPool(q, store, db, o, ident)
+	pool, err := buildWorkerPool(q, store, db, o, ident, abuse)
 	if err != nil {
 		return err
 	}
@@ -102,7 +108,7 @@ func runFull() error {
 	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
-		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, MessageIDDomain: ident.Name(),
+		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, MessageIDDomain: ident.Name(), Abuse: abuse.apiControls(o),
 		Ready:  ready.Check,
 		Logger: o.log, Metrics: o.metrics,
 	})
@@ -283,7 +289,7 @@ func engineConfig(relay *delivery.Relay) delivery.Config {
 	return cfg
 }
 
-func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o obs, ident smtpID) (*worker.Pool, error) {
+func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o obs, ident smtpID, abuse *abuseRuntime) (*worker.Pool, error) {
 	tlsCfg, err := outboundTLS(o)
 	if err != nil {
 		return nil, err
@@ -317,15 +323,16 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o
 	if err != nil {
 		return nil, err
 	}
-	coordinator, err := retry.NewCoordinator(engine, retry.DefaultBackoffPolicy(), retry.DefaultAttemptLimit())
+	backoff := retry.DefaultBackoffPolicy()
+	backoff.JitterPercent = abuse.retryJitter()
+	coordinator, err := retry.NewCoordinator(engine, backoff, retry.DefaultAttemptLimit())
 	if err != nil {
 		return nil, err
 	}
 
 	workers := envInt("MAILX_WORKERS", 4)
-	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db, metrics: o.metrics}, worker.Config{Workers: workers, ReportingMTA: ident.Name()},
-		worker.WithOnError(o.errLogger("worker")), worker.WithLogger(o.log), worker.WithMetrics(o.metrics),
-	)
+	opts := append([]worker.Option{worker.WithOnError(o.errLogger("worker")), worker.WithLogger(o.log), worker.WithMetrics(o.metrics)}, abuse.workerOptions()...)
+	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db, metrics: o.metrics}, worker.Config{Workers: workers, ReportingMTA: ident.Name()}, opts...)
 	if err != nil {
 		return nil, err
 	}

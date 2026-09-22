@@ -86,6 +86,9 @@ type Pool struct {
 	onError      func(error)
 	states       *stateStore
 	wg           sync.WaitGroup
+	// permits (optional) bounds concurrent SMTP work per tenant and destination.
+	permits      Permits
+	permitPolicy PermitPolicy
 }
 
 func NewPool(q queue.Queue, loader Loader, coordinator Coordinator, outcomes OutcomeStore, cfg Config, opts ...Option) (*Pool, error) {

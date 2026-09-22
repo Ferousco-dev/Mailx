@@ -1,6 +1,9 @@
 package api
 
-import "net/http"
+import (
+	"encoding/json"
+	"net/http"
+)
 
 // openAPISpec is hand-written (contract-first), not generated from Go
 // types/routes. Rationale (see the v0.18 report's "OpenAPI architecture"
@@ -543,9 +546,60 @@ const openAPISpec = `{
   }
 }`
 
+// openAPIServed is openAPISpec plus the v0.31 rate-limit contract, added
+// programmatically so EVERY operation documents 429 and every mutating operation
+// documents 503 with Retry-After: a hand-edited spec could forget one. Built once at
+// start; a spec that cannot be augmented is a programming error.
+var openAPIServed = mustAugmentOpenAPI(openAPISpec)
+
+const abuseControlsDescription = " Abuse controls: requests are limited per account (a tenant limit that every API key of the account shares, plus a smaller per-key guard), and sending is limited by deliverable recipients (suppressed recipients are not counted), by undelivered messages per account (429 tenant_queue_full) and by system-wide backlog (503 system_busy). A refusal never stores anything and never consumes an Idempotency-Key: retry the same key after Retry-After. Idempotent replays are not charged. 429 means the account exceeded a limit; 503 means MailX is at capacity or its limiter is unavailable (sending fails closed). Both carry Retry-After in whole seconds."
+
+func mustAugmentOpenAPI(raw string) []byte {
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		panic("api: openAPISpec does not parse: " + err.Error())
+	}
+	retryHeader := map[string]any{"Retry-After": map[string]any{
+		"description": "Seconds to wait before retrying the same request (RFC 9110 10.2.3). Exact for rate limits; a fixed short interval for capacity refusals.",
+		"schema":      map[string]any{"type": "integer", "minimum": 1},
+	}}
+	comps := doc["components"].(map[string]any)
+	resps := comps["responses"].(map[string]any)
+	resps["RateLimited"] = map[string]any{
+		"description": "Too Many Requests: the account or API key exceeded a limit (codes tenant_rate_limited, api_key_rate_limited, recipient_rate_limited, tenant_queue_full). Nothing was stored and no Idempotency-Key was consumed.",
+		"headers":     retryHeader,
+		"content":     map[string]any{"application/json": map[string]any{"schema": map[string]any{"$ref": "#/components/schemas/APIError"}}},
+	}
+	resps["Unavailable"] = map[string]any{
+		"description": "Service Unavailable: MailX is at capacity (system_busy) or a dependency needed to enforce limits or sign mail is unavailable (rate_limiter_unavailable, dkim_signing_unavailable, authentication_unavailable). Nothing was stored.",
+		"headers":     retryHeader,
+		"content":     map[string]any{"application/json": map[string]any{"schema": map[string]any{"$ref": "#/components/schemas/APIError"}}},
+	}
+	for _, pathItem := range doc["paths"].(map[string]any) {
+		for method, opAny := range pathItem.(map[string]any) {
+			op, ok := opAny.(map[string]any)
+			if !ok {
+				continue
+			}
+			r := op["responses"].(map[string]any)
+			r["429"] = map[string]any{"$ref": "#/components/responses/RateLimited"}
+			if method == "post" || method == "put" || method == "patch" || method == "delete" {
+				r["503"] = map[string]any{"$ref": "#/components/responses/Unavailable"}
+			}
+		}
+	}
+	send := doc["paths"].(map[string]any)["/emails"].(map[string]any)["post"].(map[string]any)
+	send["description"] = send["description"].(string) + abuseControlsDescription
+	out, err := json.Marshal(doc)
+	if err != nil {
+		panic("api: cannot encode OpenAPI: " + err.Error())
+	}
+	return out
+}
+
 func serveOpenAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write([]byte(openAPISpec))
+	_, _ = w.Write(openAPIServed)
 }
 
 // serveDocs renders Swagger UI (from a CDN, development-only) against

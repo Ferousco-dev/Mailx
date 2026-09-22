@@ -80,6 +80,7 @@ type Metrics struct {
 	dkimSigs     *prometheus.CounterVec
 	spfVerifs    *prometheus.CounterVec
 	suppChecks   *prometheus.CounterVec
+	abuse        *prometheus.CounterVec
 	suppWrites   *prometheus.CounterVec
 	dmarcVerifs  *prometheus.CounterVec
 	depthFn      DepthFunc
@@ -123,6 +124,8 @@ func NewMetrics(info buildinfo.Info) (*Metrics, error) {
 		Help: "DMARC readiness verifications by bounded DNS status and readiness."}, []string{"outcome", "readiness"})
 	m.suppChecks = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "suppression_checks_total",
 		Help: "Delivery-time suppression checks by bounded result."}, []string{"result"})
+	m.abuse = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "abuse_control_decisions_total",
+		Help: "Outbound abuse-control decisions by bounded control and outcome."}, []string{"control", "outcome"})
 	m.suppWrites = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "suppression_writes_total",
 		Help: "Suppression writes requested, by bounded reason and source."}, []string{"reason", "source"})
 	m.depthDesc = prometheus.NewDesc(ns+"_queue_depth", "Queue jobs available plus claimed.", nil, nil)
@@ -131,7 +134,7 @@ func NewMetrics(info buildinfo.Info) (*Metrics, error) {
 	build.WithLabelValues(info.Version, info.Commit).Set(1)
 
 	for _, c := range []prometheus.Collector{m.httpTotal, m.httpDuration, m.smtpSessions, m.smtpActive, m.smtpMessages,
-		m.deliveries, m.deliveryDur, m.queueOps, m.tlsSessions, m.authAttempts, m.dkimSigs, m.spfVerifs, m.suppChecks, m.suppWrites, m.dmarcVerifs, m.webhooks, m.webhookDur, build, m,
+		m.deliveries, m.deliveryDur, m.queueOps, m.tlsSessions, m.authAttempts, m.dkimSigs, m.spfVerifs, m.suppChecks, m.suppWrites, m.abuse, m.dmarcVerifs, m.webhooks, m.webhookDur, build, m,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})} {
 		if err := m.reg.Register(c); err != nil {
 			return nil, err
@@ -324,5 +327,20 @@ func (m *Metrics) SuppressionWrite(reason, source string) {
 	if m != nil {
 		defer guard()
 		m.suppWrites.WithLabelValues(pick(reason, suppReasons), pick(source, suppSources)).Inc()
+	}
+}
+
+var (
+	abuseControls = []string{"request", "recipient", "tenant_queue", "backpressure", "tenant_permit", "destination_permit"}
+	abuseOutcomes = []string{"allowed", "limited", "unavailable", "impossible", "deferred"}
+)
+
+// AbuseDecision records one outbound abuse-control decision. control and outcome
+// are closed sets (anything else becomes "other"); no tenant, key, address,
+// domain or message id can become a label, so cardinality is 6x5 at most.
+func (m *Metrics) AbuseDecision(control, outcome string) {
+	if m != nil {
+		defer guard()
+		m.abuse.WithLabelValues(pick(control, abuseControls), pick(outcome, abuseOutcomes)).Inc()
 	}
 }

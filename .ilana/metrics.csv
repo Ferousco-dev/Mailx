@@ -40,3 +40,14 @@ MET-038,2026-09-21,new_indexes,v0.30,2,count,uq_suppressions_tenant_email;idx_su
 MET-039,2026-09-21,skipped_tests,v0.30,0,count,go test -race -v ./...
 MET-040,2026-09-21,tests_passing_race,v0.30,1472,count,go test -race -v ./...
 MET-041,2026-09-21,largest_new_production_file,v0.30,275,loc,internal/database/suppressions.go
+MET-042,2026-09-22,limiter_request_overhead_serial_us,v0.31,314,us,BenchmarkRequestWithLimiter -cpu 1 (Redis in Docker VM) vs 1.9 us without
+MET-043,2026-09-22,limiter_request_overhead_4cpu_us,v0.31,94,us,BenchmarkRequestWithLimiter -cpu 4
+MET-044,2026-09-22,gcra_two_bucket_decision_us,v0.31,312,us,BenchmarkAllowTwoBuckets -cpu 1; 44 us at -cpu 12
+MET-045,2026-09-22,redis_ops_per_limiter_decision,v0.31,1,count,one EVALSHA regardless of bucket count
+MET-046,2026-09-22,fair_dispatch_batch_ms,v0.31,1.2,ms,BenchmarkListPendingOutboxFair 20 tenants x 100 rows limit 100
+MET-047,2026-09-22,fair_dispatch_30k_backlog_ms,v0.31,0.062,ms,EXPLAIN ANALYZE 30000-row backlog + small tenant; 1.5 ms with both indexes
+MET-048,2026-09-22,tenant_queued_count_ms,v0.31,0.3,ms,BenchmarkCountTenantQueued 500 rows incl. round trip
+MET-049,2026-09-22,new_indexes,v0.31,1,count,idx_outbox_pending_tenant (replaces idx_outbox_pending)
+MET-050,2026-09-22,abuse_metric_series_max,v0.31,30,count,6 controls x 5 outcomes, unknown -> other
+MET-051,2026-09-22,skipped_tests,v0.31,0,count,go test -race -v ./...
+MET-052,2026-09-22,tests_passing_race,v0.31,1533,count,go test -race -v ./... (1024 top-level + 509 subtests)

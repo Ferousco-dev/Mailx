@@ -10,11 +10,11 @@ import (
 )
 
 const (
-	maxRecipients = 50
-	maxSubjectLen = 500
-	maxBodyLen    = 2 << 20 // 2 MiB per body part
-	defaultLimit  = 20
-	maxLimit      = 100
+	defaultMaxRecipients = 50
+	maxSubjectLen        = 500
+	maxBodyLen           = 2 << 20 // 2 MiB per body part
+	defaultLimit         = 20
+	maxLimit             = 100
 )
 
 // sendEmailRequest is POST /v1/emails' exact wire schema. Unknown JSON
@@ -34,7 +34,7 @@ type sendEmailRequest struct {
 	ScheduledAt *string  `json:"scheduled_at"` // RFC 3339; nil/absent = send now
 }
 
-func (req sendEmailRequest) validate(now time.Time) (scheduledAt time.Time, err *apiError) {
+func (req sendEmailRequest) validate(now time.Time, maxRecipients int) (scheduledAt time.Time, err *apiError) {
 	if strings.TrimSpace(req.From) == "" {
 		return time.Time{}, newError(ErrValidation, "missing_from", "from is required")
 	}

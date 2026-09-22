@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -343,4 +344,40 @@ func TestSuppressionMetricLabelsAreBounded(t *testing.T) {
 	var nilMetrics *Metrics
 	nilMetrics.SuppressionCheck("clear")
 	nilMetrics.SuppressionWrite("manual", "api")
+}
+
+// v0.31: abuse-control metrics have a closed label set. Unknown control/outcome values (which could carry a
+// tenant, key, address or domain if a caller ever passed one) collapse to "other", so cardinality is bounded.
+func TestAbuseDecisionMetricIsBoundedAndPrivate(t *testing.T) {
+	m := newTestMetrics(t)
+	for i := 0; i < 500; i++ {
+		m.AbuseDecision(fmt.Sprintf("tenant-%d@example.com", i), fmt.Sprintf("key_%d", i))
+	}
+	m.AbuseDecision("request", "allowed")
+	m.AbuseDecision("recipient", "limited")
+	m.AbuseDecision("tenant_permit", "deferred")
+	var nilMetrics *Metrics
+	nilMetrics.AbuseDecision("request", "allowed") // a nil sink is a safe no-op
+
+	fams, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	series := 0
+	for _, f := range fams {
+		if f.GetName() != "mailx_abuse_control_decisions_total" {
+			continue
+		}
+		for _, mt := range f.GetMetric() {
+			series++
+			for _, l := range mt.GetLabel() {
+				if strings.ContainsAny(l.GetValue(), "@-0123456789") {
+					t.Fatalf("label %s=%q looks like caller data", l.GetName(), l.GetValue())
+				}
+			}
+		}
+	}
+	if series != 4 { // other/other, request/allowed, recipient/limited, tenant_permit/deferred
+		t.Fatalf("%d series after 503 calls, want 4", series)
+	}
 }

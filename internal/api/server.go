@@ -54,6 +54,9 @@ type Config struct {
 	// MessageIDDomain is the domain used in generated Message-IDs: MailX's public
 	// SMTP hostname when configured. Empty keeps the local development default.
 	MessageIDDomain string
+	// Abuse configures outbound abuse controls (request/recipient limits, queue
+	// caps, backpressure). Nil disables them; production wiring sets it.
+	Abuse *AbuseControls
 	// Logger and Metrics are optional; nil disables the corresponding
 	// observation without changing request handling.
 	Logger  *slog.Logger
@@ -119,7 +122,8 @@ func NewServer(cfg Config) (*Server, error) {
 		defer cancel()
 		return cfg.Ready(ctx)
 	}
-	mux := newMux(h, cfg.Auth, readiness, routeServices{domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, metrics: cfg.Metrics})
+	h.abuse = cfg.Abuse
+	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, metrics: cfg.Metrics})
 	log := cfg.Logger
 	if log == nil {
 		log = observability.Discard()
