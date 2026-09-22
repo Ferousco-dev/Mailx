@@ -125,7 +125,7 @@ func readiness(dns DNSFinding, dmarcFact DMARCPrereq, logo LogoCheck, cert CertC
 		}
 	}
 	if cert.Checked && dns.Record.Authority != "" {
-		if cert.FetchErr != "" || !cert.Cert.Parseable {
+		if cert.FetchErr != "" || !cert.Cert.Parseable || !cert.Cert.CurrentlyValid {
 			return ReadinessCertificateIssue
 		}
 	}

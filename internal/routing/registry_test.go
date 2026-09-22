@@ -60,18 +60,21 @@ func TestRouterKnownMemberIDDispatchesAndSnapshotsIdentity(t *testing.T) {
 	}
 }
 
-func TestRouterUnknownMemberIDFallsBackToBase(t *testing.T) {
+func TestRouterUnknownMemberIDNeverUsesBase(t *testing.T) {
 	base := &fakeDeliverer{name: "base"}
 	r, err := NewRouter(base, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	res, err := r.Deliver(context.Background(), delivery.Request{MemberID: "ghost"})
-	if err != nil {
-		t.Fatal(err)
+	if !errors.Is(err, ErrUnknownMember) {
+		t.Fatalf("expected ErrUnknownMember, got %v", err)
 	}
-	if res.Domain != "base" {
-		t.Fatalf("expected fallback to base for unknown member, got %q", res.Domain)
+	if res.Domain == "base" {
+		t.Fatal("an unrecognized member must never silently dispatch through base — wrong source IP/identity, or a bypassed relay")
+	}
+	if res.Kind != delivery.KindTransferTemporary {
+		t.Fatalf("expected a temporary/retryable result so the message is held, not failed, got %q", res.Kind)
 	}
 }
 

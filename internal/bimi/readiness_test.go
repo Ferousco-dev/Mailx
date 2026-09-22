@@ -73,6 +73,16 @@ func TestReadinessCertificateIssueWhenAuthorityPresentAndUnparseable(t *testing.
 	}
 }
 
+func TestReadinessCertificateIssueWhenExpired(t *testing.T) {
+	dns := DNSFinding{Status: StatusFound, Record: Record{Location: "https://example.com/logo.svg", Authority: "https://example.com/vmc.pem"}}
+	cert := CertCheck{Checked: true, Cert: CertInfo{Parseable: true, CurrentlyValid: false}}
+	res := assess("example.com", DefaultSelector, dns, DMARCPrereq{Checked: true, EffectivePolicy: "reject"},
+		LogoCheck{Checked: true, SVG: SVGResult{Valid: true}}, cert)
+	if res.Readiness != ReadinessCertificateIssue {
+		t.Fatalf("a parseable but expired/not-yet-valid certificate must not report ready, got %q", res.Readiness)
+	}
+}
+
 func TestReadinessInvalidRecord(t *testing.T) {
 	res := assess("example.com", DefaultSelector, DNSFinding{Status: StatusInvalid, Reason: ReasonMissingL}, DMARCPrereq{}, LogoCheck{}, CertCheck{})
 	if res.Readiness != ReadinessInvalidRecord {

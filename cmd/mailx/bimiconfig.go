@@ -25,7 +25,13 @@ func buildBIMI(db *database.DB, dmarcSvc *dmarc.Service) (*bimi.Service, error) 
 	if dmarcSvc != nil {
 		dm = dmarcState{svc: dmarcSvc}
 	}
-	fetcher := bimi.NewAssetFetcher(webhook.URLPolicy{}, bimi.MaxLogoBytes, 8*time.Second)
+	// One shared fetcher bounded to the LARGER of the two asset caps
+	// (MaxCertificateBytes): a certificate between the logo and
+	// certificate limits must reach ParseCertificate rather than being
+	// rejected by the fetch layer before it's even looked at. The
+	// tighter logo bound is still enforced — ValidateSVG applies its own
+	// MaxLogoBytes check to whatever bytes it receives.
+	fetcher := bimi.NewAssetFetcher(webhook.URLPolicy{}, bimi.MaxCertificateBytes, 8*time.Second)
 	return bimi.NewService(db, maildomain.NewNetTXTResolver(), dm, fetcher, nil)
 }
 

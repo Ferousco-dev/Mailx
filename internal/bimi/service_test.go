@@ -211,6 +211,31 @@ func TestServiceVerifyDeclinedNeverChecksAssetsEvenIfRequested(t *testing.T) {
 	}
 }
 
+func TestServiceVerifyTransientDNSErrorIsUnknownNotNotConfigured(t *testing.T) {
+	store := &fakeStore{}
+	store.add("t1", "d1", "example.com", true)
+	servfail := &net.DNSError{Err: "server misbehaving", IsTemporary: true}
+	var orgQueried bool
+	dns := fakeDNS{fn: func(_ context.Context, name string) ([]string, error) {
+		if name == "default._bimi.example.com" {
+			return nil, servfail
+		}
+		orgQueried = true
+		return nil, notFound()
+	}}
+	svc := newTestService(t, store, dns, fakeDMARC{view: DMARCPrereq{Checked: true, EffectivePolicy: "reject", OrgDomain: "example.com"}})
+	res, err := svc.Verify(context.Background(), "t1", "d1", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Readiness != ReadinessUnknown || res.DNS.Status != StatusTempError {
+		t.Fatalf("a transient resolver failure must report unknown/temporary_error, not not_configured: %+v", res)
+	}
+	if orgQueried {
+		t.Fatal("a transient failure at the author domain must be decisive, not trigger the organizational-domain fallback")
+	}
+}
+
 func TestServiceVerifyTenantIsolation(t *testing.T) {
 	store := &fakeStore{}
 	store.add("t1", "d1", "example.com", true)

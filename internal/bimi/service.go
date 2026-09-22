@@ -3,6 +3,7 @@ package bimi
 import (
 	"context"
 	"errors"
+	"net"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
@@ -159,12 +160,18 @@ func (s *Service) lookupOne(ctx context.Context, domain, source string) (DNSFind
 		if ctx.Err() != nil {
 			return DNSFinding{Status: StatusTempError, RecordName: name}, true
 		}
-		// NXDOMAIN and "no records" both surface as an error from most
-		// resolvers with no reliable way to tell them apart from THIS
-		// interface; treat any lookup error as "not configured" rather
-		// than temporary_error, matching the common case (record absent).
-		// A real transient DNS outage self-corrects on the next check.
-		return DNSFinding{Status: StatusNotConfigured, RecordName: name}, false
+		// Distinguish "genuinely no record" (NXDOMAIN/NODATA) from a
+		// transient resolver failure (SERVFAIL, timeout) the same way
+		// internal/spf and internal/dmarc already do: only a definitive
+		// IsNotFound (and not also flagged temporary/timeout) means
+		// "not configured". Anything else is temporary_error — never
+		// silently read as "no record" or allowed to trigger the
+		// organizational-domain fallback as if it were decisive.
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound && !dnsErr.IsTemporary && !dnsErr.IsTimeout {
+			return DNSFinding{Status: StatusNotConfigured, RecordName: name}, false
+		}
+		return DNSFinding{Status: StatusTempError, RecordName: name}, true
 	}
 	var candidates []string
 	for _, t := range txts {

@@ -346,7 +346,7 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o
 	if err != nil {
 		return nil, err
 	}
-	router, err := buildRouter(db, engine, tlsCfg, o.metrics)
+	router, err := buildRouter(db, engine, relay != nil, tlsCfg, o.metrics)
 	if err != nil {
 		return nil, err
 	}
@@ -376,7 +376,7 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o
 // doc). base becomes both the legacy (MemberID=="") and the unknown-member
 // fallback target. This is process-local: an operator's pool/member change
 // via the CLI takes effect on the next server restart, not live.
-func buildRouter(db *database.DB, base *delivery.Engine, tlsCfg smtp.TLSConfig, metrics *observability.Metrics) (*routing.Router, error) {
+func buildRouter(db *database.DB, base *delivery.Engine, relayConfigured bool, tlsCfg smtp.TLSConfig, metrics *observability.Metrics) (*routing.Router, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -393,6 +393,19 @@ func buildRouter(db *database.DB, base *delivery.Engine, tlsCfg smtp.TLSConfig, 
 		for _, m := range poolMembers {
 			switch m.Kind {
 			case database.SendingPoolMemberRelay:
+				// A relay member means "use the process's single configured
+				// relay" — base only actually IS a relay engine when one is
+				// configured. Mapping it to base unconditionally would let a
+				// relay member silently perform direct MX delivery on a
+				// process running in direct mode, contradicting the
+				// operator's declared intent. Omitted here, it becomes an
+				// "unknown member" at dispatch time (see routing.Router),
+				// which holds/retries rather than sending wrong.
+				if !relayConfigured {
+					slog.Warn("sending_pool_member_relay_without_relay_configured", "member_id", m.ID, "pool_id", p.ID,
+						"detail", "this process has no MAILX_RELAY_* configured; this relay member will never be selected as a Router target")
+					continue
+				}
 				members[m.ID] = routing.MemberRoute{Deliver: base, Kind: string(m.Kind)}
 			case database.SendingPoolMemberDirect:
 				if m.Hostname == nil || *m.Hostname == "" {
