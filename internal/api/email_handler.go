@@ -13,6 +13,7 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/dkim"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
+	"github.com/Ferousco-dev/mailx/internal/emailtemplate"
 	"github.com/Ferousco-dev/mailx/internal/idempotency"
 	"github.com/Ferousco-dev/mailx/internal/mail"
 	"github.com/Ferousco-dev/mailx/internal/outbound"
@@ -59,6 +60,24 @@ func (h *emailHandler) recipientLimit() int {
 		return h.abuse.Policy.MaxRecipientsPerMessage
 	}
 	return defaultMaxRecipients
+}
+
+// renderTemplate loads templateID (tenant-scoped) and substitutes variables.
+// Rendering happens here, once, before outbound.Build/DKIM — never again at
+// delivery or retry time (see docs/design-v0.33.md).
+func (h *emailHandler) renderTemplate(ctx context.Context, tenantID, templateID string, variables map[string]string) (emailtemplate.Rendered, *apiError) {
+	t, err := h.db.GetTemplate(ctx, tenantID, templateID)
+	if errors.Is(err, database.ErrNotFound) {
+		return emailtemplate.Rendered{}, newError(ErrNotFoundType, "template_not_found", "no template found with that id")
+	}
+	if err != nil {
+		return emailtemplate.Rendered{}, newError(ErrInternal, "internal_error", "failed to load template")
+	}
+	rendered, err := emailtemplate.Render(t.Subject, t.Text, t.HTML, variables)
+	if err != nil {
+		return emailtemplate.Rendered{}, newError(ErrValidation, "template_render_failed", "rendered content exceeds the maximum size")
+	}
+	return rendered, nil
 }
 
 const defaultMessageIDDomain = "mailx.local"
@@ -118,9 +137,26 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tenantID := tenantFromContext(r.Context())
+	subject, text, html := req.Subject, req.Text, req.HTML
+	if req.TemplateID != "" {
+		rendered, terr := h.renderTemplate(r.Context(), tenantID, req.TemplateID, req.Variables)
+		if terr != nil {
+			writeError(w, r, terr)
+			return
+		}
+		subject, text, html = rendered.Subject, rendered.Text, rendered.HTML
+	}
+
+	// req itself (never subject/text/html above) is what idempotency.Fingerprint
+	// hashes below: it always carries template_id+variables, never rendered
+	// output, so editing a template between an accepted request and a retry
+	// with the same Idempotency-Key does not change the fingerprint — the retry
+	// correctly replays the ORIGINAL accepted (already-rendered) message rather
+	// than re-rendering or conflicting.
 	built, err := outbound.Build(outbound.Request{
 		From: req.From, To: req.To, Cc: req.Cc, Bcc: req.Bcc, ReplyTo: req.ReplyTo,
-		Subject: req.Subject, Text: req.Text, HTML: req.HTML,
+		Subject: subject, Text: text, HTML: html,
 		MessageID: h.messageID(id), Date: now,
 	})
 	if err != nil {
@@ -132,7 +168,6 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tenantID := tenantFromContext(r.Context())
 	fromDomain, raw, ok := h.authorizeAndSign(w, r, tenantID, built.From, built.Raw)
 	if !ok {
 		return
@@ -213,7 +248,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	msg, err := h.db.InsertMessage(r.Context(), database.NewMessage{
 		ID: id, TenantID: tenantID, MailFrom: built.From, FromHeader: req.From,
-		Subject: req.Subject, MessageIDHeader: h.messageID(id),
+		Subject: subject, MessageIDHeader: h.messageID(id),
 		Recipients: recipients, AvailableAt: scheduledAt, IdempotencyCompletion: idemCompletion,
 		SenderDomain: fromDomain,
 	})

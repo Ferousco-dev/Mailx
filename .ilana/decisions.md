@@ -105,3 +105,9 @@ Process decisions above (DEC-001..DEC-007) belong to the v0.23 FLEET run and sta
 - DEC-098 [v0.32]: `EventBounced` (reserved since v0.18) is reused for feedback-driven bounces rather than adding a second bounce event type; `EventComplained`/`email.complained` is new.
 - DEC-099 [v0.32]: idempotency key = UNIQUE(message_id, recipient_id, sha256(raw bytes)); the recipient-level state transition (not just the history row) additionally gates suppression/event emission, so a semantically-repeated but byte-different DSN never double-fires.
 - DEC-100 [v0.32]: async suppression reuses the exact narrow enhanced-status set as v0.30's synchronous rule (5.1.1/5.1.6), factored into `suppression.hardBounceEnhancedStatuses`, so the two paths cannot diverge.
+- DEC-101 [v0.33]: template rendering is a hand-written bounded `{{identifier}}` substitution, not text/template — avoids exposing an action language (if/range/pipelines) as an unintended attack surface; deterministic, single-pass, no recursive expansion.
+- DEC-102 [v0.33]: HTML variable substitution is always `html.EscapeString`-ed; no raw/unescaped-HTML variable mode in v0.33 (conservative default, explicitly the only model).
+- DEC-103 [v0.33]: template send is mutually exclusive with explicit subject/html/text (422 on conflict) — never a silent precedence choice.
+- DEC-104 [v0.33]: idempotency fingerprint is computed on the ORIGINAL request (template_id+variables), not rendered output, so a template edit between an accepted send and a same-key retry cannot create a duplicate or change the replayed content — it replays the original durable message.
+- DEC-105 [v0.33]: template name uniqueness is a DB constraint (`UNIQUE(tenant_id,name)`), not only application validation — same precedent as domain-name uniqueness.
+- DEC-106 [v0.33]: template deletion is a hard delete with no versioning; already-sent messages are independent rows/files, unaffected by template edits or deletion.

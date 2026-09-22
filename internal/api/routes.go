@@ -75,6 +75,12 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("POST /v1/domains/{id}/spf/verify", requireScope(auth.ScopeDomainsWrite)(spfHandler.handleVerify))
 	v1.HandleFunc("GET /v1/domains/{id}/dmarc", requireScope(auth.ScopeDomainsRead)(dmarcHandler.handleGet))
 	v1.HandleFunc("POST /v1/domains/{id}/dmarc/verify", requireScope(auth.ScopeDomainsWrite)(dmarcHandler.handleVerify))
+	templates := &templateHandler{db: h.db}
+	v1.HandleFunc("POST /v1/templates", requireScope(auth.ScopeTemplatesWrite)(templates.handleCreate))
+	v1.HandleFunc("GET /v1/templates", requireScope(auth.ScopeTemplatesRead)(templates.handleList))
+	v1.HandleFunc("GET /v1/templates/{id}", requireScope(auth.ScopeTemplatesRead)(templates.handleGet))
+	v1.HandleFunc("PATCH /v1/templates/{id}", requireScope(auth.ScopeTemplatesWrite)(templates.handleUpdate))
+	v1.HandleFunc("DELETE /v1/templates/{id}", requireScope(auth.ScopeTemplatesWrite)(templates.handleDelete))
 	v1.HandleFunc("POST /v1/suppressions", requireScope(auth.ScopeSuppressionsWrite)(suppressions.handleCreate))
 	v1.HandleFunc("GET /v1/suppressions", requireScope(auth.ScopeSuppressionsRead)(suppressions.handleList))
 	v1.HandleFunc("GET /v1/suppressions/{id}", requireScope(auth.ScopeSuppressionsRead)(suppressions.handleGet))

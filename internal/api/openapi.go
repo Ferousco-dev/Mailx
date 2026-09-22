@@ -96,6 +96,65 @@ const openAPISpec = `{
         "responses": {"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventList"}}}},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"}}
       }
     },
+    "/templates": {
+      "post": {
+        "summary": "Create a template",
+        "description": "Requires templates:write. name is unique per account (409 template_name_taken on a duplicate). At least one of text/html is required, same rule as POST /v1/emails.",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateTemplateRequest"}}}},
+        "responses": {
+          "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Template"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}, "415": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List templates",
+        "description": "Requires templates:read. Newest first, keyset pagination (limit, cursor).",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of templates", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/TemplateList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/templates/{id}": {
+      "get": {
+        "summary": "Get a template",
+        "description": "Requires templates:read. Another account's template is indistinguishable from a missing one (404).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The template", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Template"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "patch": {
+        "summary": "Update a template",
+        "description": "Requires templates:write. Partial update. Emails already accepted from this template before the update keep their original rendered content.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpdateTemplateRequest"}}}},
+        "responses": {
+          "200": {"description": "Updated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Template"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "415": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "delete": {
+        "summary": "Delete a template",
+        "description": "Requires templates:write. Hard delete. Emails already sent from this template are unaffected; sending with this template_id afterwards fails with 404.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "204": {"description": "Deleted"},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/suppressions": {
       "post": {
         "summary": "Suppress a recipient address",
@@ -337,11 +396,54 @@ const openAPISpec = `{
           "bcc": {"type": "array", "items": {"type": "string"}},
           "reply_to": {"type": "string"},
           "subject": {"type": "string", "maxLength": 500},
-          "html": {"type": "string", "description": "At least one of html/text is required."},
+          "html": {"type": "string", "description": "At least one of html/text is required. Mutually exclusive with template_id."},
           "text": {"type": "string"},
+          "template_id": {"type": "string", "description": "Alternative to subject/html/text: renders the given template (must belong to this account) with 'variables' before building the message. Cannot be combined with subject/html/text (422 template_and_content_conflict)."},
+          "variables": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Substitution values for the template's {{name}} tokens; requires template_id (422 variables_without_template otherwise). At most 50 entries, 64-char keys, 4096-char values."},
           "scheduled_at": {"type": "string", "format": "date-time", "nullable": true, "description": "RFC 3339. Omit to send immediately."}
         },
         "additionalProperties": false
+      },
+      "Template": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "subject": {"type": "string"},
+          "text": {"type": "string"},
+          "html": {"type": "string"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "CreateTemplateRequest": {
+        "type": "object",
+        "required": ["name", "subject"],
+        "properties": {
+          "name": {"type": "string", "maxLength": 200, "description": "Unique per account."},
+          "subject": {"type": "string", "maxLength": 500},
+          "text": {"type": "string"},
+          "html": {"type": "string"}
+        },
+        "additionalProperties": false
+      },
+      "UpdateTemplateRequest": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string", "maxLength": 200},
+          "subject": {"type": "string", "maxLength": 500},
+          "text": {"type": "string"},
+          "html": {"type": "string"}
+        },
+        "additionalProperties": false,
+        "description": "Partial update: omitted fields are unchanged. Editing or deleting a template never changes emails already sent from it."
+      },
+      "TemplateList": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/Template"}},
+          "next_cursor": {"type": "string", "nullable": true}
+        }
       },
       "Email": {
         "type": "object",

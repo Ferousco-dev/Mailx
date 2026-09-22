@@ -16,10 +16,10 @@
     "DES": 8,
     "TC": 0,
     "DEF": 27,
-    "CR": 15,
+    "CR": 16,
     "RSK": 37,
-    "DEC": 100,
-    "MET": 55,
+    "DEC": 106,
+    "MET": 58,
     "ETH": 1
   },
   "attempts": {
@@ -34,10 +34,10 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.32",
-    "ilana_current_through": "v0.32",
-    "current_milestone": "none (v0.33 not started)",
-    "current_milestone_status": "v0.32 complete",
-    "next_milestone": "v0.33 templates (not started)"
+    "last_completed_milestone": "v0.33",
+    "ilana_current_through": "v0.33",
+    "current_milestone": "none (v0.34 not started)",
+    "current_milestone_status": "v0.33 complete",
+    "next_milestone": "v0.34 contacts (not started)"
   }
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/emailtemplate"
 )
 
 const (
@@ -23,15 +24,19 @@ const (
 // (attachments, tags, custom headers: all explicitly deferred, see the
 // v0.18 report) gets a clear 422, not a silently-dropped feature.
 type sendEmailRequest struct {
-	From        string   `json:"from"`
-	To          []string `json:"to"`
-	Cc          []string `json:"cc"`
-	Bcc         []string `json:"bcc"`
-	ReplyTo     string   `json:"reply_to"`
-	Subject     string   `json:"subject"`
-	HTML        string   `json:"html"`
-	Text        string   `json:"text"`
-	ScheduledAt *string  `json:"scheduled_at"` // RFC 3339; nil/absent = send now
+	From    string   `json:"from"`
+	To      []string `json:"to"`
+	Cc      []string `json:"cc"`
+	Bcc     []string `json:"bcc"`
+	ReplyTo string   `json:"reply_to"`
+	Subject string   `json:"subject"`
+	HTML    string   `json:"html"`
+	Text    string   `json:"text"`
+	// TemplateID and Variables (v0.33) are an alternative to subject/html/text:
+	// mutually exclusive with them, never combined (see validate below).
+	TemplateID  string            `json:"template_id"`
+	Variables   map[string]string `json:"variables"`
+	ScheduledAt *string           `json:"scheduled_at"` // RFC 3339; nil/absent = send now
 }
 
 func (req sendEmailRequest) validate(now time.Time, maxRecipients int) (scheduledAt time.Time, err *apiError) {
@@ -45,14 +50,26 @@ func (req sendEmailRequest) validate(now time.Time, maxRecipients int) (schedule
 	if total > maxRecipients {
 		return time.Time{}, newError(ErrValidation, "too_many_recipients", fmt.Sprintf("a message may address at most %d recipients across to/cc/bcc, got %d", maxRecipients, total))
 	}
-	if len(req.Subject) > maxSubjectLen {
-		return time.Time{}, newError(ErrValidation, "subject_too_long", fmt.Sprintf("subject must be at most %d characters", maxSubjectLen))
-	}
-	if len(req.HTML) > maxBodyLen || len(req.Text) > maxBodyLen {
-		return time.Time{}, newError(ErrValidation, "body_too_large", fmt.Sprintf("html/text body must each be at most %d bytes", maxBodyLen))
-	}
-	if strings.TrimSpace(req.HTML) == "" && strings.TrimSpace(req.Text) == "" {
-		return time.Time{}, newError(ErrValidation, "missing_body", "at least one of html or text is required")
+	if req.TemplateID != "" {
+		if req.Subject != "" || req.HTML != "" || req.Text != "" {
+			return time.Time{}, newError(ErrValidation, "template_and_content_conflict", "template_id cannot be combined with subject, html, or text")
+		}
+		if err := emailtemplate.ValidateVariables(req.Variables); err != nil {
+			return time.Time{}, newError(ErrValidation, "invalid_variables", err.Error())
+		}
+	} else {
+		if len(req.Variables) > 0 {
+			return time.Time{}, newError(ErrValidation, "variables_without_template", "variables requires template_id")
+		}
+		if len(req.Subject) > maxSubjectLen {
+			return time.Time{}, newError(ErrValidation, "subject_too_long", fmt.Sprintf("subject must be at most %d characters", maxSubjectLen))
+		}
+		if len(req.HTML) > maxBodyLen || len(req.Text) > maxBodyLen {
+			return time.Time{}, newError(ErrValidation, "body_too_large", fmt.Sprintf("html/text body must each be at most %d bytes", maxBodyLen))
+		}
+		if strings.TrimSpace(req.HTML) == "" && strings.TrimSpace(req.Text) == "" {
+			return time.Time{}, newError(ErrValidation, "missing_body", "at least one of html or text is required")
+		}
 	}
 	if req.ScheduledAt == nil {
 		return time.Time{}, nil
