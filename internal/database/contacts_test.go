@@ -267,11 +267,18 @@ func TestContactsMigrationRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.MigrateDownOne(ctx); err != nil {
-		t.Fatal(err)
-	}
+	// Roll back past every migration newer than contacts', not just one
+	// (audiences' FK to contacts must also come down first).
 	var exists bool
-	_ = db.pool.QueryRow(ctx, `SELECT to_regclass('contacts') IS NOT NULL`).Scan(&exists)
+	for {
+		if err := db.MigrateDownOne(ctx); err != nil {
+			t.Fatal(err)
+		}
+		_ = db.pool.QueryRow(ctx, `SELECT to_regclass('contacts') IS NOT NULL`).Scan(&exists)
+		if !exists {
+			break
+		}
+	}
 	if exists {
 		t.Fatal("down migration must drop contacts")
 	}

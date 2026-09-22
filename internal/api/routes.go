@@ -75,6 +75,16 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("POST /v1/domains/{id}/spf/verify", requireScope(auth.ScopeDomainsWrite)(spfHandler.handleVerify))
 	v1.HandleFunc("GET /v1/domains/{id}/dmarc", requireScope(auth.ScopeDomainsRead)(dmarcHandler.handleGet))
 	v1.HandleFunc("POST /v1/domains/{id}/dmarc/verify", requireScope(auth.ScopeDomainsWrite)(dmarcHandler.handleVerify))
+	audiences := &audienceHandler{db: h.db}
+	v1.HandleFunc("POST /v1/audiences", requireScope(auth.ScopeAudiencesWrite)(audiences.handleCreate))
+	v1.HandleFunc("GET /v1/audiences", requireScope(auth.ScopeAudiencesRead)(audiences.handleList))
+	v1.HandleFunc("GET /v1/audiences/{id}", requireScope(auth.ScopeAudiencesRead)(audiences.handleGet))
+	v1.HandleFunc("PATCH /v1/audiences/{id}", requireScope(auth.ScopeAudiencesWrite)(audiences.handleUpdate))
+	v1.HandleFunc("DELETE /v1/audiences/{id}", requireScope(auth.ScopeAudiencesWrite)(audiences.handleDelete))
+	v1.HandleFunc("POST /v1/audiences/{id}/contacts", requireScope(auth.ScopeAudiencesWrite)(audiences.handleAddMember))
+	v1.HandleFunc("GET /v1/audiences/{id}/contacts", requireScope(auth.ScopeAudiencesRead)(audiences.handleListMembers))
+	v1.HandleFunc("DELETE /v1/audiences/{id}/contacts/{contact_id}", requireScope(auth.ScopeAudiencesWrite)(audiences.handleRemoveMember))
+
 	contacts := &contactHandler{db: h.db}
 	v1.HandleFunc("POST /v1/contacts", requireScope(auth.ScopeContactsWrite)(contacts.handleCreate))
 	v1.HandleFunc("GET /v1/contacts", requireScope(auth.ScopeContactsRead)(contacts.handleList))

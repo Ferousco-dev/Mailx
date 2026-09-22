@@ -60,7 +60,8 @@ commit dates (all v0.1-v0.15 work is dated 2026-09-13..15).
 - v0.32 outbound feedback (DSNs/bounces + complaints): **COMPLETE** (validated 2026-09-22). Migration 000015.
 - v0.33 Templates: **COMPLETE** (validated 2026-09-22). Migration 000016.
 - v0.34 Contacts: **COMPLETE** (validated 2026-09-22). Migration 000017.
-- v0.35 Audiences / Lists: **NEXT, NOT STARTED.** Roadmap after v0.32 (general inbound email REMOVED from the pre-v1 roadmap, superseding any earlier v0.33-36 inbound-shaped milestones): v0.33 Templates, v0.34 Contacts, v0.35 Audiences/Lists, v0.36 Broadcasts/Bulk Sending, v0.37 Scheduled Sending, v0.38 Advanced Analytics. A separate controlled Internet-delivery test is a separate explicit action.
+- v0.35 Audiences / Lists: **COMPLETE** (validated 2026-09-22). Migration 000018.
+- v0.36 Broadcasts / Bulk Sending: **NEXT, NOT STARTED.** Roadmap after v0.32 (general inbound email REMOVED from the pre-v1 roadmap, superseding any earlier v0.33-36 inbound-shaped milestones): v0.33 Templates, v0.34 Contacts, v0.35 Audiences/Lists, v0.36 Broadcasts/Bulk Sending, v0.37 Scheduled Sending, v0.38 Advanced Analytics. A separate controlled Internet-delivery test is a separate explicit action.
 
 ## Uncertain / unavailable
 

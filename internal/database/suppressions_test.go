@@ -442,7 +442,7 @@ func TestConcurrentHardBouncesOfOneRecipientCreateOneSuppression(t *testing.T) {
 func rollBackPastSuppressions(t *testing.T, db *DB) {
 	t.Helper()
 	ctx := context.Background()
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 50; i++ {
 		if err := db.MigrateDownOne(ctx); err != nil {
 			t.Fatalf("down migration: %v", err)
 		}

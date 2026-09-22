@@ -96,6 +96,108 @@ const openAPISpec = `{
         "responses": {"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventList"}}}},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"}}
       }
     },
+    "/audiences": {
+      "post": {
+        "summary": "Create an audience",
+        "description": "Requires audiences:write. An audience is a named group of existing Contacts (membership only - v0.35 never sends email). name is unique per account (409 audience_name_taken).",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateAudienceRequest"}}}},
+        "responses": {
+          "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Audience"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "409": {"$ref": "#/components/responses/Error"}, "415": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List audiences",
+        "description": "Requires audiences:read. Newest first, keyset pagination (limit, cursor).",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of audiences", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AudienceList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/audiences/{id}": {
+      "get": {
+        "summary": "Get an audience",
+        "description": "Requires audiences:read. Another account's audience is indistinguishable from a missing one (404).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The audience", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Audience"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "patch": {
+        "summary": "Rename an audience",
+        "description": "Requires audiences:write. Only name may be changed. Never affects membership, contacts, or suppressions.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/UpdateAudienceRequest"}}}},
+        "responses": {
+          "200": {"description": "Updated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Audience"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "415": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "delete": {
+        "summary": "Delete an audience",
+        "description": "Requires audiences:write. Deletes the audience and its membership rows ONLY - contacts, suppressions and historical messages are unaffected.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "204": {"description": "Deleted"},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/audiences/{id}/contacts": {
+      "post": {
+        "summary": "Add a contact to an audience",
+        "description": "Requires audiences:write. Both the audience and the contact must belong to the caller's account (404 otherwise, never disclosing which was missing/foreign). Idempotent: adding an existing member is a no-op 204, never a duplicate row or an error. A suppressed contact may be added - membership is not sending permission.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AddMemberRequest"}}}},
+        "responses": {
+          "204": {"description": "Member present (created or already existed)"},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "415": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List an audience's contacts",
+        "description": "Requires audiences:read. Keyset pagination (limit, cursor), ordered by membership creation.",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of contacts", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ContactList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/audiences/{id}/contacts/{contact_id}": {
+      "delete": {
+        "summary": "Remove a contact from an audience",
+        "description": "Requires audiences:write. Removes ONLY the membership row - never the contact, its suppression state, or any historical data.",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "contact_id", "in": "path", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "204": {"description": "Removed"},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/contacts": {
       "post": {
         "summary": "Create a contact",
@@ -461,6 +563,37 @@ const openAPISpec = `{
           "variables": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Substitution values for the template's {{name}} tokens; requires template_id (422 variables_without_template otherwise). At most 50 entries, 64-char keys, 4096-char values."},
           "scheduled_at": {"type": "string", "format": "date-time", "nullable": true, "description": "RFC 3339. Omit to send immediately."}
         },
+        "additionalProperties": false
+      },
+      "Audience": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "CreateAudienceRequest": {
+        "type": "object", "required": ["name"],
+        "properties": {"name": {"type": "string", "maxLength": 200, "example": "Newsletter"}},
+        "additionalProperties": false
+      },
+      "UpdateAudienceRequest": {
+        "type": "object", "required": ["name"],
+        "properties": {"name": {"type": "string", "maxLength": 200}},
+        "additionalProperties": false
+      },
+      "AudienceList": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/Audience"}},
+          "next_cursor": {"type": "string", "nullable": true}
+        }
+      },
+      "AddMemberRequest": {
+        "type": "object", "required": ["contact_id"],
+        "properties": {"contact_id": {"type": "string"}},
         "additionalProperties": false
       },
       "Contact": {

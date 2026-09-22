@@ -116,3 +116,8 @@ Process decisions above (DEC-001..DEC-007) belong to the v0.23 FLEET run and sta
 - DEC-109 [v0.34]: contact attributes are a bounded flat string map (JSONB storage, CHECK-enforced object shape + size), not arbitrary JSON — avoids nested/array/executable payloads without inventing a schema system.
 - DEC-110 [v0.34]: sending never requires or auto-creates a contact; Contacts is additive, not a gate on `/v1/emails`.
 - DEC-111 [v0.34]: no `contact.*` webhook events and no contact-specific metrics in v0.34 — neither has an identified consumer yet; recorded as a deliberate omission, not an oversight.
+- DEC-112 [v0.35]: audience membership tenant integrity is enforced by composite FKs on `audience_members` (tenant_id + audience_id, tenant_id + contact_id), not application checks alone — a cross-tenant row is a schema-level impossibility, verified by mutation-removing the app-level check and confirming the isolation test still fails correctly.
+- DEC-113 [v0.35]: `audience_members` cascades on EITHER side (audience delete or contact delete) removes ONLY join rows; contacts/audiences/suppressions are never cascade-deleted into each other.
+- DEC-114 [v0.35]: adding an already-present member is idempotent (204, no error), matching suppression's create-if-absent precedent rather than 409 — a group-membership add is naturally repeatable, unlike a named-resource create.
+- DEC-115 [v0.35]: membership pagination keys on the membership row's own created_at, not the contact's, for stable ordering independent of contact history.
+- DEC-116 [v0.35]: no sending, no snapshot, no `audience.*` webhook events in v0.35 — scope held strictly to group membership per the milestone boundary.

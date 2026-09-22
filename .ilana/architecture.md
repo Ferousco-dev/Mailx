@@ -325,3 +325,18 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 - Metrics: none added — CRUD is already covered by generic HTTP observability; no contact-specific operational signal identified yet.
 - Retention: durable customer data, kept until the tenant deletes it (unlike delivery telemetry, not retention-bound).
 - Deferred: bulk import (CSV/batch), audience/segmentation queries, GIN indexes on attributes — no query needs them yet.
+
+
+## Audiences (v0.35)
+
+- Named groups of existing Contacts, membership only — no sending, no queue jobs, no MIME/DKIM/SMTP (migration 000018: `audiences`, `audience_members`).
+- Many-to-many via `audience_members` (audience_id, contact_id, tenant_id), PK(audience_id,contact_id) for uniqueness. Tenant integrity is DB-enforced, not just app-checked: composite FKs `(tenant_id,audience_id)->audiences(tenant_id,id)` and `(tenant_id,contact_id)->contacts(tenant_id,id)` (new `UNIQUE(tenant_id,id)` added to both tables) make a cross-tenant membership row structurally impossible. `database.AddAudienceMember` also pre-checks both resources under the SAME transaction for a clean, non-disclosing 404 instead of a raw FK-violation error.
+- Cascade: `audience_members` rows cascade on EITHER audience delete or contact delete (both FKs `ON DELETE CASCADE`) — deleting an audience removes only membership rows (contacts untouched); deleting a contact removes only its membership rows (audiences untouched). Neither touches suppressions (tested both directions).
+- Uniqueness: `UNIQUE(tenant_id,name)` on audiences (409 on duplicate, DB-enforced). Membership add is idempotent (matches suppression's create-if-absent convention): re-adding an existing member is a 204 no-op, never a duplicate row or an error.
+- API: `POST/GET /v1/audiences`, `GET/PATCH/DELETE /v1/audiences/{id}`, `POST/GET /v1/audiences/{id}/contacts`, `DELETE /v1/audiences/{id}/contacts/{contact_id}`. Scopes `audiences:read`/`audiences:write` (new `api_keys.scopes` CHECK).
+- Membership listing is keyset-paginated by the membership row's own (created_at, contact_id) — not the contact's own created_at — so pagination is stable regardless of when the contact was originally created; naturally supports v0.36 iterating a large audience in bounded pages without loading it all into memory.
+- Suppression independence (tested): a suppressed contact can be added to an audience; removing/audience-deleting never touches suppression state.
+- No sending: v0.35 has no send endpoint, creates no queue jobs, never renders templates or invokes DKIM/SMTP. v0.36 (Broadcasts) will decide separately how/when to snapshot a mutable audience's membership for a send.
+- Events/webhooks: no `audience.*` events added — deliberate, no consumer yet.
+- Metrics: none added — CRUD already covered by generic HTTP observability.
+- Retention: durable tenant configuration, kept until explicitly deleted (like contacts/templates, not delivery telemetry).
