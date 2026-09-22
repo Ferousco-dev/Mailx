@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -186,20 +187,18 @@ func decodeSuppressionCursor(token string) (database.SuppressionCursor, error) {
 // It returns the number of recipients that will actually be delivered (not
 // suppressed): the recipient rate limit charges exactly that number, so a
 // suppressed address costs the sender nothing.
-func (h *emailHandler) checkRecipientsForAcceptance(w http.ResponseWriter, r *http.Request, tenantID string, envelope []string) (deliverable int, ok bool) {
+func (h *emailHandler) checkRecipientsForAcceptance(ctx context.Context, tenantID string, envelope []string) (deliverable int, apiErr *apiError) {
 	keys := make([]string, 0, len(envelope))
 	for _, rcpt := range envelope {
 		k, err := suppression.Normalize(rcpt)
 		if err != nil {
-			writeError(w, r, newError(ErrValidation, "invalid_recipient", "every recipient must be a plain ASCII address such as person@example.com"))
-			return 0, false
+			return 0, newError(ErrValidation, "invalid_recipient", "every recipient must be a plain ASCII address such as person@example.com")
 		}
 		keys = append(keys, k)
 	}
-	suppressed, err := h.db.SuppressedForTenant(r.Context(), tenantID, keys)
+	suppressed, err := h.db.SuppressedForTenant(ctx, tenantID, keys)
 	if err != nil {
-		writeError(w, r, newError(ErrInternal, "internal_error", "failed to check recipient suppression"))
-		return 0, false
+		return 0, newError(ErrInternal, "internal_error", "failed to check recipient suppression")
 	}
 	for _, k := range keys {
 		if !suppressed[k] {
@@ -207,8 +206,7 @@ func (h *emailHandler) checkRecipientsForAcceptance(w http.ResponseWriter, r *ht
 		}
 	}
 	if deliverable > 0 {
-		return deliverable, true
+		return deliverable, nil
 	}
-	writeError(w, r, newError(ErrValidation, "all_recipients_suppressed", "every recipient is on this account's suppression list; nothing was sent"))
-	return 0, false
+	return 0, newError(ErrValidation, "all_recipients_suppressed", "every recipient is on this account's suppression list; nothing was sent")
 }

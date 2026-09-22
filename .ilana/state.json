@@ -18,7 +18,7 @@
     "DEF": 27,
     "CR": 24,
     "RSK": 40,
-    "DEC": 174,
+    "DEC": 178,
     "MET": 72,
     "ETH": 1
   },
@@ -34,10 +34,10 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.40",
-    "ilana_current_through": "v0.40",
+    "last_completed_milestone": "v0.41",
+    "ilana_current_through": "v0.41",
     "current_milestone": "none",
-    "current_milestone_status": "v0.40 complete; PR #18 Greptile findings fixed",
-    "next_milestone": "v0.41 Batch Sending (not started)"
+    "current_milestone_status": "v0.41 complete",
+    "next_milestone": "v0.42 SMTP Submission (not started)"
   }
 }

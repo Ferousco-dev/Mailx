@@ -72,6 +72,26 @@ const openAPISpec = `{
         }
       }
     },
+    "/emails/batch": {
+      "post": {
+        "summary": "Send up to 100 independent emails in one call",
+        "description": "Requires the emails:send scope. Accepts an array of distinct emails (different recipients/content each) — NOT a template fanned out to an audience (see POST /broadcasts for that). Each item goes through the EXACT same acceptance pipeline as POST /emails: same validation, same From-domain/DKIM authorization, same suppression check, same abuse controls (a batch buys no more throughput than the same N individual requests would have gotten — the tenant queue cap and recipient rate limit are still enforced per item), and the same durable, independent InsertMessage. There is no batch-level transaction: ONE ITEM'S FAILURE NEVER BLOCKS ITS SIBLINGS. The response always has HTTP 202 (the call itself succeeded) with one result per item, in request order, indexed to match the request array — each result carries either the accepted Email resource or a bounded error (type/code/message, the same shape as the top-level error envelope's 'error' object, minus request_id). A batch of more than 100 items, or zero items, is rejected as a whole (422) before any item is processed; likewise a malformed per-item idempotency_key rejects the whole request (400) before any item is processed. Idempotency: there is no batch-level Idempotency-Key header (that HTTP mechanism is single-valued per request); instead each item MAY carry its own optional idempotency_key field, replayed/conflict-checked exactly like POST /emails' Idempotency-Key against that same key's prior use.",
+        "requestBody": {
+          "required": true,
+          "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BatchSendRequest"}}}
+        },
+        "responses": {
+          "202": {"description": "Accepted (per-item results — check each item's own accepted/error status)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BatchSendResponse"}}}},
+          "400": {"$ref": "#/components/responses/Error"},
+          "401": {"$ref": "#/components/responses/Error"},
+          "403": {"$ref": "#/components/responses/Error"},
+          "413": {"$ref": "#/components/responses/Error"},
+          "415": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"},
+          "500": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/emails/{id}": {
       "get": {
         "summary": "Retrieve an email",
@@ -689,6 +709,59 @@ const openAPISpec = `{
           "scheduled_at": {"type": "string", "format": "date-time", "nullable": true, "description": "RFC 3339. Omit to send immediately."}
         },
         "additionalProperties": false
+      },
+      "BatchSendItem": {
+        "type": "object",
+        "required": ["from", "to"],
+        "properties": {
+          "from": {"type": "string", "example": "Feranmi <hello@example.com>"},
+          "to": {"type": "array", "items": {"type": "string"}, "maxItems": 50, "example": ["user@example.com"]},
+          "cc": {"type": "array", "items": {"type": "string"}},
+          "bcc": {"type": "array", "items": {"type": "string"}},
+          "reply_to": {"type": "string"},
+          "subject": {"type": "string", "maxLength": 500},
+          "html": {"type": "string"},
+          "text": {"type": "string"},
+          "template_id": {"type": "string"},
+          "variables": {"type": "object", "additionalProperties": {"type": "string"}},
+          "scheduled_at": {"type": "string", "format": "date-time", "nullable": true},
+          "idempotency_key": {"type": "string", "maxLength": 255, "description": "Optional, per-item (there is no batch-level Idempotency-Key header). Same replay/conflict semantics as POST /emails' Idempotency-Key header, scoped to this one key."}
+        },
+        "additionalProperties": false
+      },
+      "BatchSendRequest": {
+        "type": "object",
+        "required": ["emails"],
+        "properties": {
+          "emails": {"type": "array", "minItems": 1, "maxItems": 100, "items": {"$ref": "#/components/schemas/BatchSendItem"}}
+        },
+        "additionalProperties": false
+      },
+      "BatchItemError": {
+        "type": "object",
+        "properties": {
+          "type": {"type": "string"},
+          "code": {"type": "string"},
+          "message": {"type": "string"}
+        }
+      },
+      "BatchSendResultItem": {
+        "type": "object",
+        "required": ["index"],
+        "properties": {
+          "index": {"type": "integer", "description": "Position in the request's emails array."},
+          "email": {"$ref": "#/components/schemas/Email"},
+          "error": {"$ref": "#/components/schemas/BatchItemError"}
+        }
+      },
+      "BatchSendResponse": {
+        "type": "object",
+        "required": ["data", "accepted", "rejected"],
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/BatchSendResultItem"}},
+          "accepted": {"type": "integer"},
+          "rejected": {"type": "integer"}
+        }
       },
       "Broadcast": {
         "type": "object",

@@ -131,13 +131,35 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := storage.NewID()
-	if err != nil {
-		writeError(w, r, newError(ErrInternal, "internal_error", "failed to generate message id"))
+	tenantID := tenantFromContext(r.Context())
+	resp, replayed, aerr := h.acceptOne(r.Context(), tenantID, req, idemKey, now, scheduledAt)
+	if aerr != nil {
+		writeError(w, r, aerr)
 		return
 	}
+	if replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
+	writeJSON(w, http.StatusAccepted, resp)
+}
 
-	tenantID := tenantFromContext(r.Context())
+// acceptOne runs the entire per-message acceptance pipeline that used to
+// live inline in handleSend — template render, build, From-domain
+// authorization + DKIM signing, recipient suppression check, idempotency
+// claim, abuse controls, FileStore write, and the durable InsertMessage —
+// and is now shared by handleSend (one HTTP request, one email) and
+// handleSendBatch (one HTTP request, N independent emails, v0.41). It
+// never writes to an http.ResponseWriter: every failure is returned as an
+// *apiError so a batch caller can attribute it to the right item instead
+// of it corrupting a shared response. Every ordering guarantee documented
+// inline below (idempotency claim after validation, abuse controls after
+// the claim, FileStore before the DB transaction, etc.) is unchanged from
+// the pre-v0.41 handleSend and applies per item, independently.
+func (h *emailHandler) acceptOne(ctx context.Context, tenantID string, req sendEmailRequest, idemKey string, now, scheduledAt time.Time) (resp email, replayed bool, apiErr *apiError) {
+	id, err := storage.NewID()
+	if err != nil {
+		return email{}, false, newError(ErrInternal, "internal_error", "failed to generate message id")
+	}
 
 	// PR review fix: an already-COMPLETED replay is checked here, BEFORE
 	// template lookup/rendering below. Previously a retry with the same
@@ -151,20 +173,17 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// existing late resolveIdempotency call still claims/polls as usual.
 	if idemKey != "" {
 		if fingerprint, ferr := idempotency.Fingerprint(req); ferr == nil {
-			if resp, ok := h.replayIfCompleted(r.Context(), tenantID, idempotency.OperationEmailsCreate, idemKey, fingerprint); ok {
-				w.Header().Set("Idempotency-Replayed", "true")
-				writeJSON(w, http.StatusAccepted, resp)
-				return
+			if r, ok := h.replayIfCompleted(ctx, tenantID, idempotency.OperationEmailsCreate, idemKey, fingerprint); ok {
+				return r, true, nil
 			}
 		}
 	}
 
 	subject, text, html := req.Subject, req.Text, req.HTML
 	if req.TemplateID != "" {
-		rendered, terr := h.renderTemplate(r.Context(), tenantID, req.TemplateID, req.Variables)
+		rendered, terr := h.renderTemplate(ctx, tenantID, req.TemplateID, req.Variables)
 		if terr != nil {
-			writeError(w, r, terr)
-			return
+			return email{}, false, terr
 		}
 		subject, text, html = rendered.Subject, rendered.Text, rendered.HTML
 	}
@@ -181,29 +200,26 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		MessageID: h.messageID(id), Date: now,
 	})
 	if err != nil {
-		writeError(w, r, newError(ErrValidation, "invalid_message", err.Error()))
-		return
+		return email{}, false, newError(ErrValidation, "invalid_message", err.Error())
 	}
 	if !sameDeliveryDomain(built.Envelope) {
-		writeError(w, r, newError(ErrValidation, "mixed_recipient_domains", "all recipients must share one domain for this MailX version"))
-		return
+		return email{}, false, newError(ErrValidation, "mixed_recipient_domains", "all recipients must share one domain for this MailX version")
 	}
 
-	fromDomain, raw, ok := h.authorizeAndSign(w, r, tenantID, built.From, built.Raw)
-	if !ok {
-		return
+	fromDomain, raw, aerr := h.authorizeAndSign(ctx, tenantID, built.From, built.Raw)
+	if aerr != nil {
+		return email{}, false, aerr
 	}
-	deliverable, ok := h.checkRecipientsForAcceptance(w, r, tenantID, built.Envelope)
-	if !ok {
-		return
+	deliverable, aerr := h.checkRecipientsForAcceptance(ctx, tenantID, built.Envelope)
+	if aerr != nil {
+		return email{}, false, aerr
 	}
 
 	parsed, err := mail.ParseMessage(raw)
 	if err != nil {
 		// Build produced something MailX's own parser rejects — a bug in
 		// the builder, never a client input problem.
-		writeError(w, r, newError(ErrInternal, "internal_error", "failed to finalize message"))
-		return
+		return email{}, false, newError(ErrInternal, "internal_error", "failed to finalize message")
 	}
 
 	// Idempotency claim happens HERE — after every validation step above
@@ -219,18 +235,14 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	if idemKey != "" {
 		fingerprint, ferr := idempotency.Fingerprint(req)
 		if ferr != nil {
-			writeError(w, r, newError(ErrInternal, "internal_error", "failed to fingerprint request"))
-			return
+			return email{}, false, newError(ErrInternal, "internal_error", "failed to fingerprint request")
 		}
-		resp, handled, claimedAt, herr := h.resolveIdempotency(r.Context(), tenantID, idemKey, fingerprint, now)
+		r, handled, claimedAt, herr := h.resolveIdempotency(ctx, tenantID, idemKey, fingerprint, now)
 		if herr != nil {
-			writeError(w, r, herr)
-			return
+			return email{}, false, herr
 		}
 		if handled {
-			w.Header().Set("Idempotency-Replayed", "true")
-			writeJSON(w, http.StatusAccepted, resp)
-			return
+			return r, true, nil
 		}
 		idemClaimedAt = claimedAt
 		idemCompletion = &database.IdempotencyCompletion{Operation: idempotency.OperationEmailsCreate, IdempotencyKey: idemKey, Fingerprint: fingerprint}
@@ -239,10 +251,9 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// Abuse controls run only for a request that will really create a message:
 	// replays (handled above) and 409s never reach here, so they are never
 	// charged. A refusal releases the idempotency claim it owns.
-	if aerr := h.admitSend(r.Context(), tenantID, deliverable); aerr != nil {
+	if aerr := h.admitSend(ctx, tenantID, deliverable); aerr != nil {
 		h.releaseClaim(tenantID, idemCompletion, idemClaimedAt)
-		writeError(w, r, aerr)
-		return
+		return email{}, false, aerr
 	}
 
 	// FileStore write happens BEFORE the durable DB transaction: if this
@@ -258,8 +269,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		Message:  parsed,
 	}
 	if err := h.store.Save(record); err != nil {
-		writeError(w, r, newError(ErrInternal, "internal_error", "failed to persist message"))
-		return
+		return email{}, false, newError(ErrInternal, "internal_error", "failed to persist message")
 	}
 
 	recipients := make([]database.RecipientInput, 0, len(built.To)+len(built.Cc)+len(built.Bcc))
@@ -267,15 +277,14 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	recipients = appendRoleRecipients(recipients, built.Cc, "cc")
 	recipients = appendRoleRecipients(recipients, built.Bcc, "bcc")
 
-	msg, err := h.db.InsertMessage(r.Context(), database.NewMessage{
+	msg, err := h.db.InsertMessage(ctx, database.NewMessage{
 		ID: id, TenantID: tenantID, MailFrom: built.From, FromHeader: req.From,
 		Subject: subject, MessageIDHeader: h.messageID(id),
 		Recipients: recipients, AvailableAt: scheduledAt, IdempotencyCompletion: idemCompletion,
 		SenderDomain: fromDomain,
 	})
 	if errors.Is(err, database.ErrSenderNotAuthorized) { // domain removed after the pre-check
-		writeError(w, r, newError(ErrForbidden, "from_domain_not_authorized", "the From domain is not a verified domain of this account"))
-		return
+		return email{}, false, newError(ErrForbidden, "from_domain_not_authorized", "the From domain is not a verified domain of this account")
 	}
 	if err != nil {
 		// Lost the completion race for our OWN idempotency claim: someone
@@ -286,21 +295,18 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// feature exists for, so replay THEIR result instead of failing
 		// a request that would otherwise have succeeded.
 		if idemCompletion != nil && errors.Is(err, database.ErrConflict) {
-			if resp, ok := h.replayIfCompleted(r.Context(), tenantID, idemCompletion.Operation, idemCompletion.IdempotencyKey, idemCompletion.Fingerprint); ok {
-				w.Header().Set("Idempotency-Replayed", "true")
-				writeJSON(w, http.StatusAccepted, resp)
-				return
+			if r, ok := h.replayIfCompleted(ctx, tenantID, idemCompletion.Operation, idemCompletion.IdempotencyKey, idemCompletion.Fingerprint); ok {
+				return r, true, nil
 			}
 		}
 		// The outbox insert is part of the SAME transaction as the
 		// message/recipients: a failure here durably rolls back
 		// everything, so the "no orphaned DB row" guarantee holds even
 		// though outbox is a separate table.
-		writeError(w, r, newError(ErrInternal, "internal_error", "failed to durably record message"))
-		return
+		return email{}, false, newError(ErrInternal, "internal_error", "failed to durably record message")
 	}
 
-	writeJSON(w, http.StatusAccepted, emailFromRow(msg, recipientsFromInputs(id, recipients)))
+	return emailFromRow(msg, recipientsFromInputs(id, recipients)), false, nil
 }
 
 // resolveIdempotency claims (tenantID, operation, idemKey) or discovers
@@ -548,27 +554,23 @@ func (h *emailHandler) handleList(w http.ResponseWriter, r *http.Request) {
 // is signed here is exactly what is stored, queued and transmitted. A domain
 // with an active DKIM key must sign; any key failure refuses the message rather
 // than sending it unsigned. No key means DKIM is not set up for the domain.
-func (h *emailHandler) authorizeAndSign(w http.ResponseWriter, r *http.Request, tenantID, envelopeFrom, raw string) (fromDomain, signed string, ok bool) {
+func (h *emailHandler) authorizeAndSign(ctx context.Context, tenantID, envelopeFrom, raw string) (fromDomain, signed string, apiErr *apiError) {
 	fromDomain, err := maildomain.FromDomain(envelopeFrom)
 	if err != nil {
-		writeError(w, r, newError(ErrValidation, "invalid_from", "the From address does not have a valid domain"))
-		return "", "", false
+		return "", "", newError(ErrValidation, "invalid_from", "the From address does not have a valid domain")
 	}
-	if _, err := h.db.VerifiedSenderDomain(r.Context(), tenantID, fromDomain); err != nil {
+	if _, err := h.db.VerifiedSenderDomain(ctx, tenantID, fromDomain); err != nil {
 		if errors.Is(err, database.ErrNotFound) {
-			writeError(w, r, newError(ErrForbidden, "from_domain_not_authorized", "the From domain is not a verified domain of this account"))
-			return "", "", false
+			return "", "", newError(ErrForbidden, "from_domain_not_authorized", "the From domain is not a verified domain of this account")
 		}
-		writeError(w, r, newError(ErrInternal, "internal_error", "failed to authorize sender"))
-		return "", "", false
+		return "", "", newError(ErrInternal, "internal_error", "failed to authorize sender")
 	}
 	if h.dkim == nil {
-		return fromDomain, raw, true
+		return fromDomain, raw, nil
 	}
-	out, _, serr := h.dkim.SignMessage(r.Context(), tenantID, fromDomain, []byte(raw))
+	out, _, serr := h.dkim.SignMessage(ctx, tenantID, fromDomain, []byte(raw))
 	if serr != nil {
-		writeError(w, r, newError(ErrTemporarilyUnavailable, "dkim_signing_unavailable", "message signing is unavailable for this domain right now; retry later"))
-		return "", "", false
+		return "", "", newError(ErrTemporarilyUnavailable, "dkim_signing_unavailable", "message signing is unavailable for this domain right now; retry later")
 	}
-	return fromDomain, string(out), true
+	return fromDomain, string(out), nil
 }
