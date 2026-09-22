@@ -3,6 +3,7 @@ package api
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/auth"
 	"github.com/Ferousco-dev/mailx/internal/dkim"
@@ -75,6 +76,12 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("POST /v1/domains/{id}/spf/verify", requireScope(auth.ScopeDomainsWrite)(spfHandler.handleVerify))
 	v1.HandleFunc("GET /v1/domains/{id}/dmarc", requireScope(auth.ScopeDomainsRead)(dmarcHandler.handleGet))
 	v1.HandleFunc("POST /v1/domains/{id}/dmarc/verify", requireScope(auth.ScopeDomainsWrite)(dmarcHandler.handleVerify))
+	broadcasts := &broadcastHandler{db: h.db, now: func() time.Time { return time.Now().UTC() }}
+	v1.HandleFunc("POST /v1/broadcasts", requireScope(auth.ScopeBroadcastsWrite)(broadcasts.handleCreate))
+	v1.HandleFunc("GET /v1/broadcasts", requireScope(auth.ScopeBroadcastsRead)(broadcasts.handleList))
+	v1.HandleFunc("GET /v1/broadcasts/{id}", requireScope(auth.ScopeBroadcastsRead)(broadcasts.handleGet))
+	v1.HandleFunc("GET /v1/broadcasts/{id}/recipients", requireScope(auth.ScopeBroadcastsRead)(broadcasts.handleListRecipients))
+
 	audiences := &audienceHandler{db: h.db}
 	v1.HandleFunc("POST /v1/audiences", requireScope(auth.ScopeAudiencesWrite)(audiences.handleCreate))
 	v1.HandleFunc("GET /v1/audiences", requireScope(auth.ScopeAudiencesRead)(audiences.handleList))

@@ -96,6 +96,60 @@ const openAPISpec = `{
         "responses": {"200":{"description":"OK","content":{"application/json":{"schema":{"$ref":"#/components/schemas/EventList"}}}},"401":{"$ref":"#/components/responses/Error"},"403":{"$ref":"#/components/responses/Error"}}
       }
     },
+    "/broadcasts": {
+      "post": {
+        "summary": "Create a broadcast (bulk send)",
+        "description": "Requires broadcasts:write and emails:send is NOT required (broadcasts still pass through the same suppression/abuse authority as POST /emails). Sends a Template, rendered per recipient with that recipient's own attributes layered over the given variables, to every Contact currently in the given Audience. 202 means the broadcast is DURABLY ACCEPTED and will be expanded/sent asynchronously in bounded steps - it does NOT mean any recipient was queued, delivered, or reached an inbox. The recipient set is a point-in-time SNAPSHOT taken at acceptance: a Contact added to the Audience afterward is never included, however long expansion takes; a Contact removed from the Audience before its snapshot batch is scanned may be excluded (a narrow, documented race). The Template's subject/text/html are copied at acceptance and never re-read from the (possibly later-edited or deleted) Template. Suppression is checked again, per recipient, immediately before that recipient is turned into a message - a suppression created while a broadcast is still expanding still stops any not-yet-processed recipient. audience_id and template_id must belong to this account (404 otherwise). Idempotent via Idempotency-Key exactly like POST /emails.",
+        "parameters": [{"name": "Idempotency-Key", "in": "header", "required": false, "schema": {"type": "string"}, "description": "Optional. Replaying the same key with the same body returns the original broadcast (Idempotency-Replayed: true) instead of creating a second campaign. A different body with the same key is 409."}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateBroadcastRequest"}}}},
+        "responses": {
+          "202": {"description": "Accepted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Broadcast"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "415": {"$ref": "#/components/responses/Error"}, "422": {"$ref": "#/components/responses/Error"}
+        }
+      },
+      "get": {
+        "summary": "List broadcasts",
+        "description": "Requires broadcasts:read. Newest first, keyset pagination (limit, cursor).",
+        "parameters": [
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of broadcasts", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BroadcastList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/broadcasts/{id}": {
+      "get": {
+        "summary": "Get a broadcast",
+        "description": "Requires broadcasts:read. status is an orchestration state (accepted|expanding|completed|failed): 'completed' means every recipient was either suppressed or handed to the normal send pipeline - it does NOT mean delivered, and never means inbox placement. Another account's broadcast is indistinguishable from a missing one (404).",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "The broadcast", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Broadcast"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/broadcasts/{id}/recipients": {
+      "get": {
+        "summary": "List a broadcast's recipients",
+        "description": "Requires broadcasts:read. Keyset pagination (limit, cursor); the entire recipient set is never returned in one response, however large the audience was. message_id, once present, is a normal /v1/emails id - GET /v1/emails/{message_id} carries that recipient's actual delivery status.",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20}},
+          {"name": "cursor", "in": "query", "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "A page of recipients", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BroadcastRecipientList"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/audiences": {
       "post": {
         "summary": "Create an audience",
@@ -564,6 +618,56 @@ const openAPISpec = `{
           "scheduled_at": {"type": "string", "format": "date-time", "nullable": true, "description": "RFC 3339. Omit to send immediately."}
         },
         "additionalProperties": false
+      },
+      "Broadcast": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "audience_id": {"type": "string"},
+          "template_id": {"type": "string"},
+          "from": {"type": "string"},
+          "reply_to": {"type": "string"},
+          "status": {"type": "string", "enum": ["accepted", "expanding", "completed", "failed"]},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "CreateBroadcastRequest": {
+        "type": "object", "required": ["name", "audience_id", "template_id", "from"],
+        "properties": {
+          "name": {"type": "string", "maxLength": 200},
+          "audience_id": {"type": "string"},
+          "template_id": {"type": "string"},
+          "from": {"type": "string", "example": "updates@example.com"},
+          "reply_to": {"type": "string"},
+          "variables": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Global template variables, overridden per recipient by that Contact's own attributes/name. Same bounds as POST /emails' template variables."}
+        },
+        "additionalProperties": false
+      },
+      "BroadcastList": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/Broadcast"}},
+          "next_cursor": {"type": "string", "nullable": true}
+        }
+      },
+      "BroadcastRecipient": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "contact_id": {"type": "string"},
+          "email": {"type": "string"},
+          "status": {"type": "string", "enum": ["pending", "suppressed", "materialized"]},
+          "message_id": {"type": "string", "nullable": true}
+        }
+      },
+      "BroadcastRecipientList": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/BroadcastRecipient"}},
+          "next_cursor": {"type": "string", "nullable": true}
+        }
       },
       "Audience": {
         "type": "object",

@@ -13,6 +13,7 @@ import (
 
 	"github.com/Ferousco-dev/mailx/internal/api"
 	"github.com/Ferousco-dev/mailx/internal/auth"
+	"github.com/Ferousco-dev/mailx/internal/broadcast"
 	"github.com/Ferousco-dev/mailx/internal/buildinfo"
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/delivery"
@@ -120,10 +121,21 @@ func runFull() error {
 	if err != nil {
 		return err
 	}
+	// A typed-nil *ratelimit.Store must not be passed as the Limiter interface
+	// (it would be non-nil as an interface): pass the untyped nil explicitly
+	// when abuse controls are disabled.
+	var broadcastLimiter broadcast.Limiter
+	if abuse.Enabled {
+		broadcastLimiter = abuse.Store
+	}
+	expander := broadcast.New(db, store, dkimSvc, broadcastLimiter, abuse.Policy, ident.Name(),
+		broadcast.WithOnError(o.errLogger("broadcast")), broadcast.WithLogger(o.log), broadcast.WithMetrics(o.metrics))
+
 	components := []component{
 		o.logged("smtp", func(ctx context.Context) error { return runSMTPReceiver(ctx, store, o) }),
 		o.logged("dispatch", disp.Run),
 		o.logged("worker", pool.Run),
+		o.logged("broadcast-expansion", expander.Run),
 		o.logged("webhook-fanout", webhookRuntime.fanout.Run),
 		o.logged("webhook-worker", webhookRuntime.workers.Run),
 		o.logged("api", apiServer.Run),

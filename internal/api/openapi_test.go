@@ -22,6 +22,7 @@ func TestOpenAPISpecParses(t *testing.T) {
 		"/events", "/webhooks", "/webhooks/{id}", "/webhooks/{id}/rotate-secret", "/webhooks/{id}/deliveries",
 		"/templates", "/templates/{id}", "/contacts", "/contacts/{id}",
 		"/audiences", "/audiences/{id}", "/audiences/{id}/contacts", "/audiences/{id}/contacts/{contact_id}",
+		"/broadcasts", "/broadcasts/{id}", "/broadcasts/{id}/recipients",
 	} {
 		if _, ok := paths[want]; !ok {
 			t.Errorf("documented spec is missing path %q", want)
@@ -35,6 +36,7 @@ func TestOpenAPISpecParses(t *testing.T) {
 		"Template", "CreateTemplateRequest", "UpdateTemplateRequest", "TemplateList",
 		"Contact", "CreateContactRequest", "UpdateContactRequest", "ContactList",
 		"Audience", "CreateAudienceRequest", "UpdateAudienceRequest", "AudienceList", "AddMemberRequest",
+		"Broadcast", "CreateBroadcastRequest", "BroadcastList", "BroadcastRecipient", "BroadcastRecipientList",
 	} {
 		if _, ok := schemas[want]; !ok {
 			t.Errorf("documented spec is missing schema %q", want)
@@ -87,6 +89,10 @@ func TestOpenAPIRoutesMatchRuntime(t *testing.T) {
 		{"POST", "/v1/emails"},
 		{"GET", "/v1/emails"},
 		{"GET", "/v1/emails/some-id"},
+		{"POST", "/v1/broadcasts"},
+		{"GET", "/v1/broadcasts"},
+		{"GET", "/v1/broadcasts/some-id"},
+		{"GET", "/v1/broadcasts/some-id/recipients"},
 		{"POST", "/v1/audiences"},
 		{"GET", "/v1/audiences"},
 		{"GET", "/v1/audiences/some-id"},

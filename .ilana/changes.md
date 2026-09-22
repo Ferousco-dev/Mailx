@@ -18,3 +18,4 @@
 - CR-016 [approved, 2026-09-22]: implement v0.33 reusable email templates (migration 000016); v0.34 Contacts and later milestones excluded.
 - CR-017 [approved, 2026-09-22]: implement v0.34 contact management (migration 000017); v0.35 Audiences and later excluded.
 - CR-018 [approved, 2026-09-22]: implement v0.35 audience management (migration 000018); v0.36 Broadcasts and sending excluded.
+- CR-019 [approved, 2026-09-22]: implement v0.36 broadcasts/bulk sending (migration 000019); scheduled sending (v0.37), analytics (v0.38), and sending pools (v0.39) excluded.

@@ -46,3 +46,5 @@
 - RSK-036 [medium, v0.32]: correlation does not yet use VERP Return-Path; a bare message_id is accepted behind the operator-only ingestion credential. Revisit when MailX operates a real bounce-receiving domain (parallels v0.29's public-identity gap).
 - RSK-037 [low, v0.32]: no provider-specific complaint adapters (Gmail/Outlook FBL etc.) are implemented; only a generic authenticated JSON envelope.
 - RSK-029 [medium, v0.30, unchanged]: RCPT is still all-or-error; not touched by v0.32.
+- RSK-038 [low, v0.36]: a member removed from an Audience after its broadcast's snapshot watermark but before its snapshot batch is scanned may be silently excluded from that broadcast (a narrow async-expansion race, not a correctness bug — documented, not solved).
+- RSK-039 [low, v0.36]: no cancellation is implemented; an accepted broadcast always runs to completion. Deferred rather than building unsafe/fake cancellation.

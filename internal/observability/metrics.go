@@ -62,29 +62,30 @@ type DepthFunc func(context.Context) (int64, error)
 // Metrics owns a private registry. A nil *Metrics is valid and inert, and
 // every method swallows panics so metrics can never affect the caller.
 type Metrics struct {
-	reg          *prometheus.Registry
-	httpTotal    *prometheus.CounterVec
-	httpDuration *prometheus.HistogramVec
-	smtpSessions *prometheus.CounterVec
-	smtpActive   prometheus.Gauge
-	smtpMessages *prometheus.CounterVec
-	deliveries   *prometheus.CounterVec
-	deliveryDur  *prometheus.HistogramVec
-	queueOps     *prometheus.CounterVec
-	depthErrs    atomic.Uint64
-	depthErrDesc *prometheus.Desc
-	webhooks     *prometheus.CounterVec
-	webhookDur   *prometheus.HistogramVec
-	tlsSessions  *prometheus.CounterVec
-	authAttempts *prometheus.CounterVec
-	dkimSigs     *prometheus.CounterVec
-	spfVerifs    *prometheus.CounterVec
-	suppChecks   *prometheus.CounterVec
-	abuse        *prometheus.CounterVec
-	suppWrites   *prometheus.CounterVec
-	dmarcVerifs  *prometheus.CounterVec
-	depthFn      DepthFunc
-	depthDesc    *prometheus.Desc
+	reg                *prometheus.Registry
+	httpTotal          *prometheus.CounterVec
+	httpDuration       *prometheus.HistogramVec
+	smtpSessions       *prometheus.CounterVec
+	smtpActive         prometheus.Gauge
+	smtpMessages       *prometheus.CounterVec
+	deliveries         *prometheus.CounterVec
+	deliveryDur        *prometheus.HistogramVec
+	queueOps           *prometheus.CounterVec
+	depthErrs          atomic.Uint64
+	depthErrDesc       *prometheus.Desc
+	webhooks           *prometheus.CounterVec
+	webhookDur         *prometheus.HistogramVec
+	tlsSessions        *prometheus.CounterVec
+	authAttempts       *prometheus.CounterVec
+	dkimSigs           *prometheus.CounterVec
+	spfVerifs          *prometheus.CounterVec
+	suppChecks         *prometheus.CounterVec
+	abuse              *prometheus.CounterVec
+	broadcastExpansion *prometheus.CounterVec
+	suppWrites         *prometheus.CounterVec
+	dmarcVerifs        *prometheus.CounterVec
+	depthFn            DepthFunc
+	depthDesc          *prometheus.Desc
 }
 
 func NewMetrics(info buildinfo.Info) (*Metrics, error) {
@@ -126,6 +127,8 @@ func NewMetrics(info buildinfo.Info) (*Metrics, error) {
 		Help: "Delivery-time suppression checks by bounded result."}, []string{"result"})
 	m.abuse = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "abuse_control_decisions_total",
 		Help: "Outbound abuse-control decisions by bounded control and outcome."}, []string{"control", "outcome"})
+	m.broadcastExpansion = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "broadcast_expansion_batches_total",
+		Help: "Broadcast expansion steps by bounded phase and outcome."}, []string{"phase", "outcome"})
 	m.suppWrites = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: ns, Name: "suppression_writes_total",
 		Help: "Suppression writes requested, by bounded reason and source."}, []string{"reason", "source"})
 	m.depthDesc = prometheus.NewDesc(ns+"_queue_depth", "Queue jobs available plus claimed.", nil, nil)
@@ -134,7 +137,7 @@ func NewMetrics(info buildinfo.Info) (*Metrics, error) {
 	build.WithLabelValues(info.Version, info.Commit).Set(1)
 
 	for _, c := range []prometheus.Collector{m.httpTotal, m.httpDuration, m.smtpSessions, m.smtpActive, m.smtpMessages,
-		m.deliveries, m.deliveryDur, m.queueOps, m.tlsSessions, m.authAttempts, m.dkimSigs, m.spfVerifs, m.suppChecks, m.suppWrites, m.abuse, m.dmarcVerifs, m.webhooks, m.webhookDur, build, m,
+		m.deliveries, m.deliveryDur, m.queueOps, m.tlsSessions, m.authAttempts, m.dkimSigs, m.spfVerifs, m.suppChecks, m.suppWrites, m.abuse, m.broadcastExpansion, m.dmarcVerifs, m.webhooks, m.webhookDur, build, m,
 		collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{})} {
 		if err := m.reg.Register(c); err != nil {
 			return nil, err
@@ -342,5 +345,20 @@ func (m *Metrics) AbuseDecision(control, outcome string) {
 	if m != nil {
 		defer guard()
 		m.abuse.WithLabelValues(pick(control, abuseControls), pick(outcome, abuseOutcomes)).Inc()
+	}
+}
+
+var (
+	broadcastPhases   = []string{"snapshot", "materialize", "complete"}
+	broadcastOutcomes = []string{"ok", "suppressed", "backpressure", "error", "domain_unauthorized"}
+)
+
+// BroadcastExpansionBatch records one bounded broadcast-expansion step.
+// phase/outcome are closed sets (anything else becomes "other"); no
+// broadcast id, tenant id, contact id, or email can become a label.
+func (m *Metrics) BroadcastExpansionBatch(phase, outcome string) {
+	if m != nil {
+		defer guard()
+		m.broadcastExpansion.WithLabelValues(pick(phase, broadcastPhases), pick(outcome, broadcastOutcomes)).Inc()
 	}
 }

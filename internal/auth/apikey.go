@@ -84,6 +84,11 @@ const (
 	// Audiences (v0.35): group membership only, no sending permission implied.
 	ScopeAudiencesRead  Scope = "audiences:read"
 	ScopeAudiencesWrite Scope = "audiences:write"
+	// Broadcasts (v0.36): bulk-send orchestration. broadcasts:write does NOT
+	// imply emails:send is unnecessary — a broadcast still passes through the
+	// same abuse controls/suppression authority as a normal send.
+	ScopeBroadcastsRead  Scope = "broadcasts:read"
+	ScopeBroadcastsWrite Scope = "broadcasts:write"
 )
 
 // ValidScopes lists every scope MailX currently understands - grown only
@@ -92,7 +97,7 @@ var ValidScopes = []Scope{
 	ScopeEmailsSend, ScopeEmailsRead, ScopeDomainsRead, ScopeDomainsWrite,
 	ScopeWebhooksRead, ScopeWebhooksWrite, ScopeSuppressionsRead, ScopeSuppressionsWrite,
 	ScopeTemplatesRead, ScopeTemplatesWrite, ScopeContactsRead, ScopeContactsWrite,
-	ScopeAudiencesRead, ScopeAudiencesWrite,
+	ScopeAudiencesRead, ScopeAudiencesWrite, ScopeBroadcastsRead, ScopeBroadcastsWrite,
 }
 
 func ValidScope(s string) bool {
