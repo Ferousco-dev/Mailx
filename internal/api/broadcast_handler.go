@@ -33,6 +33,12 @@ type createBroadcastRequest struct {
 	From       string            `json:"from"`
 	ReplyTo    string            `json:"reply_to"`
 	Variables  map[string]string `json:"variables"`
+	// SendAt (v0.37): RFC 3339. Nil/absent means immediate — unchanged v0.36
+	// behavior. Set means expansion must not start before this instant; it
+	// is part of the idempotency fingerprint like every other field, so a
+	// retry with the same key but a different send_at conflicts (409)
+	// rather than silently rescheduling.
+	SendAt *string `json:"send_at"`
 }
 
 // broadcastResource never claims delivery: status values are orchestration
@@ -40,15 +46,16 @@ type createBroadcastRequest struct {
 // recipient was handed to the existing send pipeline or suppressed — never
 // that mail reached an inbox.
 type broadcastResource struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	AudienceID string    `json:"audience_id"`
-	TemplateID string    `json:"template_id"`
-	From       string    `json:"from"`
-	ReplyTo    string    `json:"reply_to,omitempty"`
-	Status     string    `json:"status"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         string     `json:"id"`
+	Name       string     `json:"name"`
+	AudienceID string     `json:"audience_id"`
+	TemplateID string     `json:"template_id"`
+	From       string     `json:"from"`
+	ReplyTo    string     `json:"reply_to,omitempty"`
+	Status     string     `json:"status"`
+	SendAt     *time.Time `json:"send_at,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
 }
 
 type broadcastList struct {
@@ -71,7 +78,7 @@ type broadcastRecipientList struct {
 
 func broadcastFromRow(b database.Broadcast) broadcastResource {
 	return broadcastResource{ID: b.ID, Name: b.Name, AudienceID: b.AudienceID, TemplateID: b.TemplateID,
-		From: b.FromAddress, ReplyTo: b.ReplyTo, Status: b.Status, CreatedAt: b.CreatedAt, UpdatedAt: b.UpdatedAt}
+		From: b.FromAddress, ReplyTo: b.ReplyTo, Status: b.Status, SendAt: b.SendAt, CreatedAt: b.CreatedAt, UpdatedAt: b.UpdatedAt}
 }
 
 func (h *broadcastHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -93,13 +100,14 @@ func (h *broadcastHandler) handleCreate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, r, newError(ErrInvalidRequest, "malformed_json", "request body is not valid JSON"))
 		return
 	}
-	if aerr := validateBroadcastRequest(req); aerr != nil {
+	now := h.now()
+	sendAt, aerr := validateBroadcastRequest(req, now)
+	if aerr != nil {
 		writeError(w, r, aerr)
 		return
 	}
 
 	tenantID := tenantFromContext(r.Context())
-	now := h.now()
 
 	var completion *database.IdempotencyCompletion
 	if idemKey != "" {
@@ -160,7 +168,7 @@ func (h *broadcastHandler) handleCreate(w http.ResponseWriter, r *http.Request) 
 		TenantID: tenantID, AudienceID: aud.ID, TemplateID: tmpl.ID, Name: req.Name,
 		FromAddress: req.From, ReplyTo: req.ReplyTo,
 		SubjectTemplate: tmpl.Subject, TextTemplate: tmpl.Text, HTMLTemplate: tmpl.HTML,
-		Variables: req.Variables, IdempotencyCompletion: completion,
+		Variables: req.Variables, SendAt: sendAt, IdempotencyCompletion: completion,
 	})
 	if err != nil {
 		if completion != nil && errors.Is(err, database.ErrConflict) {
@@ -178,26 +186,26 @@ func (h *broadcastHandler) handleCreate(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusAccepted, broadcastFromRow(b))
 }
 
-func validateBroadcastRequest(req createBroadcastRequest) *apiError {
+func validateBroadcastRequest(req createBroadcastRequest, now time.Time) (sendAt *time.Time, err *apiError) {
 	if strings.TrimSpace(req.Name) == "" {
-		return newError(ErrValidation, "missing_name", "name is required")
+		return nil, newError(ErrValidation, "missing_name", "name is required")
 	}
 	if len(req.Name) > maxAudienceNameLen {
-		return newError(ErrValidation, "invalid_name", fmt.Sprintf("name must be at most %d characters", maxAudienceNameLen))
+		return nil, newError(ErrValidation, "invalid_name", fmt.Sprintf("name must be at most %d characters", maxAudienceNameLen))
 	}
 	if strings.TrimSpace(req.AudienceID) == "" {
-		return newError(ErrValidation, "missing_audience_id", "audience_id is required")
+		return nil, newError(ErrValidation, "missing_audience_id", "audience_id is required")
 	}
 	if strings.TrimSpace(req.TemplateID) == "" {
-		return newError(ErrValidation, "missing_template_id", "template_id is required")
+		return nil, newError(ErrValidation, "missing_template_id", "template_id is required")
 	}
 	if strings.TrimSpace(req.From) == "" {
-		return newError(ErrValidation, "missing_from", "from is required")
+		return nil, newError(ErrValidation, "missing_from", "from is required")
 	}
 	if err := emailtemplate.ValidateVariables(req.Variables); err != nil {
-		return newError(ErrValidation, "invalid_variables", err.Error())
+		return nil, newError(ErrValidation, "invalid_variables", err.Error())
 	}
-	return nil
+	return parseSendAt(req.SendAt, now)
 }
 
 func (h *broadcastHandler) resolveIdempotency(ctx context.Context, tenantID, idemKey, fingerprint string, now time.Time) (resp broadcastResource, handled bool, err *apiError) {

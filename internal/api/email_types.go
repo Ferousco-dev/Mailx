@@ -71,17 +71,16 @@ func (req sendEmailRequest) validate(now time.Time, maxRecipients int) (schedule
 			return time.Time{}, newError(ErrValidation, "missing_body", "at least one of html or text is required")
 		}
 	}
-	if req.ScheduledAt == nil {
+	t, perr := parseSendAt(req.ScheduledAt, now)
+	if perr != nil {
+		perr.Code = "invalid_scheduled_at"
+		perr.Message = strings.Replace(perr.Message, "send_at", "scheduled_at", 1)
+		return time.Time{}, perr
+	}
+	if t == nil {
 		return time.Time{}, nil
 	}
-	t, parseErr := time.Parse(time.RFC3339, *req.ScheduledAt)
-	if parseErr != nil {
-		return time.Time{}, newError(ErrValidation, "invalid_scheduled_at", "scheduled_at must be an RFC 3339 timestamp")
-	}
-	if t.Before(now) {
-		return time.Time{}, newError(ErrValidation, "invalid_scheduled_at", "scheduled_at must not be in the past")
-	}
-	return t, nil
+	return *t, nil
 }
 
 // email is the public resource. html/text are populated only by GET

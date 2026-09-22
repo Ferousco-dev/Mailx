@@ -10,13 +10,18 @@ import (
 )
 
 // ClaimActiveBroadcasts returns up to limit broadcasts still needing
-// expansion work (accepted or expanding), oldest first, locked with SKIP
-// LOCKED so concurrent poller instances never claim the same broadcast in
-// the same tick (tested: two expanders never double-process one broadcast).
+// expansion work (accepted or expanding) that are DUE (send_at is NULL, the
+// unchanged v0.36 immediate case, or send_at <= PostgreSQL's own now() — the
+// same clock-authority lesson v0.36 learned the hard way: never compare a
+// stored instant against a Go-supplied "now"). Oldest first, locked with
+// SKIP LOCKED so concurrent poller instances never claim the same broadcast
+// in the same tick (tested: two expanders never double-process one
+// broadcast). A future-dated broadcast is simply invisible to this query
+// until due — no second scheduler, no early activation.
 func (db *DB) ClaimActiveBroadcasts(ctx context.Context, limit int) ([]Broadcast, error) {
 	rows, err := db.pool.Query(ctx, `SELECT `+broadcastColumns+`
 		FROM broadcasts
-		WHERE status IN ('accepted','expanding')
+		WHERE status IN ('accepted','expanding') AND (send_at IS NULL OR send_at <= now())
 		ORDER BY created_at
 		LIMIT $1
 		FOR UPDATE SKIP LOCKED`, limit)

@@ -33,7 +33,7 @@ func TestListPendingOutboxIsFairAcrossTenants(t *testing.T) {
 		bIDs[insertAt(t, db, b.ID, base.Add(time.Minute+time.Duration(i)*time.Millisecond))] = true
 	}
 
-	items, err := db.ListPendingOutbox(ctx, time.Now().UTC(), 20)
+	items, err := db.ListPendingOutbox(ctx, 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,11 +78,11 @@ func TestListPendingOutboxSingleTenantFillsBatchAndSkipsFutureAndDispatched(t *t
 			first = id
 		}
 	}
-	insertAt(t, db, a.ID, now.Add(time.Hour)) // not due
+	futureID := insertAt(t, db, a.ID, now.Add(time.Hour)) // not due
 	if err := db.MarkOutboxDispatched(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	items, err := db.ListPendingOutbox(ctx, now, 25)
+	items, err := db.ListPendingOutbox(ctx, 25)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,10 +93,9 @@ func TestListPendingOutboxSingleTenantFillsBatchAndSkipsFutureAndDispatched(t *t
 		if it.MessageID == first {
 			t.Fatal("dispatched row returned")
 		}
-	}
-	empty, err := db.ListPendingOutbox(ctx, now.Add(-24*time.Hour), 10)
-	if err != nil || len(empty) != 0 {
-		t.Fatalf("nothing due: %v %v", empty, err)
+		if it.MessageID == futureID {
+			t.Fatal("future-scheduled row returned as due")
+		}
 	}
 }
 
@@ -119,7 +118,7 @@ func TestListPendingOutboxUsesTenantIndex(t *testing.T) {
 		t.Skip("cannot steer planner on this pool")
 	}
 	// The real fair-dispatch query, logged as evidence (recorded in docs/design-v0.31.md).
-	if pr, perr := db.pool.Query(ctx, "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) "+fairOutboxSQL, time.Now().UTC(), 100, maxFairTenants); perr == nil {
+	if pr, perr := db.pool.Query(ctx, "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF) "+fairOutboxSQL, 100, maxFairTenants); perr == nil {
 		for pr.Next() {
 			var line string
 			_ = pr.Scan(&line)
@@ -235,10 +234,9 @@ func BenchmarkListPendingOutboxFair(b *testing.B) {
 			}
 		}
 	}
-	now := time.Now().UTC()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := db.ListPendingOutbox(ctx, now, 100); err != nil {
+		if _, err := db.ListPendingOutbox(ctx, 100); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -288,7 +286,7 @@ func TestFairDispatchPlanAtScale(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	items, err := db.ListPendingOutbox(ctx, time.Now().UTC(), 100)
+	items, err := db.ListPendingOutbox(ctx, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +303,7 @@ func TestFairDispatchPlanAtScale(t *testing.T) {
 	if elapsed > time.Second {
 		t.Fatalf("fair dispatch took %s with a 30000-row backlog", elapsed)
 	}
-	rows, err := db.pool.Query(ctx, "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, BUFFERS) "+fairOutboxSQL, time.Now().UTC(), 100, maxFairTenants)
+	rows, err := db.pool.Query(ctx, "EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, BUFFERS) "+fairOutboxSQL, 100, maxFairTenants)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +364,7 @@ func TestOutboxIndexMigrationRoundTripKeepsRows(t *testing.T) {
 	if ix := outboxIndexes(t, db); !ix["idx_outbox_pending_tenant"] || ix["idx_outbox_pending"] {
 		t.Fatalf("after re-up: %v", ix)
 	}
-	items, err := db.ListPendingOutbox(ctx, time.Now().UTC(), 10)
+	items, err := db.ListPendingOutbox(ctx, 10)
 	if err != nil || len(items) != 1 || items[0].MessageID != id {
 		t.Fatalf("pending row lost across the migration round trip: %v %v", items, err)
 	}

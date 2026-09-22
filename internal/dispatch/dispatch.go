@@ -25,7 +25,7 @@ const (
 // Outbox is the narrow database dependency Dispatcher needs, so tests can
 // substitute a fake without a real PostgreSQL connection.
 type Outbox interface {
-	ListPendingOutbox(ctx context.Context, now time.Time, limit int) ([]database.OutboxItem, error)
+	ListPendingOutbox(ctx context.Context, limit int) ([]database.OutboxItem, error)
 	MarkOutboxDispatched(ctx context.Context, messageID string) error
 }
 
@@ -58,7 +58,6 @@ type Dispatcher struct {
 	metrics   *observability.Metrics
 	outbox    Outbox
 	q         queue.Queue
-	now       func() time.Time
 	interval  time.Duration
 	batchSize int
 	onError   func(error)
@@ -67,7 +66,6 @@ type Dispatcher struct {
 func New(outbox Outbox, q queue.Queue, opts ...Option) *Dispatcher {
 	d := &Dispatcher{
 		outbox: outbox, q: q,
-		now:       func() time.Time { return time.Now().UTC() },
 		interval:  defaultInterval,
 		batchSize: defaultBatchSize,
 		onError:   func(error) {},
@@ -97,7 +95,7 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 // a crash between the two on a previous tick is always safely retried
 // here rather than needing its own recovery path.
 func (d *Dispatcher) tick(ctx context.Context) {
-	items, err := d.outbox.ListPendingOutbox(ctx, d.now(), d.batchSize)
+	items, err := d.outbox.ListPendingOutbox(ctx, d.batchSize)
 	if err != nil {
 		d.onError(fmt.Errorf("dispatch: list pending outbox: %w", err))
 		return

@@ -629,6 +629,7 @@ const openAPISpec = `{
           "from": {"type": "string"},
           "reply_to": {"type": "string"},
           "status": {"type": "string", "enum": ["accepted", "expanding", "completed", "failed"]},
+          "send_at": {"type": "string", "format": "date-time", "nullable": true, "description": "v0.37: absent/null means expansion began immediately on acceptance. When set, MailX never begins expansion before this instant; expansion may start somewhat after it depending on scheduler polling capacity, never before."},
           "created_at": {"type": "string", "format": "date-time"},
           "updated_at": {"type": "string", "format": "date-time"}
         }
@@ -641,7 +642,8 @@ const openAPISpec = `{
           "template_id": {"type": "string"},
           "from": {"type": "string", "example": "updates@example.com"},
           "reply_to": {"type": "string"},
-          "variables": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Global template variables, overridden per recipient by that Contact's own attributes/name. Same bounds as POST /emails' template variables."}
+          "variables": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Global template variables, overridden per recipient by that Contact's own attributes/name. Same bounds as POST /emails' template variables."},
+          "send_at": {"type": "string", "format": "date-time", "nullable": true, "description": "v0.37: RFC 3339 absolute instant. Omit to expand immediately (unchanged v0.36 behavior). The Audience snapshot boundary is always acceptance time regardless of send_at - scheduling only delays WHEN expansion may begin, never which recipients are eligible. Suppression is still re-checked at expansion time, not frozen at creation. Part of the idempotency fingerprint: a retry with the same key but a different send_at is a 409 conflict, not a reschedule. Immutable after acceptance - there is no reschedule/cancel endpoint in v0.37."}
         },
         "additionalProperties": false
       },

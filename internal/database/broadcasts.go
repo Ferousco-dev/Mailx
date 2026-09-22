@@ -11,19 +11,23 @@ import (
 // Broadcast is a durable bulk-send orchestration record (v0.36). See
 // docs/design-v0.36.md for the full state machine and snapshot semantics.
 type Broadcast struct {
-	ID                 string
-	TenantID           string
-	AudienceID         string
-	TemplateID         string
-	Name               string
-	FromAddress        string
-	ReplyTo            string
-	SubjectTemplate    string
-	TextTemplate       string
-	HTMLTemplate       string
-	Variables          map[string]string
-	Status             string // accepted | expanding | completed | failed
-	FailureReason      string
+	ID              string
+	TenantID        string
+	AudienceID      string
+	TemplateID      string
+	Name            string
+	FromAddress     string
+	ReplyTo         string
+	SubjectTemplate string
+	TextTemplate    string
+	HTMLTemplate    string
+	Variables       map[string]string
+	Status          string // accepted | expanding | completed | failed
+	FailureReason   string
+	// SendAt is nil for immediate (unchanged v0.36 behavior) or the instant
+	// below which expansion must never start (v0.37). It never affects
+	// AudienceSnapshotAt.
+	SendAt             *time.Time
 	AudienceSnapshotAt time.Time
 	SnapshotComplete   bool
 	CreatedAt          time.Time
@@ -41,6 +45,9 @@ type NewBroadcast struct {
 	TextTemplate    string
 	HTMLTemplate    string
 	Variables       map[string]string
+	// SendAt is nil for immediate expansion (unchanged v0.36 behavior) or a
+	// future instant; validated (RFC3339, not-in-past) by the API layer.
+	SendAt *time.Time
 	// IdempotencyCompletion, if set, completes that claim IN THE SAME
 	// transaction as the broadcast insert (mirrors InsertMessage).
 	IdempotencyCompletion *IdempotencyCompletion
@@ -72,14 +79,14 @@ type BroadcastRecipientCursor struct {
 
 const broadcastColumns = `id, tenant_id, audience_id, template_id, name, from_address, reply_to,
 	subject_template, text_template, html_template, variables, status, coalesce(failure_reason,''),
-	audience_snapshot_at, snapshot_complete, created_at, updated_at`
+	send_at, audience_snapshot_at, snapshot_complete, created_at, updated_at`
 
 func scanBroadcast(row rowScanner) (Broadcast, error) {
 	var b Broadcast
 	var vars []byte
 	err := row.Scan(&b.ID, &b.TenantID, &b.AudienceID, &b.TemplateID, &b.Name, &b.FromAddress, &b.ReplyTo,
 		&b.SubjectTemplate, &b.TextTemplate, &b.HTMLTemplate, &vars, &b.Status, &b.FailureReason,
-		&b.AudienceSnapshotAt, &b.SnapshotComplete, &b.CreatedAt, &b.UpdatedAt)
+		&b.SendAt, &b.AudienceSnapshotAt, &b.SnapshotComplete, &b.CreatedAt, &b.UpdatedAt)
 	if err != nil {
 		return Broadcast{}, normalizeErr(err)
 	}
@@ -123,11 +130,11 @@ func (db *DB) CreateBroadcast(ctx context.Context, in NewBroadcast) (Broadcast, 
 
 	b, err := scanBroadcast(tx.QueryRow(ctx, `
 		INSERT INTO broadcasts (id, tenant_id, audience_id, template_id, name, from_address, reply_to,
-			subject_template, text_template, html_template, variables, audience_snapshot_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+			subject_template, text_template, html_template, variables, send_at, audience_snapshot_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, now())
 		RETURNING `+broadcastColumns,
 		id, in.TenantID, in.AudienceID, in.TemplateID, in.Name, in.FromAddress, in.ReplyTo,
-		in.SubjectTemplate, in.TextTemplate, in.HTMLTemplate, varsJSON))
+		in.SubjectTemplate, in.TextTemplate, in.HTMLTemplate, varsJSON, in.SendAt))
 	if err != nil {
 		return Broadcast{}, fmt.Errorf("database: create broadcast: %w", normalizeErr(err))
 	}

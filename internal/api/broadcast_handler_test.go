@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/auth"
 )
@@ -203,5 +204,54 @@ func TestBroadcastIdempotencyDifferentBodyConflicts(t *testing.T) {
 func TestOpenAPIDocumentsBroadcasts(t *testing.T) {
 	if !strings.Contains(openAPISpec, "/broadcasts") {
 		t.Fatal("OpenAPI spec does not document /v1/broadcasts")
+	}
+}
+
+func TestBroadcastSendAtAccepted(t *testing.T) {
+	a := newDKIMAPI(t)
+	f := setupBroadcastReady(t, a, "acme")
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	rec := doJSON(t, f.h, "POST", "/v1/broadcasts", f.body(map[string]any{"send_at": future}))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	b := decodeBroadcast(t, rec)
+	if b.SendAt == nil || b.Status != "accepted" {
+		t.Fatalf("%+v", b)
+	}
+}
+
+func TestBroadcastSendAtInPastRejected(t *testing.T) {
+	a := newDKIMAPI(t)
+	f := setupBroadcastReady(t, a, "acme")
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	rec := doJSON(t, f.h, "POST", "/v1/broadcasts", f.body(map[string]any{"send_at": past}))
+	if rec.Code != 422 {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBroadcastSendAtMalformedRejected(t *testing.T) {
+	a := newDKIMAPI(t)
+	f := setupBroadcastReady(t, a, "acme")
+	rec := doJSON(t, f.h, "POST", "/v1/broadcasts", f.body(map[string]any{"send_at": "tomorrow 2pm"}))
+	if rec.Code != 422 {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Idempotency: send_at is part of the fingerprint, so replaying the same
+// key with a DIFFERENT send_at must conflict, not silently reschedule.
+func TestBroadcastIdempotencyDifferentSendAtConflicts(t *testing.T) {
+	a := newDKIMAPI(t)
+	f := setupBroadcastReady(t, a, "acme")
+	t1 := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	t2 := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	if rec := doJSONWithKey(t, f.h, "POST", "/v1/broadcasts", "k3", f.body(map[string]any{"send_at": t1})); rec.Code != http.StatusAccepted {
+		t.Fatal(rec.Body.String())
+	}
+	rec := doJSONWithKey(t, f.h, "POST", "/v1/broadcasts", "k3", f.body(map[string]any{"send_at": t2}))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
 }

@@ -3,7 +3,9 @@ package database
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 )
 
 // setupAudienceFixture creates the tenant/audience/template but NOT the
@@ -275,5 +277,75 @@ func TestMarkBroadcastFailedStopsClaiming(t *testing.T) {
 	db.pool.QueryRow(ctx, `SELECT status, failure_reason FROM broadcasts WHERE id = $1`, b.ID).Scan(&status, &reason)
 	if status != "failed" || reason != "from_domain_not_authorized" {
 		t.Fatalf("%q %q", status, reason)
+	}
+}
+
+// TestClaimActiveBroadcastsDueScanAtScale is EXPLAIN evidence (v0.37) that
+// the new send_at gate on ClaimActiveBroadcasts does not degrade to a full
+// scan once most active broadcasts are future-scheduled: idx_broadcasts_
+// active_due (send_at, created_at) WHERE status IN (...) should let the
+// planner find the few due rows without reading every not-yet-due one.
+func TestClaimActiveBroadcastsDueScanAtScale(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn, aud, tmpl := setupAudienceFixture(t, db)
+	future := time.Now().UTC().Add(24 * time.Hour)
+	for i := 0; i < 2000; i++ {
+		if _, err := db.CreateBroadcast(ctx, NewBroadcast{
+			TenantID: tn.ID, AudienceID: aud.ID, TemplateID: tmpl.ID, Name: "bulk",
+			FromAddress: "a@example.com", SubjectTemplate: "s", TextTemplate: "t", SendAt: &future,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	due := time.Now().UTC().Add(-time.Second)
+	wantID := ""
+	for i := 0; i < 3; i++ {
+		b, err := db.CreateBroadcast(ctx, NewBroadcast{
+			TenantID: tn.ID, AudienceID: aud.ID, TemplateID: tmpl.ID, Name: "due",
+			FromAddress: "a@example.com", SubjectTemplate: "s", TextTemplate: "t", SendAt: &due,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantID = b.ID
+	}
+	if _, err := db.pool.Exec(ctx, `ANALYZE broadcasts`); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, err := db.ClaimActiveBroadcasts(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claimed) != 3 {
+		t.Fatalf("expected exactly the 3 due broadcasts, got %d", len(claimed))
+	}
+	var found bool
+	for _, c := range claimed {
+		if c.ID == wantID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("due broadcast missing from claim")
+	}
+
+	rows, err := db.pool.Query(ctx, `EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, BUFFERS) SELECT `+broadcastColumns+`
+		FROM broadcasts WHERE status IN ('accepted','expanding') AND (send_at IS NULL OR send_at <= now())
+		ORDER BY created_at LIMIT 10 FOR UPDATE SKIP LOCKED`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan strings.Builder
+	for rows.Next() {
+		var line string
+		_ = rows.Scan(&line)
+		plan.WriteString(line + "\n")
+	}
+	t.Log("\n" + plan.String())
+	if strings.Contains(plan.String(), "Seq Scan on broadcasts") {
+		t.Fatalf("due-broadcast scan sequentially scans broadcasts at 2003 rows:\n%s", plan.String())
 	}
 }

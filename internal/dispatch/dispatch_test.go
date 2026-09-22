@@ -26,9 +26,10 @@ func (f *fakeOutbox) add(item database.OutboxItem) {
 	f.items[item.MessageID] = item
 }
 
-func (f *fakeOutbox) ListPendingOutbox(_ context.Context, now time.Time, limit int) ([]database.OutboxItem, error) {
+func (f *fakeOutbox) ListPendingOutbox(_ context.Context, limit int) ([]database.OutboxItem, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	now := time.Now().UTC()
 	var out []database.OutboxItem
 	for id, item := range f.items {
 		if !f.dispatched[id] && !item.AvailableAt.After(now) {

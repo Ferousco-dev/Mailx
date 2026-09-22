@@ -332,3 +332,148 @@ func TestExpanderUsesFrozenTemplateSnapshotNotLiveTemplate(t *testing.T) {
 		t.Fatalf("subject = %q, want the FROZEN snapshot rendered, not the edited/deleted live template", msg.Subject)
 	}
 }
+
+// TestScheduledBroadcastNotExpandedBeforeSendAt proves the v0.37 no-early-
+// activation invariant for Broadcasts: a future send_at must keep the
+// broadcast entirely invisible to the SAME expansion poller ClaimActive
+// Broadcasts already used pre-v0.37 — no second scheduler.
+func TestScheduledBroadcastNotExpandedBeforeSendAt(t *testing.T) {
+	db := newTestDB(t)
+	e := newTestExpander(t, db)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+	verifyTestDomain(t, db, tn.ID, "example.com")
+	aud, err := db.CreateAudience(ctx, database.NewAudience{TenantID: tn.ID, Name: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := db.CreateContact(ctx, database.NewContact{TenantID: tn.ID, Email: "one@dest.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddAudienceMember(ctx, tn.ID, aud.ID, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := db.CreateTemplate(ctx, database.NewTemplate{TenantID: tn.ID, Name: "t", Subject: "Hi", Text: "Body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().UTC().Add(time.Hour)
+	b, err := db.CreateBroadcast(ctx, database.NewBroadcast{
+		TenantID: tn.ID, AudienceID: aud.ID, TemplateID: tmpl.ID, Name: "camp",
+		FromAddress: "a@example.com", SubjectTemplate: tmpl.Subject, TextTemplate: tmpl.Text,
+		SendAt: &future,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runTicks(e, ctx, 5)
+	got, err := db.GetBroadcast(ctx, tn.ID, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "accepted" {
+		t.Fatalf("scheduled broadcast must stay untouched before send_at: %+v", got)
+	}
+	if recipients, _ := db.ListBroadcastRecipients(ctx, tn.ID, b.ID, 10, nil); len(recipients) != 0 {
+		t.Fatalf("no expansion must have happened yet: %+v", recipients)
+	}
+}
+
+// TestScheduledBroadcastExpandsOnceDue proves the flip side: once send_at
+// has passed, the SAME poller picks the broadcast up through the ordinary
+// accepted/expanding criteria — no separate activation step, no second
+// scheduler.
+func TestScheduledBroadcastExpandsOnceDue(t *testing.T) {
+	db := newTestDB(t)
+	e := newTestExpander(t, db)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+	verifyTestDomain(t, db, tn.ID, "example.com")
+	aud, err := db.CreateAudience(ctx, database.NewAudience{TenantID: tn.ID, Name: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := db.CreateContact(ctx, database.NewContact{TenantID: tn.ID, Email: "one@dest.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddAudienceMember(ctx, tn.ID, aud.ID, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := db.CreateTemplate(ctx, database.NewTemplate{TenantID: tn.ID, Name: "t", Subject: "Hi", Text: "Body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Already due at acceptance (simulates "the scheduled instant has now
+	// arrived" without sleeping or faking a clock).
+	due := time.Now().UTC().Add(-time.Second)
+	b, err := db.CreateBroadcast(ctx, database.NewBroadcast{
+		TenantID: tn.ID, AudienceID: aud.ID, TemplateID: tmpl.ID, Name: "camp",
+		FromAddress: "a@example.com", SubjectTemplate: tmpl.Subject, TextTemplate: tmpl.Text,
+		SendAt: &due,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runTicks(e, ctx, 5)
+	got, err := db.GetBroadcast(ctx, tn.ID, b.ID)
+	if err != nil || got.Status != "completed" {
+		t.Fatalf("broadcast should complete once due: %+v %v", got, err)
+	}
+}
+
+// TestScheduledBroadcastSnapshotIsAtAcceptanceNotActivation proves the
+// chosen RSK-038 answer: audience_snapshot_at is stamped at ACCEPTANCE
+// regardless of send_at, so a contact added to the Audience AFTER
+// acceptance (even before the scheduled send_at arrives) is excluded —
+// scheduling a Broadcast for later does not widen the RSK-038 window.
+func TestScheduledBroadcastSnapshotIsAtAcceptanceNotActivation(t *testing.T) {
+	db := newTestDB(t)
+	e := newTestExpander(t, db)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+	verifyTestDomain(t, db, tn.ID, "example.com")
+	aud, err := db.CreateAudience(ctx, database.NewAudience{TenantID: tn.ID, Name: "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	early, err := db.CreateContact(ctx, database.NewContact{TenantID: tn.ID, Email: "early@dest.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddAudienceMember(ctx, tn.ID, aud.ID, early.ID); err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := db.CreateTemplate(ctx, database.NewTemplate{TenantID: tn.ID, Name: "t", Subject: "Hi", Text: "Body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	due := time.Now().UTC().Add(-time.Second)
+	b, err := db.CreateBroadcast(ctx, database.NewBroadcast{
+		TenantID: tn.ID, AudienceID: aud.ID, TemplateID: tmpl.ID, Name: "camp",
+		FromAddress: "a@example.com", SubjectTemplate: tmpl.Subject, TextTemplate: tmpl.Text,
+		SendAt: &due,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A member added AFTER acceptance (audience_snapshot_at is stamped at
+	// CreateBroadcast time regardless of send_at).
+	late, err := db.CreateContact(ctx, database.NewContact{TenantID: tn.ID, Email: "late@dest.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddAudienceMember(ctx, tn.ID, aud.ID, late.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	runTicks(e, ctx, 5)
+	recipients, err := db.ListBroadcastRecipients(ctx, tn.ID, b.ID, 10, nil)
+	if err != nil || len(recipients) != 1 || recipients[0].ContactID != early.ID {
+		t.Fatalf("expected only the pre-acceptance member, got %+v %v", recipients, err)
+	}
+}

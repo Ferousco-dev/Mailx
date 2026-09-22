@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/auth"
 	"github.com/Ferousco-dev/mailx/internal/database"
@@ -468,5 +469,75 @@ func TestListInvalidStatusFilter(t *testing.T) {
 	rec := doJSON(t, mux, "GET", "/v1/emails?status=not-a-status", nil)
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// ------------------------------------------------------- v0.37 scheduling --
+
+func TestSendScheduledAtAccepted(t *testing.T) {
+	mux, db, _ := setupSendMux(t)
+	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
+		"from": "a@example.com", "to": []string{"b@example.com"}, "text": "hi", "scheduled_at": future,
+	})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	var got email
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+
+	// No-early-send: the durable outbox row must not be due yet.
+	items, err := db.ListPendingOutbox(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, it := range items {
+		if it.MessageID == got.ID {
+			t.Fatalf("scheduled-future message must not be due yet: %+v", it)
+		}
+	}
+}
+
+func TestSendScheduledAtInPastRejected(t *testing.T) {
+	mux, _, _ := setupSendMux(t)
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
+		"from": "a@example.com", "to": []string{"b@example.com"}, "text": "hi", "scheduled_at": past,
+	})
+	if rec.Code != 422 {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSendScheduledAtMalformedRejected(t *testing.T) {
+	mux, _, _ := setupSendMux(t)
+	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
+		"from": "a@example.com", "to": []string{"b@example.com"}, "text": "hi", "scheduled_at": "not-a-time",
+	})
+	if rec.Code != 422 {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Without scheduled_at, behavior is unchanged: immediately due.
+func TestSendNoScheduledAtIsImmediatelyDue(t *testing.T) {
+	mux, db, _ := setupSendMux(t)
+	rec := doJSON(t, mux, "POST", "/v1/emails", map[string]any{
+		"from": "a@example.com", "to": []string{"b@example.com"}, "text": "hi",
+	})
+	var got email
+	_ = json.Unmarshal(rec.Body.Bytes(), &got)
+	items, err := db.ListPendingOutbox(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, it := range items {
+		if it.MessageID == got.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("an immediate (no scheduled_at) send must be due right away")
 	}
 }

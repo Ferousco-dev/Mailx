@@ -19,3 +19,5 @@
 - CR-017 [approved, 2026-09-22]: implement v0.34 contact management (migration 000017); v0.35 Audiences and later excluded.
 - CR-018 [approved, 2026-09-22]: implement v0.35 audience management (migration 000018); v0.36 Broadcasts and sending excluded.
 - CR-019 [approved, 2026-09-22]: implement v0.36 broadcasts/bulk sending (migration 000019); scheduled sending (v0.37), analytics (v0.38), and sending pools (v0.39) excluded.
+- CR-020 [approved, 2026-09-22]: add v0.40 BIMI brand indicators to the roadmap (planned, not started) — deliberately scheduled after DMARC enforcement is real, since BIMI has no effect without it.
+- CR-021 [approved, 2026-09-22]: implement v0.37 scheduled sending (migration 000020) for both normal email and Broadcasts; advanced analytics (v0.38) and sending pools (v0.39) excluded.
