@@ -172,3 +172,37 @@ func TestBackoffAttemptNumberMatchesStateCount(t *testing.T) {
 		t.Fatalf("delay after delivery operation %d = %s, want %s", state.Count(), got, time.Minute)
 	}
 }
+
+// TestUrgentBackoffPolicyExhaustsWithinOTPWindow proves the actual product
+// requirement: UrgentAttemptLimit's operations must sum to comfortably
+// under a typical OTP/password-reset expiry (5 minutes), unlike
+// DefaultBackoffPolicy whose FIRST retry alone (30 minutes) already exceeds
+// it.
+func TestUrgentBackoffPolicyExhaustsWithinOTPWindow(t *testing.T) {
+	policy := UrgentBackoffPolicy()
+	if policy.Base != 10*time.Second || policy.Max != 60*time.Second {
+		t.Fatalf("UrgentBackoffPolicy() = %+v", policy)
+	}
+	limit := UrgentAttemptLimit()
+
+	var total time.Duration
+	wants := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second, 60 * time.Second, 60 * time.Second}
+	for i := 0; i < limit.MaxAttempts; i++ {
+		got, err := policy.Delay(i + 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != wants[i] {
+			t.Fatalf("Delay(%d) = %s, want %s", i+1, got, wants[i])
+		}
+		total += got
+	}
+	if total >= 5*time.Minute {
+		t.Fatalf("urgent schedule exhausts in %s, want comfortably under a 5-minute OTP window", total)
+	}
+	def := DefaultBackoffPolicy()
+	firstDefaultRetry, _ := def.Delay(1)
+	if firstDefaultRetry < 5*time.Minute {
+		t.Fatalf("sanity check failed: DefaultBackoffPolicy's first retry (%s) is no longer slower than a 5-minute OTP window — the urgent tier may no longer be necessary, or this test's premise changed", firstDefaultRetry)
+	}
+}

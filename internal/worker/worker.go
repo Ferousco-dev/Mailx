@@ -73,19 +73,32 @@ func WithMetrics(m *observability.Metrics) Option {
 	return func(p *Pool) { p.metrics = m }
 }
 
+// WithUrgentCoordinator installs a second Coordinator (typically built with
+// retry.UrgentBackoffPolicy/UrgentAttemptLimit) for messages stored with
+// storage.PriorityUrgent — time-critical mail (OTPs, password resets) whose
+// value expires in minutes, so DefaultBackoffPolicy's 30-minute first retry
+// is not an acceptable wait. Unset (the default): every message uses the
+// same coordinator, exactly like before this option existed.
+func WithUrgentCoordinator(c Coordinator) Option {
+	return func(p *Pool) { p.urgentCoordinator = c }
+}
+
 type Pool struct {
-	log          *slog.Logger
-	metrics      *observability.Metrics
-	q            queue.Queue
-	loader       Loader
-	coordinator  Coordinator
-	outcomes     OutcomeStore
-	workers      int
-	reportingMTA string
-	now          func() time.Time
-	onError      func(error)
-	states       *stateStore
-	wg           sync.WaitGroup
+	log         *slog.Logger
+	metrics     *observability.Metrics
+	q           queue.Queue
+	loader      Loader
+	coordinator Coordinator
+	// urgentCoordinator, if set (WithUrgentCoordinator), handles messages
+	// stored with storage.PriorityUrgent instead of coordinator.
+	urgentCoordinator Coordinator
+	outcomes          OutcomeStore
+	workers           int
+	reportingMTA      string
+	now               func() time.Time
+	onError           func(error)
+	states            *stateStore
+	wg                sync.WaitGroup
 	// permits (optional) bounds concurrent SMTP work per tenant and destination.
 	permits      Permits
 	permitPolicy PermitPolicy
@@ -127,6 +140,16 @@ func NewPool(q queue.Queue, loader Loader, coordinator Coordinator, outcomes Out
 		opt(p)
 	}
 	return p, nil
+}
+
+// coordinatorFor selects urgentCoordinator for storage.PriorityUrgent when
+// one was installed, otherwise always the default coordinator — the
+// backward-compatible path when WithUrgentCoordinator was never used.
+func (p *Pool) coordinatorFor(priority string) Coordinator {
+	if priority == storage.PriorityUrgent && p.urgentCoordinator != nil {
+		return p.urgentCoordinator
+	}
+	return p.coordinator
 }
 
 // Run blocks until ctx is canceled and every worker has exited; it always

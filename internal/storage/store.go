@@ -40,7 +40,17 @@ type MessageRecord struct {
 	ReceivedAt time.Time
 	Envelope   mail.Envelope
 	Message    mail.Message
+	// Priority is "normal" (default, if empty) or "urgent" (see
+	// PriorityUrgent). The worker reads it straight from stored metadata to
+	// pick a retry.Coordinator without a database round trip on the hot
+	// per-job path.
+	Priority string
 }
+
+const (
+	PriorityNormal = "normal"
+	PriorityUrgent = "urgent"
+)
 
 // StoredMessage is a message read from MailX's local persistence layout. Raw
 // contains the exact bytes from message.eml. Attachments are represented by
@@ -60,6 +70,18 @@ type StoredMessageMetadata struct {
 	Message     StoredHeaders      `json:"message"`
 	MIME        StoredMIME         `json:"mime"`
 	Attachments []StoredAttachment `json:"attachments"`
+	// Priority is "normal" or "urgent"; absent/empty in metadata written
+	// before this field existed and treated as "normal" by Priority().
+	Priority string `json:"priority,omitempty"`
+}
+
+// EffectivePriority normalizes an empty/legacy Priority to PriorityNormal, so
+// callers never need to special-case older stored metadata.
+func (m StoredMessageMetadata) EffectivePriority() string {
+	if m.Priority == PriorityUrgent {
+		return PriorityUrgent
+	}
+	return PriorityNormal
 }
 
 // StoredEnvelope is the SMTP envelope recorded when MailX received a message.
@@ -372,9 +394,14 @@ func (s *FileStore) cleanupFailedSave(messageDir string) {
 }
 
 func newMetadata(record MessageRecord) StoredMessageMetadata {
+	priority := record.Priority
+	if priority == "" {
+		priority = PriorityNormal
+	}
 	metadata := StoredMessageMetadata{
 		ID:         record.ID,
 		ReceivedAt: record.ReceivedAt,
+		Priority:   priority,
 		Envelope: StoredEnvelope{
 			MailFrom: record.Envelope.MailFrom,
 			RcptTo:   record.Envelope.Recipients,

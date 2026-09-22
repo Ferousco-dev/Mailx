@@ -66,6 +66,23 @@ func DefaultBackoffPolicy() BackoffPolicy {
 	}
 }
 
+// UrgentBackoffPolicy is for time-critical mail (OTPs, password resets,
+// magic links) whose value expires in minutes: DefaultBackoffPolicy's first
+// retry alone (30 minutes) is already useless for a 5-minute OTP. With
+// UrgentAttemptLimit's 5 operations this exhausts in 10+20+40+60+60 = 190s
+// (~3.2 minutes) instead of ~7.5 hours — a genuine transient blip (like a
+// momentary DNS timeout) still gets several fast retries, but MailX gives up
+// and lets the caller react (fall back to SMS, show a "resend" button)
+// while the value could still plausibly be used, rather than silently
+// retrying for hours after the value is dead. This is a fixed, deliberately
+// short schedule — it is not a general per-tenant SLA/priority system.
+func UrgentBackoffPolicy() BackoffPolicy {
+	return BackoffPolicy{
+		Base: 10 * time.Second,
+		Max:  60 * time.Second,
+	}
+}
+
 // Delay returns the wait after completed delivery operation attempt and before
 // operation attempt+1. Public attempt numbering starts at one, matching State.
 // The uncapped formula is Base * 2^(attempt-1); Max caps every result, including

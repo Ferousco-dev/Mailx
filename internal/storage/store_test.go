@@ -744,3 +744,40 @@ func testRecord(id, raw string) MessageRecord {
 		Message:    mail.Message{Raw: raw},
 	}
 }
+
+// TestFileStoreSaveRoundTripsPriority proves priority is persisted and
+// read back through the exact path the worker uses (Load), and that
+// legacy/empty stored metadata normalizes to PriorityNormal via
+// EffectivePriority rather than an empty string leaking through.
+func TestFileStoreSaveRoundTripsPriority(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	urgent := testRecord(strings.Repeat("a", 32), "raw")
+	urgent.Priority = PriorityUrgent
+	if err := store.Save(urgent); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load(urgent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata.EffectivePriority() != PriorityUrgent {
+		t.Fatalf("priority = %q, want urgent", got.Metadata.EffectivePriority())
+	}
+
+	// No Priority set at all (as every pre-this-feature Save call looked):
+	// EffectivePriority must still normalize to "normal", never "".
+	legacy := testRecord(strings.Repeat("b", 32), "raw")
+	if err := store.Save(legacy); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.Load(legacy.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata.EffectivePriority() != PriorityNormal {
+		t.Fatalf("priority = %q, want normal for unset Priority", got.Metadata.EffectivePriority())
+	}
+}

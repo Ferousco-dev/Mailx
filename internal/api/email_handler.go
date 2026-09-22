@@ -252,10 +252,12 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// worker at it. The reverse (a DB row with no backing file) can never
 	// happen, which is the property that matters: the API never accepts a
 	// message it cannot actually construct into deliverable bytes.
+	priority := normalizedPriority(req.Priority)
 	record := storage.MessageRecord{
 		ID: id, ReceivedAt: now,
 		Envelope: mail.Envelope{MailFrom: built.From, Recipients: built.Envelope},
 		Message:  parsed,
+		Priority: priority,
 	}
 	if err := h.store.Save(record); err != nil {
 		writeError(w, r, newError(ErrInternal, "internal_error", "failed to persist message"))
@@ -270,7 +272,7 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	msg, err := h.db.InsertMessage(r.Context(), database.NewMessage{
 		ID: id, TenantID: tenantID, MailFrom: built.From, FromHeader: req.From,
 		Subject: subject, MessageIDHeader: h.messageID(id),
-		Recipients: recipients, AvailableAt: scheduledAt, IdempotencyCompletion: idemCompletion,
+		Recipients: recipients, Priority: priority, AvailableAt: scheduledAt, IdempotencyCompletion: idemCompletion,
 		SenderDomain: fromDomain,
 	})
 	if errors.Is(err, database.ErrSenderNotAuthorized) { // domain removed after the pre-check

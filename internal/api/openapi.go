@@ -615,7 +615,8 @@ const openAPISpec = `{
           "text": {"type": "string"},
           "template_id": {"type": "string", "description": "Alternative to subject/html/text: renders the given template (must belong to this account) with 'variables' before building the message. Cannot be combined with subject/html/text (422 template_and_content_conflict)."},
           "variables": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Substitution values for the template's {{name}} tokens; requires template_id (422 variables_without_template otherwise). At most 50 entries, 64-char keys, 4096-char values."},
-          "scheduled_at": {"type": "string", "format": "date-time", "nullable": true, "description": "RFC 3339. Omit to send immediately."}
+          "scheduled_at": {"type": "string", "format": "date-time", "nullable": true, "description": "RFC 3339. Omit to send immediately."},
+          "priority": {"type": "string", "enum": ["normal", "urgent"], "description": "Omit for \"normal\" (default). \"urgent\" is for time-critical mail (OTPs, password resets) whose value expires in minutes: it uses a much shorter retry schedule (~3 minutes to exhaustion instead of ~7.5 hours) so a transient delivery failure is discovered fast enough for the caller to react (resend, fall back to another channel) while the value could still plausibly be used. It does not affect the FIRST delivery attempt's timing or any queue/dispatch priority - only how fast MailX gives up retrying after a failure."}
         },
         "additionalProperties": false
       },
@@ -794,6 +795,7 @@ const openAPISpec = `{
           "html": {"type": "string", "nullable": true, "description": "Only populated by GET /v1/emails/{id}, never by the list endpoint."},
           "text": {"type": "string", "nullable": true},
           "status": {"type": "string", "enum": ["queued", "processing", "retrying", "delivered", "failed", "bounced", "suppressed"]},
+          "priority": {"type": "string", "enum": ["normal", "urgent"]},
           "created_at": {"type": "string", "format": "date-time"},
           "queued_at": {"type": "string", "format": "date-time", "nullable": true},
           "delivered_at": {"type": "string", "format": "date-time", "nullable": true}

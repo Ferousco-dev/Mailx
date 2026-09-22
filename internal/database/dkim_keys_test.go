@@ -195,8 +195,12 @@ func TestDKIMMigrationUpgradesExistingDomainData(t *testing.T) {
 	d := dkimFixture(t, db, tn.ID, "example.com")
 	// Roll back until the DKIM migration is undone (later migrations sit above it),
 	// then upgrade: domain data survives, the table returns empty.
+	// Bounded generously above the current migration count, not tied to a
+	// specific number: DEF-018/020's class of fragility (a fixed loop count
+	// assuming its own migration was the newest) — this loop must keep
+	// working as more migrations are added after DKIM's.
 	var exists bool
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 40; i++ {
 		if err := db.MigrateDownOne(ctx); err != nil {
 			t.Fatal(err)
 		}

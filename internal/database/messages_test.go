@@ -31,6 +31,46 @@ func sampleNewMessage(t *testing.T, tenantID string) NewMessage {
 	}
 }
 
+// legacyInsertMessage inserts a message directly via SQL using ONLY columns
+// present in `messages` since its very earliest migration (id, tenant_id,
+// mail_from, from_header, subject, message_id_header, status, queued_at)
+// plus its matching 'queued' event — safe to call after rolling back
+// migrations added long after the messages/events tables first existed
+// (e.g. past the webhook/suppression/DKIM/priority migrations), unlike
+// InsertMessage which always targets the CURRENT schema and would fail
+// against an intentionally rolled-back one (see migration-upgrade tests
+// that create "legacy" fixtures this way).
+func legacyInsertMessage(t *testing.T, db *DB, tenantID string) Message {
+	t.Helper()
+	ctx := context.Background()
+	id, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg Message
+	err = db.pool.QueryRow(ctx, `
+		INSERT INTO messages (id, tenant_id, mail_from, from_header, subject, message_id_header, status, queued_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 'queued', now())
+		RETURNING id, tenant_id, mail_from, from_header, subject, message_id_header, status, created_at, updated_at, queued_at, delivered_at`,
+		id, tenantID, "<alice@example.com>", "Alice <alice@example.com>", "hello", "<abc@example.com>",
+	).Scan(&msg.ID, &msg.TenantID, &msg.MailFrom, &msg.FromHeader, &msg.Subject, &msg.MessageIDHeader,
+		&msg.Status, &msg.CreatedAt, &msg.UpdatedAt, &msg.QueuedAt, &msg.DeliveredAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx,
+		`INSERT INTO events (id, tenant_id, message_id, event_type) VALUES ($1, $2, $3, 'queued')`,
+		eventID, tenantID, msg.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	return msg
+}
+
 func TestInsertMessageCreatesMessageRecipientsAndEvent(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()

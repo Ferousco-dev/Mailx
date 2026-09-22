@@ -121,10 +121,10 @@ func TestDeliveryOutcomeMigrationUpgradesV021Data(t *testing.T) {
 		t.Fatal(err)
 	}
 	tenant := newTestTenant(t, db)
-	msg, err := db.InsertMessage(ctx, sampleNewMessage(t, tenant.ID))
-	if err != nil {
-		t.Fatalf("v0.21 message insert failed: %v", err)
-	}
+	// legacyInsertMessage, not InsertMessage: two migrations were rolled
+	// back above, which may include a column InsertMessage's current SQL
+	// unconditionally references (e.g. priority, migration 000022).
+	msg := legacyInsertMessage(t, db, tenant.ID)
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatalf("upgrade from v0.21 failed: %v", err)
 	}
@@ -151,10 +151,12 @@ func TestWebhookMigrationUpgradesDurabilityPrerequisite(t *testing.T) {
 		t.Fatal(err)
 	}
 	tenant := newTestTenant(t, db)
-	msg, err := db.InsertMessage(ctx, sampleNewMessage(t, tenant.ID))
-	if err != nil {
-		t.Fatal(err)
-	}
+	// legacyInsertMessage, not InsertMessage: the rollback above may have
+	// undone a column InsertMessage's current SQL unconditionally
+	// references (e.g. the priority column, migration 000022) — this test
+	// is about durability-prerequisite events surviving an upgrade, not
+	// about InsertMessage's current shape.
+	msg := legacyInsertMessage(t, db, tenant.ID)
 	if err := db.Migrate(ctx); err != nil {
 		t.Fatal(err)
 	}

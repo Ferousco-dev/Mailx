@@ -710,3 +710,52 @@ func TestAttemptErrorNotRetryableDefensivelyAcks(t *testing.T) {
 		t.Fatal("expected an operational error reported")
 	}
 }
+
+// ---------------------------------------------------- urgent priority ----
+
+type namedCoordinator struct {
+	name string
+}
+
+func (c *namedCoordinator) Attempt(context.Context, *retry.State, delivery.Request, time.Time) (retry.Outcome, error) {
+	return retry.Outcome{}, nil
+}
+
+// TestCoordinatorForSelectsByPriority is a unit proof of the fix: a
+// message stored with storage.PriorityUrgent must route to the installed
+// urgent coordinator, everything else (including an empty/legacy priority)
+// must keep using the default one.
+func TestCoordinatorForSelectsByPriority(t *testing.T) {
+	def := &namedCoordinator{name: "default"}
+	urgent := &namedCoordinator{name: "urgent"}
+	q, _ := queue.NewMemoryQueue(10)
+	p, err := NewPool(q, newFakeLoader(), def, newFakeOutcomeStore(), Config{Workers: 1}, WithUrgentCoordinator(urgent))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.coordinatorFor(storage.PriorityUrgent); got != Coordinator(urgent) {
+		t.Fatalf("urgent priority routed to %+v, want the urgent coordinator", got)
+	}
+	for _, priority := range []string{storage.PriorityNormal, ""} {
+		if got := p.coordinatorFor(priority); got != Coordinator(def) {
+			t.Fatalf("priority %q routed away from the default coordinator: %+v", priority, got)
+		}
+	}
+}
+
+// Without WithUrgentCoordinator, every priority — including "urgent" —
+// must keep using the single installed coordinator (fully backward
+// compatible with every pool built before this option existed).
+func TestCoordinatorForDefaultsWithoutUrgentCoordinator(t *testing.T) {
+	def := &namedCoordinator{name: "default"}
+	q, _ := queue.NewMemoryQueue(10)
+	p, err := NewPool(q, newFakeLoader(), def, newFakeOutcomeStore(), Config{Workers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, priority := range []string{storage.PriorityUrgent, storage.PriorityNormal, ""} {
+		if got := p.coordinatorFor(priority); got != Coordinator(def) {
+			t.Fatalf("priority %q did not use the single installed coordinator: %+v", priority, got)
+		}
+	}
+}
