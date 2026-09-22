@@ -3,10 +3,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/auth"
+	"github.com/Ferousco-dev/mailx/internal/storage"
 )
 
 func TestBatchSendAllAccepted(t *testing.T) {
@@ -217,6 +220,123 @@ func TestBatchSendAbuseControlsAppliedPerItemIndependently(t *testing.T) {
 	}
 	if got.Data[2].Error == nil || got.Data[2].Error.Code != "tenant_queue_full" {
 		t.Fatalf("expected item 2 to fail with tenant_queue_full, got %+v", got.Data[2])
+	}
+}
+
+// PR review finding: a 100-item batch must not spend a single request-rate
+// token to perform up to 100x the CPU/DB work of a normal send. The
+// remaining (N-1) tokens must be charged against the same request buckets
+// requestLimitMiddleware already uses, BEFORE any expensive per-item work
+// runs, so a batch too large for the burst is refused wholesale.
+func TestBatchSendChargesRequestRateLimitProportionalToSize(t *testing.T) {
+	p := testPolicy()
+	p.TenantRequestRate, p.TenantRequestBurst = 100, 5 // burst=5: a 3-item batch (charging 1 middleware + 2 extra) fits; two of them do not
+	rig := newAbuseRig(t, p)
+	_, h := rig.tenant("acme")
+	from := h.(acctHandler).from
+
+	batch := func(n int) map[string]any {
+		items := make([]map[string]any, n)
+		for i := range items {
+			items[i] = map[string]any{"from": from, "to": []string{fmt.Sprintf("r%d@dest.test", i)}, "subject": "s", "text": "t"}
+		}
+		return map[string]any{"emails": items}
+	}
+
+	// First 3-item batch: middleware charges 1, handler charges 2 more = 3 of burst 5. Fits.
+	rec := doJSON(t, h, "POST", "/v1/emails/batch", batch(3))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first batch: got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got batchSendResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Accepted != 3 {
+		t.Fatalf("first batch: expected all 3 accepted, got %+v", got)
+	}
+
+	// Second batch of 3 more (middleware 1 + handler 2 = 3, but only 2 tokens
+	// remain in the burst of 5 after the first batch spent 3): must be
+	// refused WHOLESALE (429), before any of its 3 items is processed.
+	rec2 := doJSON(t, h, "POST", "/v1/emails/batch", batch(3))
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second batch: expected 429 (rate limit), got %d: %s", rec2.Code, rec2.Body.String())
+	}
+}
+
+// A batch of 1 must behave exactly as before this fix: no extra charge
+// call at all (the existing single middleware charge is already correct
+// for one item), so a tenant sending single-item batches sees no new
+// rate-limit interaction.
+func TestBatchSendSingleItemDoesNotDoubleCharge(t *testing.T) {
+	p := testPolicy()
+	p.TenantRequestRate, p.TenantRequestBurst = 100, 1 // burst=1: only room for the middleware's own charge
+	rig := newAbuseRig(t, p)
+	_, h := rig.tenant("acme")
+	from := h.(acctHandler).from
+	rec := doJSON(t, h, "POST", "/v1/emails/batch", map[string]any{
+		"emails": []map[string]any{{"from": from, "to": []string{"r0@dest.test"}, "subject": "s", "text": "t"}},
+	})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// PR review finding: with several items whose idempotency keys are already
+// claimed in-progress elsewhere (each worth up to idempotencyPollTimeout
+// of blocking), the batch must not silently hang past its processing
+// budget — remaining items get an explicit timeout result instead.
+func TestBatchSendRemainingItemsTimeOutRatherThanHang(t *testing.T) {
+	db := newTestDB(t)
+	tenant := newTestTenant(t, db)
+	verifyTestDomain(t, db, tenant.ID, "example.com")
+	store, err := storage.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	eh := newEmailHandler(db, store)
+	eh.batchBudget = 1 * time.Nanosecond // expires before the loop's first ctx.Err() check on item 2+
+	authSvc := auth.NewService(db, nil)
+	gen, _, err := authSvc.Create(context.Background(), tenant.ID, "k", []string{string(auth.ScopeEmailsSend)}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := authInjector{next: newMux(eh, authSvc, func() error { return nil }), token: gen.Raw}
+	tenantID := tenant.ID
+
+	rec := doJSON(t, mux, "POST", "/v1/emails/batch", map[string]any{
+		"emails": []map[string]any{
+			{"from": "a@example.com", "to": []string{"bob@example.com"}, "subject": "s", "text": "t"},
+			{"from": "a@example.com", "to": []string{"carol@example.com"}, "subject": "s", "text": "t"},
+			{"from": "a@example.com", "to": []string{"dave@example.com"}, "subject": "s", "text": "t"},
+		},
+	})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got batchSendResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Data) != 3 {
+		t.Fatalf("expected exactly one result per item regardless of the timeout, got %d", len(got.Data))
+	}
+	var timedOut int
+	for _, item := range got.Data {
+		if item.Error != nil && item.Error.Code == "batch_processing_timeout" {
+			timedOut++
+		}
+	}
+	if timedOut != 3 {
+		t.Fatalf("with an already-expired budget every item must time out at the loop's pre-check (before acceptOne is even called), got %+v", got)
+	}
+	list, err := db.ListMessages(context.Background(), tenantID, nil, 10, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 0 {
+		t.Fatalf("no item should have been processed at all, found %d messages", len(list))
 	}
 }
 

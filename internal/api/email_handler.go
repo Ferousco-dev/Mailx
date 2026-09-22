@@ -51,6 +51,11 @@ type emailHandler struct {
 	// a domain of the generating host). It is MailX's infrastructure hostname,
 	// never a tenant domain, and defaults to the local development identity.
 	msgDomain string
+	// batchBudget bounds POST /v1/emails/batch's whole per-item loop; see
+	// batchProcessingBudget's doc. A field (defaulted in newEmailHandler,
+	// like now above) rather than a bare constant so tests can exercise
+	// the timeout path deterministically without a real multi-second wait.
+	batchBudget time.Duration
 }
 
 // recipientLimit is the per-message recipient cap: the abuse policy's value when
@@ -90,7 +95,7 @@ func (h *emailHandler) messageID(id string) string {
 }
 
 func newEmailHandler(db *database.DB, store *storage.FileStore) *emailHandler {
-	return &emailHandler{db: db, store: store, now: func() time.Time { return time.Now().UTC() }, msgDomain: defaultMessageIDDomain}
+	return &emailHandler{db: db, store: store, now: func() time.Time { return time.Now().UTC() }, msgDomain: defaultMessageIDDomain, batchBudget: batchProcessingBudget}
 }
 
 // handleSend implements POST /v1/emails. See the v0.18 report's "Acceptance
