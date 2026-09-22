@@ -48,14 +48,10 @@ type Message struct {
 	Subject         string
 	MessageIDHeader string
 	Status          MessageStatus
-	// Priority is "normal" or "urgent" (see internal/retry.UrgentBackoffPolicy
-	// and internal/storage.PriorityUrgent — the worker's actual retry-timing
-	// decision reads it from stored metadata, not from this column).
-	Priority    string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-	QueuedAt    *time.Time
-	DeliveredAt *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	QueuedAt        *time.Time
+	DeliveredAt     *time.Time
 }
 
 // RecipientInput is one envelope recipient; HeaderKind is nil for an
@@ -75,8 +71,6 @@ type NewMessage struct {
 	Subject         string
 	MessageIDHeader string
 	Recipients      []RecipientInput
-	// Priority is "normal" (default, if empty) or "urgent". See Message.Priority.
-	Priority string
 	// AvailableAt is when the outbox row becomes dispatchable; zero means
 	// now (immediate send). A future time defers dispatch (scheduled send).
 	AvailableAt time.Time
@@ -173,18 +167,14 @@ func (db *DB) InsertMessage(ctx context.Context, in NewMessage) (Message, error)
 		}
 	}
 
-	priority := in.Priority
-	if priority == "" {
-		priority = "normal"
-	}
 	var msg Message
 	err = tx.QueryRow(ctx, `
-		INSERT INTO messages (id, tenant_id, mail_from, from_header, subject, message_id_header, status, priority, queued_at)
-		VALUES ($1, $2, $3, $4, $5, $6, 'queued', $7, now())
-		RETURNING id, tenant_id, mail_from, from_header, subject, message_id_header, status, priority, created_at, updated_at, queued_at, delivered_at`,
-		in.ID, in.TenantID, in.MailFrom, in.FromHeader, in.Subject, in.MessageIDHeader, priority,
+		INSERT INTO messages (id, tenant_id, mail_from, from_header, subject, message_id_header, status, queued_at)
+		VALUES ($1, $2, $3, $4, $5, $6, 'queued', now())
+		RETURNING id, tenant_id, mail_from, from_header, subject, message_id_header, status, created_at, updated_at, queued_at, delivered_at`,
+		in.ID, in.TenantID, in.MailFrom, in.FromHeader, in.Subject, in.MessageIDHeader,
 	).Scan(&msg.ID, &msg.TenantID, &msg.MailFrom, &msg.FromHeader, &msg.Subject, &msg.MessageIDHeader,
-		&msg.Status, &msg.Priority, &msg.CreatedAt, &msg.UpdatedAt, &msg.QueuedAt, &msg.DeliveredAt)
+		&msg.Status, &msg.CreatedAt, &msg.UpdatedAt, &msg.QueuedAt, &msg.DeliveredAt)
 	if err != nil {
 		return Message{}, fmt.Errorf("database: insert message: %w", normalizeErr(err))
 	}
@@ -263,11 +253,11 @@ func (db *DB) InsertMessage(ctx context.Context, in NewMessage) (Message, error)
 func (db *DB) GetMessage(ctx context.Context, tenantID, id string) (Message, error) {
 	var msg Message
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, tenant_id, mail_from, from_header, subject, message_id_header, status, priority, created_at, updated_at, queued_at, delivered_at
+		SELECT id, tenant_id, mail_from, from_header, subject, message_id_header, status, created_at, updated_at, queued_at, delivered_at
 		FROM messages WHERE tenant_id = $1 AND id = $2`,
 		tenantID, id,
 	).Scan(&msg.ID, &msg.TenantID, &msg.MailFrom, &msg.FromHeader, &msg.Subject, &msg.MessageIDHeader,
-		&msg.Status, &msg.Priority, &msg.CreatedAt, &msg.UpdatedAt, &msg.QueuedAt, &msg.DeliveredAt)
+		&msg.Status, &msg.CreatedAt, &msg.UpdatedAt, &msg.QueuedAt, &msg.DeliveredAt)
 	if err != nil {
 		return Message{}, normalizeErr(err)
 	}
@@ -299,7 +289,7 @@ func (db *DB) ListMessages(ctx context.Context, tenantID string, status *Message
 	}
 
 	query := `
-		SELECT id, tenant_id, mail_from, from_header, subject, message_id_header, status, priority, created_at, updated_at, queued_at, delivered_at
+		SELECT id, tenant_id, mail_from, from_header, subject, message_id_header, status, created_at, updated_at, queued_at, delivered_at
 		FROM messages
 		WHERE tenant_id = $1
 		  AND ($2::text IS NULL OR status = $2)
@@ -329,7 +319,7 @@ func (db *DB) ListMessages(ctx context.Context, tenantID string, status *Message
 	for rows.Next() {
 		var msg Message
 		if err := rows.Scan(&msg.ID, &msg.TenantID, &msg.MailFrom, &msg.FromHeader, &msg.Subject, &msg.MessageIDHeader,
-			&msg.Status, &msg.Priority, &msg.CreatedAt, &msg.UpdatedAt, &msg.QueuedAt, &msg.DeliveredAt); err != nil {
+			&msg.Status, &msg.CreatedAt, &msg.UpdatedAt, &msg.QueuedAt, &msg.DeliveredAt); err != nil {
 			return nil, fmt.Errorf("database: scan message: %w", err)
 		}
 		out = append(out, msg)

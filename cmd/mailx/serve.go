@@ -346,18 +346,9 @@ func buildWorkerPool(q queue.Queue, store *storage.FileStore, db *database.DB, o
 	if err != nil {
 		return nil, err
 	}
-	// Urgent tier (priority: "urgent" — OTPs, password resets): same delivery
-	// engine, a much shorter backoff so a transient MX/DNS blip does not sit
-	// unretried past the value's expiry. See internal/retry.UrgentBackoffPolicy.
-	urgentBackoff := retry.UrgentBackoffPolicy()
-	urgentBackoff.JitterPercent = abuse.retryJitter()
-	urgentCoordinator, err := retry.NewCoordinator(engine, urgentBackoff, retry.UrgentAttemptLimit())
-	if err != nil {
-		return nil, err
-	}
 
 	workers := envInt("MAILX_WORKERS", 4)
-	opts := append([]worker.Option{worker.WithOnError(o.errLogger("worker")), worker.WithLogger(o.log), worker.WithMetrics(o.metrics), worker.WithUrgentCoordinator(urgentCoordinator)}, abuse.workerOptions()...)
+	opts := append([]worker.Option{worker.WithOnError(o.errLogger("worker")), worker.WithLogger(o.log), worker.WithMetrics(o.metrics)}, abuse.workerOptions()...)
 	pool, err := worker.NewPool(q, store, coordinator, databaseOutcomeStore{db: db, metrics: o.metrics}, worker.Config{Workers: workers, ReportingMTA: ident.Name()}, opts...)
 	if err != nil {
 		return nil, err

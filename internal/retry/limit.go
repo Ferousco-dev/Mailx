@@ -18,13 +18,6 @@ func DefaultAttemptLimit() AttemptLimit {
 	return AttemptLimit{MaxAttempts: 5}
 }
 
-// UrgentAttemptLimit is the same operation count as DefaultAttemptLimit —
-// only UrgentBackoffPolicy's delays differ. Time-critical mail (OTPs,
-// password resets) needs to exhaust FAST, not retry MORE.
-func UrgentAttemptLimit() AttemptLimit {
-	return AttemptLimit{MaxAttempts: 5}
-}
-
 // LifecycleStatus describes the retry lifecycle without changing the latest
 // delivery operation's own Decision.
 type LifecycleStatus uint8

@@ -74,8 +74,7 @@ func (p *Pool) processOne(ctx context.Context, c queue.Claim) {
 		Raw: string(loaded.Raw),
 	}
 
-	coordinator := p.coordinatorFor(loaded.Metadata.EffectivePriority())
-	outcome, attemptErr := coordinator.Attempt(ctx, state, req, p.now())
+	outcome, attemptErr := p.coordinator.Attempt(ctx, state, req, p.now())
 	if attemptErr != nil {
 		p.handleAttemptError(c, attemptErr)
 		return

@@ -462,12 +462,10 @@ func TestSuppressionMigrationUpgradesAndDowngradesExistingData(t *testing.T) {
 	tn := newTestTenant(t, db)
 	// Roll back to the v0.29 schema, create v0.29-era data, then upgrade.
 	rollBackPastSuppressions(t, db)
-	// legacyInsertMessage, not InsertMessage: this rollback undoes every
-	// migration after and including suppressions, which also undoes
-	// InsertMessage's current required columns (e.g. priority, migration
-	// 000022) — this test is about pre-suppression message/delivery-history
-	// data surviving the v0.30 upgrade, not about InsertMessage's current shape.
-	legacy := legacyInsertMessage(t, db, tn.ID)
+	legacy, err := db.InsertMessage(ctx, sampleNewMessage(t, tn.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
 	att := sampleAttempt(legacy.ID, 1, DecisionTerminalFailure)
 	att.Kind = "transfer_permanent"
 	if err := db.PersistDeliveryOutcome(ctx, att, false, nil); err != nil {

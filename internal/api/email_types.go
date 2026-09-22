@@ -16,20 +16,7 @@ const (
 	maxBodyLen           = 2 << 20 // 2 MiB per body part
 	defaultLimit         = 20
 	maxLimit             = 100
-
-	priorityNormal = "normal"
-	priorityUrgent = "urgent"
 )
-
-// normalizedPriority maps an empty (absent) request priority to the
-// explicit default, the one place the API layer's "" and "normal" become
-// the same value before it reaches storage/database.
-func normalizedPriority(p string) string {
-	if p == priorityUrgent {
-		return priorityUrgent
-	}
-	return priorityNormal
-}
 
 // sendEmailRequest is POST /v1/emails' exact wire schema. Unknown JSON
 // fields are rejected (see handler's DisallowUnknownFields) rather than
@@ -50,12 +37,6 @@ type sendEmailRequest struct {
 	TemplateID  string            `json:"template_id"`
 	Variables   map[string]string `json:"variables"`
 	ScheduledAt *string           `json:"scheduled_at"` // RFC 3339; nil/absent = send now
-	// Priority: "normal" (default, if empty/absent) or "urgent" — a fast,
-	// short retry schedule for time-critical mail (OTPs, password resets)
-	// whose value expires in minutes, where the default 30-minute first
-	// retry is too slow to ever be useful. See internal/retry.
-	// UrgentBackoffPolicy.
-	Priority string `json:"priority"`
 }
 
 func (req sendEmailRequest) validate(now time.Time, maxRecipients int) (scheduledAt time.Time, err *apiError) {
@@ -68,9 +49,6 @@ func (req sendEmailRequest) validate(now time.Time, maxRecipients int) (schedule
 	total := len(req.To) + len(req.Cc) + len(req.Bcc)
 	if total > maxRecipients {
 		return time.Time{}, newError(ErrValidation, "too_many_recipients", fmt.Sprintf("a message may address at most %d recipients across to/cc/bcc, got %d", maxRecipients, total))
-	}
-	if req.Priority != "" && req.Priority != priorityNormal && req.Priority != priorityUrgent {
-		return time.Time{}, newError(ErrValidation, "invalid_priority", "priority must be \"normal\" or \"urgent\"")
 	}
 	if req.TemplateID != "" {
 		if req.Subject != "" || req.HTML != "" || req.Text != "" {
@@ -121,7 +99,6 @@ type email struct {
 	HTML        *string    `json:"html,omitempty"`
 	Text        *string    `json:"text,omitempty"`
 	Status      string     `json:"status"`
-	Priority    string     `json:"priority"`
 	CreatedAt   time.Time  `json:"created_at"`
 	QueuedAt    *time.Time `json:"queued_at,omitempty"`
 	DeliveredAt *time.Time `json:"delivered_at,omitempty"`
@@ -138,7 +115,6 @@ func emailFromRow(msg database.Message, recipients []database.Recipient) email {
 		From:        msg.FromHeader,
 		Subject:     msg.Subject,
 		Status:      string(msg.Status),
-		Priority:    msg.Priority,
 		CreatedAt:   msg.CreatedAt,
 		QueuedAt:    msg.QueuedAt,
 		DeliveredAt: msg.DeliveredAt,
