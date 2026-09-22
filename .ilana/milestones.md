@@ -57,7 +57,8 @@ commit dates (all v0.1-v0.15 work is dated 2026-09-13..15).
 - v0.29 public SMTP identity, PTR/rDNS, EHLO and DNS readiness: **COMPLETE** (`2e7e747`; opt-in low-memory PostgreSQL profile `0b215ba`; local, not pushed). Design `docs/design-v0.29.md`. No schema change.
 - v0.30 recipient suppression management: **COMPLETE** (validated 2026-09-21; commit `feat: add recipient suppression management`, local, not pushed). Design `docs/design-v0.30.md`. Migration 000013.
 - v0.31 outbound abuse controls & sending safety: **COMPLETE** (validated 2026-09-22; commit `feat: add outbound abuse controls`, local, not pushed). Design `docs/design-v0.31.md`. Migration 000014.
-- v0.32 complaint/feedback loops: **NEXT, NOT STARTED.** A separate controlled Internet-delivery test is a separate explicit action.
+- v0.32 outbound feedback (DSNs/bounces + complaints): **COMPLETE** (validated 2026-09-22). Migration 000015.
+- v0.33 Templates: **NEXT, NOT STARTED.** Roadmap after v0.32 (general inbound email REMOVED from the pre-v1 roadmap, superseding any earlier v0.33-36 inbound-shaped milestones): v0.33 Templates, v0.34 Contacts, v0.35 Audiences/Lists, v0.36 Broadcasts/Bulk Sending, v0.37 Scheduled Sending, v0.38 Advanced Analytics. A separate controlled Internet-delivery test is a separate explicit action.
 
 ## Uncertain / unavailable
 

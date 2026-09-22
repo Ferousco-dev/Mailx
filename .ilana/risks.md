@@ -42,3 +42,7 @@
 - RSK-032 [medium, v0.31]: sending depends on Redis for limiting and fails closed; a Redis outage stops new sends (503) and defers deliveries, by design (DEC-090). Mitigation: Redis is already required for the queue and readiness; reads keep working.
 - RSK-033 [low, v0.31]: limits are per account, not per sending domain or destination rate; a single account can still concentrate volume on one recipient domain within its limits, and there is no automatic suspension or complaint/bounce-rate breaker (v0.32+).
 - RSK-034 [low, v0.31]: a permit TTL shorter than one delivery attempt lets a tenant briefly exceed its concurrency limit; default 10 m far exceeds the SMTP timeouts, and the TTL is validated to 10 s..24 h.
+- RSK-035 [low, v0.32]: feedback ingestion has no bounded metrics yet (parse/correlation/classification/suppression outcomes) — deferred.
+- RSK-036 [medium, v0.32]: correlation does not yet use VERP Return-Path; a bare message_id is accepted behind the operator-only ingestion credential. Revisit when MailX operates a real bounce-receiving domain (parallels v0.29's public-identity gap).
+- RSK-037 [low, v0.32]: no provider-specific complaint adapters (Gmail/Outlook FBL etc.) are implemented; only a generic authenticated JSON envelope.
+- RSK-029 [medium, v0.30, unchanged]: RCPT is still all-or-error; not touched by v0.32.

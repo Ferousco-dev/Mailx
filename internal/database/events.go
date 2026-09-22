@@ -19,11 +19,19 @@ const (
 	EventBounced           EventType = "bounced"
 	EventFailed            EventType = "failed"
 	EventSuppressed        EventType = "suppressed" // recipients were skipped by suppression policy
+	// EventComplained is v0.32: a verified complaint feedback report matched one
+	// of this message's recipients. EventBounced is REUSED (not duplicated) for
+	// v0.32's asynchronous bounce feedback — it was reserved since v0.18 and
+	// never produced by any synchronous path (see database.StatusBounced's
+	// doc); one internal event name for "this message bounced" regardless of
+	// whether that was learned synchronously or later keeps the public
+	// vocabulary from growing needlessly.
+	EventComplained EventType = "complained"
 )
 
 func (e EventType) valid() bool {
 	switch e {
-	case EventQueued, EventDeliveryAttempted, EventDelivered, EventDeferred, EventBounced, EventFailed, EventSuppressed:
+	case EventQueued, EventDeliveryAttempted, EventDelivered, EventDeferred, EventBounced, EventFailed, EventSuppressed, EventComplained:
 		return true
 	}
 	return false
@@ -46,6 +54,8 @@ func PublicEventType(e EventType) (string, bool) {
 		return "email.bounced", true
 	case EventSuppressed:
 		return "email.suppressed", true
+	case EventComplained:
+		return "email.complained", true
 	default:
 		return "", false
 	}
@@ -155,7 +165,7 @@ func (db *DB) listTenantEvents(ctx context.Context, tenantID string, limit int, 
 		FROM events
 		WHERE tenant_id = $1
 		  AND ($2::timestamptz IS NULL OR (occurred_at, id) < ($2, $3))
-		  AND (NOT $5 OR event_type IN ('queued','delivered','deferred','failed','bounced','suppressed'))
+		  AND (NOT $5 OR event_type IN ('queued','delivered','deferred','failed','bounced','suppressed','complained'))
 		ORDER BY occurred_at DESC, id DESC
 		LIMIT $4`,
 		tenantID, afterTime, afterID, limit, publicOnly,

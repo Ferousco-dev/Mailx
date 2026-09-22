@@ -347,8 +347,15 @@ func TestOutboxIndexMigrationRoundTripKeepsRows(t *testing.T) {
 	if ix := outboxIndexes(t, db); !ix["idx_outbox_pending_tenant"] || ix["idx_outbox_pending"] {
 		t.Fatalf("after up: %v", ix)
 	}
-	if err := db.MigrateDownOne(ctx); err != nil {
-		t.Fatal(err)
+	// Roll back past every migration newer than 000014 (the outbox index
+	// migration), not just one: never assume it is the latest.
+	for {
+		if err := db.MigrateDownOne(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if ix := outboxIndexes(t, db); ix["idx_outbox_pending"] {
+			break
+		}
 	}
 	if ix := outboxIndexes(t, db); ix["idx_outbox_pending_tenant"] || !ix["idx_outbox_pending"] {
 		t.Fatalf("after down: %v", ix)

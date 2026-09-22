@@ -14,3 +14,4 @@
 - CR-012 [approved, 2026-09-21]: implement v0.29 public SMTP identity, PTR/rDNS readiness, EHLO and Message-ID correction (design `docs/design-v0.29.md`); v0.30 suppression, reputation/warm-up, MTA-STS/DANE/ARC/BIMI, inbound work and real Internet delivery excluded.
 - CR-013 [approved, 2026-09-21]: implement v0.30 recipient suppression management (design `docs/design-v0.30.md`); v0.31 abuse controls, v0.32 complaint/feedback loops, v0.33 inbound, reputation/warm-up, a Redis suppression cache and real Internet delivery excluded.
 - CR-014 [approved, 2026-09-22]: implement v0.31 outbound abuse controls and sending safety (design `docs/design-v0.31.md`); v0.32 complaint/feedback loops, reputation/warm-up, content scoring/ML, billing, inbound work and real Internet delivery excluded.
+- CR-015 [approved, 2026-09-22]: implement v0.32 outbound feedback (DSNs/bounces + complaints), migration 000015; general inbound email removed from the roadmap; v0.33 is now Templates.

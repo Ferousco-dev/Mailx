@@ -21,6 +21,7 @@ type routeServices struct {
 	dmarc    *dmarc.Service
 	metrics  *observability.Metrics
 	abuse    *AbuseControls
+	feedback *feedbackHandler // nil disables the ingestion route
 }
 
 // newMux registers every /v1 route plus health checks. Handlers stay
@@ -114,6 +115,12 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
 
+	if len(extras) > 0 && extras[0].feedback != nil {
+		// Deliberately NOT under /v1 and NOT authenticateMiddleware: this is the
+		// operator-only feedback ingestion boundary (see feedback_handler.go),
+		// not a tenant-facing route.
+		mux.HandleFunc("POST /internal/feedback", extras[0].feedback.handleIngest)
+	}
 	mux.HandleFunc("GET /openapi.json", serveOpenAPI)
 	mux.HandleFunc("GET /docs", serveDocs)
 

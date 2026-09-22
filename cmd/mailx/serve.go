@@ -106,11 +106,16 @@ func runFull() error {
 	if err != nil {
 		return err
 	}
+	fbCfg, err := loadFeedbackConfig()
+	if err != nil {
+		return err
+	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
 		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, MessageIDDomain: ident.Name(), Abuse: abuse.apiControls(o),
-		Ready:  ready.Check,
-		Logger: o.log, Metrics: o.metrics,
+		Feedback: fbCfg,
+		Ready:    ready.Check,
+		Logger:   o.log, Metrics: o.metrics,
 	})
 	if err != nil {
 		return err
