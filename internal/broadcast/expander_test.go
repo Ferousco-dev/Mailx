@@ -3,6 +3,7 @@ package broadcast
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -505,5 +506,59 @@ func TestMergeVariablesFallsBackToGlobalNameWhenRecipientHasNone(t *testing.T) {
 	got := mergeVariables(map[string]string{"name": "Valued Customer"}, r)
 	if got["name"] != "Valued Customer" {
 		t.Fatalf("name = %q, want the global fallback since the recipient has none", got["name"])
+	}
+}
+
+// TestExpanderTransientFailureNeverTerminates proves the second-round PR
+// review fix: a TRANSIENT materializeOne failure (here, FileStore.Save
+// failing because the store's directory was removed out from under it —
+// deterministic to reproduce in a test, but NOT an errDeterministic
+// condition; a real transient failure looks the same to materializeBatch)
+// must retry indefinitely and never consume the terminal-failure budget,
+// even past maxRecipientAttempts — only render/MIME-build/parse failures
+// may terminate a recipient.
+func TestExpanderTransientFailureNeverTerminates(t *testing.T) {
+	db := newTestDB(t)
+	store, err := storage.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := New(db, store, nil, nil, ratelimit.DefaultPolicy(), "mailx.local",
+		WithOnError(func(err error) { t.Logf("expander error: %v", err) }))
+	tn, b := setupBroadcastReady(t, db, 1)
+	ctx := context.Background()
+	db.MarkBroadcastExpanding(ctx, b.ID)
+	db.SnapshotBroadcastBatch(ctx, mustGetBroadcast(t, db, tn.ID, b.ID), 200)
+
+	// Make every FileStore.Save fail from here on (a stand-in for "disk
+	// unavailable" — a real transient failure, not a validation error; same
+	// technique internal/storage's own TestFileStoreSaveReturnsFilesystemError
+	// uses).
+	if err := os.Remove(store.MessagesDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(store.MessagesDir(), []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	recipients, _ := db.ListBroadcastRecipients(ctx, tn.ID, b.ID, 100, nil)
+	if len(recipients) != 1 {
+		t.Fatalf("%d", len(recipients))
+	}
+	r := database.BroadcastRecipient{ID: recipients[0].ID, Email: recipients[0].Email}
+
+	for i := 0; i < 8; i++ {
+		e.materializeBatch(ctx, mustGetBroadcast(t, db, tn.ID, b.ID), "example.com", []database.BroadcastRecipient{r})
+	}
+
+	after, err := db.ListBroadcastRecipients(ctx, tn.ID, b.ID, 100, nil)
+	if err != nil || len(after) != 1 {
+		t.Fatalf("%+v %v", after, err)
+	}
+	if after[0].Status != "pending" {
+		t.Fatalf("status = %q after %d transient failures, want still pending — transient failures must never terminate a recipient", after[0].Status, 8)
+	}
+	if after[0].Attempts != 0 {
+		t.Fatalf("attempts = %d, want 0 — transient failures must not consume the terminal-failure budget", after[0].Attempts)
 	}
 }

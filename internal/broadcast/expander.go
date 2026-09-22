@@ -32,6 +32,18 @@ const (
 	defaultMaterializeBatch = 25  // recipients rendered/signed/persisted per broadcast per tick
 )
 
+// errDeterministic marks a materializeOne failure as one that will fail the
+// SAME way on every retry, given the SAME frozen inputs (template render,
+// MIME build, or MailX's own re-parse of what it just built) — as opposed
+// to a transient failure (DKIM key lookup, filesystem, database) that may
+// succeed on the very next tick. Only errors.Is(err, errDeterministic)
+// consume the bounded terminal-failure budget in materializeBatch; a
+// transient failure retries indefinitely, exactly like every other
+// existing MailX retry path (PR review: counting transient errors here
+// could permanently drop a recipient that a later tick would have
+// delivered).
+var errDeterministic = errors.New("deterministic materialization failure")
+
 // Limiter is the narrow ratelimit.Store surface the expander needs — the
 // SAME tenant recipient bucket a normal /v1/emails send charges (v0.31), so
 // a broadcast cannot buy more throughput than any other send path.
@@ -208,13 +220,20 @@ func (e *Expander) materializeBatch(ctx context.Context, b database.Broadcast, f
 		if err := e.materializeOne(ctx, b, fromDomain, r); err != nil {
 			e.onError(fmt.Errorf("broadcast recipient %s: materialize: %w", r.ID, err))
 			e.metrics.BroadcastExpansionBatch("materialize", "error")
-			// Bounded retry: a recipient whose render/MIME build deterministically
-			// fails must not retry (and recharge quota) forever, or silently block
-			// its broadcast from ever completing (see PR review). After
-			// maxRecipientAttempts this moves the recipient to the terminal
-			// 'failed' status instead.
-			if ferr := e.db.RecordBroadcastRecipientFailure(ctx, r.ID); ferr != nil {
-				e.onError(fmt.Errorf("broadcast recipient %s: record failure: %w", r.ID, ferr))
+			// Bounded retry, but ONLY for errDeterministic failures (render/
+			// MIME-build/parse — the same frozen inputs will fail the same
+			// way forever): these must not retry (and recharge quota) forever,
+			// or silently block the broadcast from ever completing (PR
+			// review). A TRANSIENT failure (DKIM lookup, filesystem, DB) is
+			// deliberately NOT counted here — it must keep retrying
+			// indefinitely rather than ever drop a recipient that would
+			// otherwise have succeeded (second-round PR review: counting
+			// transient errors here let 5 unlucky ticks permanently lose a
+			// recipient that a 6th tick would have delivered).
+			if errors.Is(err, errDeterministic) {
+				if ferr := e.db.RecordBroadcastRecipientFailure(ctx, r.ID); ferr != nil {
+					e.onError(fmt.Errorf("broadcast recipient %s: record failure: %w", r.ID, ferr))
+				}
 			}
 			continue // one recipient's failure never aborts the rest of the batch
 		}
@@ -263,7 +282,10 @@ func (e *Expander) materializeOne(ctx context.Context, b database.Broadcast, fro
 	vars := mergeVariables(b.Variables, r)
 	rendered, err := emailtemplate.Render(b.SubjectTemplate, b.TextTemplate, b.HTMLTemplate, vars)
 	if err != nil {
-		return fmt.Errorf("render: %w", err)
+		// Deterministic: the same frozen template+variables will render the
+		// SAME error on every retry — eligible for the terminal failure
+		// counter (see errDeterministic's doc).
+		return fmt.Errorf("render: %w: %w", errDeterministic, err)
 	}
 	now := e.now()
 	messageID := "<" + r.ID + "@" + e.msgDomain + ">"
@@ -273,20 +295,31 @@ func (e *Expander) materializeOne(ctx context.Context, b database.Broadcast, fro
 		MessageID: messageID, Date: now,
 	})
 	if err != nil {
-		return fmt.Errorf("build MIME: %w", err)
+		// Deterministic: fixed inputs (frozen subject/text/html, fixed
+		// recipient address) either always build or never do.
+		return fmt.Errorf("build MIME: %w: %w", errDeterministic, err)
 	}
 	raw := built.Raw
 	if e.dkim != nil {
 		signed, _, serr := e.dkim.SignMessage(ctx, b.TenantID, fromDomain, []byte(raw))
 		if serr != nil {
+			// NOT deterministic: a DKIM key lookup can fail transiently
+			// (e.g. a momentary decrypt/store issue) and later succeed — must
+			// not consume the terminal retry budget (PR review).
 			return fmt.Errorf("dkim sign: %w", serr)
 		}
 		raw = string(signed)
 	}
 	parsed, err := mail.ParseMessage(raw)
 	if err != nil {
-		return fmt.Errorf("parse built message: %w", err)
+		// Deterministic: Build produced something MailX's own parser
+		// rejects — a bug in the builder for this fixed input, not a
+		// condition that resolves itself on retry.
+		return fmt.Errorf("parse built message: %w: %w", errDeterministic, err)
 	}
+	// NOT deterministic beyond this point: filesystem/DB writes can fail
+	// transiently (disk pressure, connection blip) and succeed on the very
+	// next tick — never wrapped in errDeterministic (PR review).
 	if err := e.store.Save(storage.MessageRecord{
 		ID: r.ID, ReceivedAt: now,
 		Envelope: mail.Envelope{MailFrom: built.From, Recipients: built.Envelope},
