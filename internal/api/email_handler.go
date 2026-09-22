@@ -138,6 +138,27 @@ func (h *emailHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tenantID := tenantFromContext(r.Context())
+
+	// PR review fix: an already-COMPLETED replay is checked here, BEFORE
+	// template lookup/rendering below. Previously a retry with the same
+	// Idempotency-Key and an unchanged fingerprint could still fail with
+	// template_not_found/a render error if the template was edited or
+	// deleted after the original request was accepted — contradicting the
+	// documented replay contract (the fingerprint is on req, never on
+	// rendered output, precisely so template mutation can't affect a
+	// replay). This is a cheap read-only check, not a claim: if nothing is
+	// completed yet, request processing continues exactly as before and the
+	// existing late resolveIdempotency call still claims/polls as usual.
+	if idemKey != "" {
+		if fingerprint, ferr := idempotency.Fingerprint(req); ferr == nil {
+			if resp, ok := h.replayIfCompleted(r.Context(), tenantID, idempotency.OperationEmailsCreate, idemKey, fingerprint); ok {
+				w.Header().Set("Idempotency-Replayed", "true")
+				writeJSON(w, http.StatusAccepted, resp)
+				return
+			}
+		}
+	}
+
 	subject, text, html := req.Subject, req.Text, req.HTML
 	if req.TemplateID != "" {
 		rendered, terr := h.renderTemplate(r.Context(), tenantID, req.TemplateID, req.Variables)

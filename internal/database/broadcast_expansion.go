@@ -169,17 +169,38 @@ func (db *DB) SnapshotBroadcastBatch(ctx context.Context, b Broadcast, batchSize
 	return len(members), exhausted, nil
 }
 
-// PendingBroadcastRecipients claims up to limit not-yet-processed recipients
-// (SKIP LOCKED: safe under concurrent expanders).
-func (db *DB) PendingBroadcastRecipients(ctx context.Context, broadcastID string, limit int) ([]BroadcastRecipient, error) {
-	rows, err := db.pool.Query(ctx, `SELECT `+broadcastRecipientColumns+`
-		FROM broadcast_recipients
-		WHERE broadcast_id = $1 AND status = 'pending'
-		ORDER BY created_at
-		LIMIT $2
-		FOR UPDATE SKIP LOCKED`, broadcastID, limit)
+// recipientClaimLease bounds how long a claimed-but-not-yet-finished
+// recipient stays unavailable to other claimants. It must comfortably
+// exceed one materialization attempt (render+MIME+DKIM+InsertMessage) so a
+// legitimately slow attempt is never reclaimed out from under itself, while
+// still being short enough that a crashed claimant's rows become claimable
+// again promptly.
+const recipientClaimLease = 5 * time.Minute
+
+// ClaimPendingBroadcastRecipients atomically claims up to limit not-yet-
+// processed recipients: the SKIP LOCKED select and the claimed_at stamp
+// happen in ONE statement, so the claim survives past the statement's own
+// implicit transaction (a plain SELECT ... FOR UPDATE SKIP LOCKED releases
+// its row locks as soon as the query completes — before any Go-side
+// processing runs — so two truly-concurrent expanders could otherwise both
+// claim and materialize, and charge quota for, the same recipient; see PR
+// review). claimed_at recency (recipientClaimLease) keeps a claimed row
+// unavailable to other claimants for the lease duration even after the SQL
+// statement's own lock releases, covering the actual processing window.
+func (db *DB) ClaimPendingBroadcastRecipients(ctx context.Context, broadcastID string, limit int) ([]BroadcastRecipient, error) {
+	rows, err := db.pool.Query(ctx, `
+		UPDATE broadcast_recipients SET claimed_at = now()
+		WHERE id IN (
+			SELECT id FROM broadcast_recipients
+			WHERE broadcast_id = $1 AND status = 'pending'
+			  AND (claimed_at IS NULL OR claimed_at < now() - $3::interval)
+			ORDER BY created_at
+			LIMIT $2
+			FOR UPDATE SKIP LOCKED
+		)
+		RETURNING `+broadcastRecipientColumns, broadcastID, limit, recipientClaimLease.String())
 	if err != nil {
-		return nil, fmt.Errorf("database: list pending broadcast recipients: %w", normalizeErr(err))
+		return nil, fmt.Errorf("database: claim pending broadcast recipients: %w", normalizeErr(err))
 	}
 	defer rows.Close()
 	var out []BroadcastRecipient
@@ -191,6 +212,31 @@ func (db *DB) PendingBroadcastRecipients(ctx context.Context, broadcastID string
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// maxRecipientAttempts bounds retries of a deterministically-failing
+// recipient (e.g. a render/MIME error): after this many failed attempts the
+// recipient moves to the terminal 'failed' status instead of being retried
+// (and recharged against tenant quota) forever, which would otherwise also
+// block its broadcast from ever completing (see PR review).
+const maxRecipientAttempts = 5
+
+// RecordBroadcastRecipientFailure increments the recipient's attempt count
+// and, once maxRecipientAttempts is reached, moves it to the terminal
+// 'failed' status (excluded from HasPendingBroadcastRecipients, so the
+// broadcast can still complete). Guarded on status='pending' like every
+// other recipient transition, so a stray duplicate call is a safe no-op.
+func (db *DB) RecordBroadcastRecipientFailure(ctx context.Context, id string) error {
+	_, err := db.pool.Exec(ctx, `
+		UPDATE broadcast_recipients SET
+			attempts = attempts + 1,
+			status = CASE WHEN attempts + 1 >= $2 THEN 'failed' ELSE status END,
+			updated_at = now()
+		WHERE id = $1 AND status = 'pending'`, id, maxRecipientAttempts)
+	if err != nil {
+		return fmt.Errorf("database: record broadcast recipient failure: %w", normalizeErr(err))
+	}
+	return nil
 }
 
 // MarkBroadcastRecipientSuppressed is terminal: zero SMTP for this

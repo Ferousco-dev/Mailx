@@ -125,7 +125,7 @@ func (e *Expander) process(ctx context.Context, b database.Broadcast) {
 		e.log.Info("broadcast_snapshot_batch", "broadcast_id", b.ID, "advanced", n)
 	}
 
-	pending, err := e.db.PendingBroadcastRecipients(ctx, b.ID, defaultMaterializeBatch)
+	pending, err := e.db.ClaimPendingBroadcastRecipients(ctx, b.ID, defaultMaterializeBatch)
 	if err != nil {
 		e.onError(fmt.Errorf("broadcast %s: list pending: %w", b.ID, err))
 		return
@@ -208,6 +208,14 @@ func (e *Expander) materializeBatch(ctx context.Context, b database.Broadcast, f
 		if err := e.materializeOne(ctx, b, fromDomain, r); err != nil {
 			e.onError(fmt.Errorf("broadcast recipient %s: materialize: %w", r.ID, err))
 			e.metrics.BroadcastExpansionBatch("materialize", "error")
+			// Bounded retry: a recipient whose render/MIME build deterministically
+			// fails must not retry (and recharge quota) forever, or silently block
+			// its broadcast from ever completing (see PR review). After
+			// maxRecipientAttempts this moves the recipient to the terminal
+			// 'failed' status instead.
+			if ferr := e.db.RecordBroadcastRecipientFailure(ctx, r.ID); ferr != nil {
+				e.onError(fmt.Errorf("broadcast recipient %s: record failure: %w", r.ID, ferr))
+			}
 			continue // one recipient's failure never aborts the rest of the batch
 		}
 		e.finishMaterialized(ctx, r)
@@ -300,10 +308,13 @@ func (e *Expander) materializeOne(ctx context.Context, b database.Broadcast, fro
 }
 
 // mergeVariables layers global broadcast variables under this recipient's
-// OWN snapshot (name/attributes, captured once at snapshot time — never
-// re-read from the live contact, see migration 000019's doc), so
+// OWN snapshot (attributes, then name/email, captured once at snapshot time
+// — never re-read from the live contact, see migration 000019's doc), so
 // personalization takes precedence and is exactly as stable as the email
-// address itself.
+// address itself. name/email are applied LAST and unconditionally (PR
+// review: applying them only when the key is absent let a global "name" or
+// "email" template variable silently override every recipient's own
+// identity, defeating personalization for the whole broadcast).
 func mergeVariables(global map[string]string, r database.BroadcastRecipient) map[string]string {
 	vars := make(map[string]string, len(global)+len(r.Attributes)+2)
 	for k, v := range global {
@@ -312,11 +323,9 @@ func mergeVariables(global map[string]string, r database.BroadcastRecipient) map
 	for k, v := range r.Attributes {
 		vars[k] = v
 	}
-	if _, ok := vars["name"]; !ok && r.Name != "" {
+	if r.Name != "" {
 		vars["name"] = r.Name
 	}
-	if _, ok := vars["email"]; !ok {
-		vars["email"] = r.Email
-	}
+	vars["email"] = r.Email
 	return vars
 }

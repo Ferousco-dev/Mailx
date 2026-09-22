@@ -255,3 +255,19 @@ func TestBroadcastIdempotencyDifferentSendAtConflicts(t *testing.T) {
 		t.Fatalf("%d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// PR review fix: a 404 (unknown audience/template) must release/never claim
+// the idempotency key, so an immediate corrected retry with the same key
+// succeeds rather than hanging on a stuck in_progress claim.
+func TestBroadcastFailedValidationDoesNotPoisonIdempotencyKey(t *testing.T) {
+	a := newDKIMAPI(t)
+	f := setupBroadcastReady(t, a, "acme")
+	bad := doJSONWithKey(t, f.h, "POST", "/v1/broadcasts", "retry-key", f.body(map[string]any{"audience_id": "nope"}))
+	if bad.Code != http.StatusNotFound {
+		t.Fatalf("%d %s", bad.Code, bad.Body.String())
+	}
+	good := doJSONWithKey(t, f.h, "POST", "/v1/broadcasts", "retry-key", f.body(nil))
+	if good.Code != http.StatusAccepted {
+		t.Fatalf("corrected retry with the same key was poisoned by the earlier 404: %d %s", good.Code, good.Body.String())
+	}
+}

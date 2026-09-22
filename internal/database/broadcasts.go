@@ -67,8 +67,9 @@ type BroadcastRecipient struct {
 	Email       string
 	Name        string
 	Attributes  map[string]string
-	Status      string // pending | suppressed | materialized
+	Status      string // pending | suppressed | materialized | failed
 	MessageID   *string
+	Attempts    int
 	CreatedAt   time.Time
 }
 
@@ -201,7 +202,7 @@ func (db *DB) ListBroadcasts(ctx context.Context, tenantID string, limit int, af
 func scanBroadcastRecipient(row rowScanner) (BroadcastRecipient, error) {
 	var r BroadcastRecipient
 	var attrs []byte
-	err := row.Scan(&r.ID, &r.BroadcastID, &r.ContactID, &r.Email, &r.Name, &attrs, &r.Status, &r.MessageID, &r.CreatedAt)
+	err := row.Scan(&r.ID, &r.BroadcastID, &r.ContactID, &r.Email, &r.Name, &attrs, &r.Status, &r.MessageID, &r.Attempts, &r.CreatedAt)
 	if err != nil {
 		return BroadcastRecipient{}, normalizeErr(err)
 	}
@@ -211,7 +212,7 @@ func scanBroadcastRecipient(row rowScanner) (BroadcastRecipient, error) {
 	return r, nil
 }
 
-const broadcastRecipientColumns = `id, broadcast_id, contact_id, email, name, attributes, status, message_id, created_at`
+const broadcastRecipientColumns = `id, broadcast_id, contact_id, email, name, attributes, status, message_id, attempts, created_at`
 
 // ListBroadcastRecipients is tenant-scoped via the broadcast row itself
 // (confirmed first, so an unknown/foreign broadcast id is ErrNotFound, not a

@@ -109,29 +109,15 @@ func (h *broadcastHandler) handleCreate(w http.ResponseWriter, r *http.Request) 
 
 	tenantID := tenantFromContext(r.Context())
 
-	var completion *database.IdempotencyCompletion
-	if idemKey != "" {
-		fingerprint, ferr := idempotency.Fingerprint(req)
-		if ferr != nil {
-			writeError(w, r, newError(ErrInternal, "internal_error", "failed to fingerprint request"))
-			return
-		}
-		resp, handled, herr := h.resolveIdempotency(r.Context(), tenantID, idemKey, fingerprint, now)
-		if herr != nil {
-			writeError(w, r, herr)
-			return
-		}
-		if handled {
-			w.Header().Set("Idempotency-Replayed", "true")
-			writeJSON(w, http.StatusAccepted, resp)
-			return
-		}
-		completion = &database.IdempotencyCompletion{Operation: idempotency.OperationBroadcastsCreate, IdempotencyKey: idemKey, Fingerprint: fingerprint}
-	}
-
 	// Ownership: both resources must belong to THIS tenant, validated
 	// authoritatively here (not merely because auth passed) — see
 	// database.GetAudience/GetTemplate, both already tenant-scoped queries.
+	// PR review fix: this validation runs BEFORE the idempotency claim
+	// below (moved from after it). Claiming first meant a correctable 404/
+	// 403 here left the claim stuck 'in_progress' forever (nothing released
+	// it), so an immediate retry with the same key polled or got
+	// idempotency_in_progress instead of a clean retry — same ordering
+	// handleSend already uses for exactly this reason.
 	aud, err := h.db.GetAudience(r.Context(), tenantID, req.AudienceID)
 	if errors.Is(err, database.ErrNotFound) {
 		writeError(w, r, newError(ErrNotFoundType, "audience_not_found", "no audience found with that id"))
@@ -162,6 +148,26 @@ func (h *broadcastHandler) handleCreate(w http.ResponseWriter, r *http.Request) 
 		}
 		writeError(w, r, newError(ErrInternal, "internal_error", "failed to authorize sender"))
 		return
+	}
+
+	var completion *database.IdempotencyCompletion
+	if idemKey != "" {
+		fingerprint, ferr := idempotency.Fingerprint(req)
+		if ferr != nil {
+			writeError(w, r, newError(ErrInternal, "internal_error", "failed to fingerprint request"))
+			return
+		}
+		resp, handled, herr := h.resolveIdempotency(r.Context(), tenantID, idemKey, fingerprint, now)
+		if herr != nil {
+			writeError(w, r, herr)
+			return
+		}
+		if handled {
+			w.Header().Set("Idempotency-Replayed", "true")
+			writeJSON(w, http.StatusAccepted, resp)
+			return
+		}
+		completion = &database.IdempotencyCompletion{Operation: idempotency.OperationBroadcastsCreate, IdempotencyKey: idemKey, Fingerprint: fingerprint}
 	}
 
 	b, err := h.db.CreateBroadcast(r.Context(), database.NewBroadcast{

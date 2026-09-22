@@ -477,3 +477,33 @@ func TestScheduledBroadcastSnapshotIsAtAcceptanceNotActivation(t *testing.T) {
 		t.Fatalf("expected only the pre-acceptance member, got %+v %v", recipients, err)
 	}
 }
+
+// TestMergeVariablesRecipientIdentityWins is a unit proof of the PR review
+// fix: a global "name"/"email" template variable must never override the
+// recipient's OWN name/email — previously the guards only applied the
+// recipient's fields when the key was absent, so a broadcast-level "name"
+// or "email" variable silently gave every recipient the same identity.
+func TestMergeVariablesRecipientIdentityWins(t *testing.T) {
+	r := database.BroadcastRecipient{Email: "alice@dest.example", Name: "Alice", Attributes: map[string]string{}}
+	global := map[string]string{"name": "Global Name", "email": "global@example.com", "offer": "20% off"}
+	got := mergeVariables(global, r)
+	if got["name"] != "Alice" {
+		t.Fatalf("name = %q, want the recipient's own name (Alice), not the global override", got["name"])
+	}
+	if got["email"] != "alice@dest.example" {
+		t.Fatalf("email = %q, want the recipient's own email, not the global override", got["email"])
+	}
+	if got["offer"] != "20% off" {
+		t.Fatalf("unrelated global variable was dropped: %+v", got)
+	}
+}
+
+// A recipient with no name (r.Name == "") falls back to a global "name" if
+// one was supplied — only a NON-EMPTY recipient name should win.
+func TestMergeVariablesFallsBackToGlobalNameWhenRecipientHasNone(t *testing.T) {
+	r := database.BroadcastRecipient{Email: "bob@dest.example", Attributes: map[string]string{}}
+	got := mergeVariables(map[string]string{"name": "Valued Customer"}, r)
+	if got["name"] != "Valued Customer" {
+		t.Fatalf("name = %q, want the global fallback since the recipient has none", got["name"])
+	}
+}

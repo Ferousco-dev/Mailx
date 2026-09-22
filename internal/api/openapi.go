@@ -660,7 +660,7 @@ const openAPISpec = `{
           "id": {"type": "string"},
           "contact_id": {"type": "string"},
           "email": {"type": "string"},
-          "status": {"type": "string", "enum": ["pending", "suppressed", "materialized"]},
+          "status": {"type": "string", "enum": ["pending", "suppressed", "materialized", "failed"]},
           "message_id": {"type": "string", "nullable": true}
         }
       },

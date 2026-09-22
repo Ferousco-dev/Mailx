@@ -186,7 +186,7 @@ func TestPendingAndMarkRecipientGuards(t *testing.T) {
 	b := createBroadcast(t, db, tn, aud, tmpl)
 	db.SnapshotBroadcastBatch(ctx, b, 10)
 
-	pending, err := db.PendingBroadcastRecipients(ctx, b.ID, 10)
+	pending, err := db.ClaimPendingBroadcastRecipients(ctx, b.ID, 10)
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("%v %v", pending, err)
 	}
@@ -199,7 +199,7 @@ func TestPendingAndMarkRecipientGuards(t *testing.T) {
 	if err := db.MarkBroadcastRecipientSuppressed(ctx, r.ID); err != nil {
 		t.Fatal(err)
 	}
-	pending, _ = db.PendingBroadcastRecipients(ctx, b.ID, 10)
+	pending, _ = db.ClaimPendingBroadcastRecipients(ctx, b.ID, 10)
 	if len(pending) != 0 {
 		t.Fatalf("%d still pending", len(pending))
 	}
@@ -207,6 +207,116 @@ func TestPendingAndMarkRecipientGuards(t *testing.T) {
 	db.pool.QueryRow(ctx, `SELECT status FROM broadcast_recipients WHERE id = $1`, r.ID).Scan(&status)
 	if status != "materialized" {
 		t.Fatalf("status = %q, want materialized (the later suppressed call must not overwrite it)", status)
+	}
+}
+
+// TestClaimPendingBroadcastRecipientsStaysClaimedAcrossGap proves the PR
+// review fix: unlike a plain SELECT ... FOR UPDATE SKIP LOCKED (whose lock
+// disappears the instant the query returns), a claimed row must stay
+// unavailable to a second claimant for the lease duration even AFTER the
+// claiming statement has committed and returned — covering the real window
+// (render/sign/InsertMessage) during which the original claimant is still
+// working it.
+func TestClaimPendingBroadcastRecipientsStaysClaimedAcrossGap(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn, aud, tmpl := setupAudienceFixture(t, db)
+	c := mustContact(t, db, tn.ID, "one@example.com")
+	db.AddAudienceMember(ctx, tn.ID, aud.ID, c.ID)
+	b := createBroadcast(t, db, tn, aud, tmpl)
+	db.SnapshotBroadcastBatch(ctx, b, 10)
+
+	first, err := db.ClaimPendingBroadcastRecipients(ctx, b.ID, 10)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("%v %v", first, err)
+	}
+	// The claiming statement has already committed (Query returned) — a
+	// second claimant must still not see this row, because claimed_at
+	// (the lease), not a SQL-level lock, is what protects it now.
+	second, err := db.ClaimPendingBroadcastRecipients(ctx, b.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("a second claimant re-claimed an in-lease row: %+v", second)
+	}
+}
+
+// TestClaimPendingBroadcastRecipientsReclaimsAfterLeaseExpires proves the
+// flip side: a stale claim (crashed claimant) must eventually become
+// reclaimable — this is what makes the lease a lease and not a permanent
+// lock, i.e. no work is lost to a crash between claim and completion.
+func TestClaimPendingBroadcastRecipientsReclaimsAfterLeaseExpires(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn, aud, tmpl := setupAudienceFixture(t, db)
+	c := mustContact(t, db, tn.ID, "one@example.com")
+	db.AddAudienceMember(ctx, tn.ID, aud.ID, c.ID)
+	b := createBroadcast(t, db, tn, aud, tmpl)
+	db.SnapshotBroadcastBatch(ctx, b, 10)
+
+	first, err := db.ClaimPendingBroadcastRecipients(ctx, b.ID, 10)
+	if err != nil || len(first) != 1 {
+		t.Fatalf("%v %v", first, err)
+	}
+	// Simulate the lease having expired (a crashed claimant that never
+	// finished), by backdating the stamp — never by sleeping in the test.
+	if _, err := db.pool.Exec(ctx, `UPDATE broadcast_recipients SET claimed_at = now() - interval '1 hour' WHERE id = $1`, first[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := db.ClaimPendingBroadcastRecipients(ctx, b.ID, 10)
+	if err != nil || len(reclaimed) != 1 || reclaimed[0].ID != first[0].ID {
+		t.Fatalf("expired lease was not reclaimed: %+v %v", reclaimed, err)
+	}
+}
+
+// TestRecordBroadcastRecipientFailureTerminatesAfterMaxAttempts proves the
+// second PR review fix: a deterministically-failing recipient does not
+// retry (and get recharged against tenant quota) forever, and its
+// broadcast can still complete once it is the only remaining "pending" row.
+func TestRecordBroadcastRecipientFailureTerminatesAfterMaxAttempts(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn, aud, tmpl := setupAudienceFixture(t, db)
+	c := mustContact(t, db, tn.ID, "one@example.com")
+	db.AddAudienceMember(ctx, tn.ID, aud.ID, c.ID)
+	b := createBroadcast(t, db, tn, aud, tmpl)
+	db.MarkBroadcastExpanding(ctx, b.ID)
+	db.SnapshotBroadcastBatch(ctx, b, 10)
+
+	pending, err := db.ClaimPendingBroadcastRecipients(ctx, b.ID, 10)
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("%v %v", pending, err)
+	}
+	id := pending[0].ID
+	for i := 0; i < maxRecipientAttempts-1; i++ {
+		if err := db.RecordBroadcastRecipientFailure(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+		var status string
+		db.pool.QueryRow(ctx, `SELECT status FROM broadcast_recipients WHERE id = $1`, id).Scan(&status)
+		if status != "pending" {
+			t.Fatalf("attempt %d: status = %q, want still pending (not yet at max attempts)", i+1, status)
+		}
+	}
+	if err := db.RecordBroadcastRecipientFailure(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var attempts int
+	db.pool.QueryRow(ctx, `SELECT status, attempts FROM broadcast_recipients WHERE id = $1`, id).Scan(&status, &attempts)
+	if status != "failed" || attempts != maxRecipientAttempts {
+		t.Fatalf("status = %q attempts = %d, want failed/%d", status, attempts, maxRecipientAttempts)
+	}
+
+	// A 'failed' recipient is terminal, not pending, so the broadcast can
+	// still complete rather than being blocked on it forever.
+	if pending, _ := db.HasPendingBroadcastRecipients(ctx, b.ID); pending {
+		t.Fatal("a failed recipient must not count as still pending")
+	}
+	completed, err := db.TryCompleteBroadcast(ctx, b.ID)
+	if err != nil || !completed {
+		t.Fatalf("broadcast should complete once its only recipient has terminally failed: %v %v", completed, err)
 	}
 }
 
@@ -227,7 +337,7 @@ func TestTryCompleteBroadcast(t *testing.T) {
 	if completed {
 		t.Fatal("must not complete while a recipient is still pending")
 	}
-	pending, _ := db.PendingBroadcastRecipients(ctx, b.ID, 10)
+	pending, _ := db.ClaimPendingBroadcastRecipients(ctx, b.ID, 10)
 	db.MarkBroadcastRecipientMaterialized(ctx, pending[0].ID, "msg-1")
 
 	completed, err = db.TryCompleteBroadcast(ctx, b.ID)

@@ -541,3 +541,36 @@ func TestSendNoScheduledAtIsImmediatelyDue(t *testing.T) {
 		t.Fatal("an immediate (no scheduled_at) send must be due right away")
 	}
 }
+
+// PR review fix: a retry with the same Idempotency-Key and an unchanged
+// fingerprint must replay the ORIGINAL accepted email even if its template
+// was deleted afterward — the completed-replay check now runs before
+// template lookup/rendering, not after.
+func TestSendTemplateReplaySurvivesTemplateDeletion(t *testing.T) {
+	mux, db, tenantID := setupSendMux(t)
+	tmpl, err := db.CreateTemplate(context.Background(), database.NewTemplate{TenantID: tenantID, Name: "t", Subject: "Hi {{name}}", Text: "Body"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := map[string]any{"from": "a@example.com", "to": []string{"b@example.com"}, "template_id": tmpl.ID, "variables": map[string]string{"name": "Bob"}}
+	first := doJSONWithKey(t, mux, "POST", "/v1/emails", "replay-key", body)
+	if first.Code != http.StatusAccepted {
+		t.Fatal(first.Body.String())
+	}
+	var got1 email
+	_ = json.Unmarshal(first.Body.Bytes(), &got1)
+
+	if err := db.DeleteTemplate(context.Background(), tenantID, tmpl.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	replay := doJSONWithKey(t, mux, "POST", "/v1/emails", "replay-key", body)
+	if replay.Code != http.StatusAccepted || replay.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatalf("template deletion broke replay: %d %s", replay.Code, replay.Body.String())
+	}
+	var got2 email
+	_ = json.Unmarshal(replay.Body.Bytes(), &got2)
+	if got1.ID != got2.ID {
+		t.Fatalf("replay created a different email: %s vs %s", got1.ID, got2.ID)
+	}
+}
