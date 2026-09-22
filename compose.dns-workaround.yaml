@@ -1,0 +1,13 @@
+# Optional overlay: point the mailx container at public DNS resolvers
+# instead of Docker's embedded proxy. Layer it only if you're actually
+# hitting spurious DNS timeouts on outbound MX lookups (see compose.yaml's
+# comment on the mailx service) — most setups don't need this, and it can
+# break resolution on a VPN or a network with internal/split-horizon DNS.
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.dns-workaround.yaml up
+services:
+  mailx:
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
