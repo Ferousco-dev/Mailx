@@ -606,6 +606,34 @@ const openAPISpec = `{
         }
       }
     },
+    "/domains/{id}/bimi": {
+      "get": {
+        "summary": "BIMI (brand indicator) readiness identity model for a domain",
+        "description": "Requires domains:read. NO DNS query is made (readiness 'unchecked'). BIMI (Brand Indicators for Message Identification, see draft-brand-indicators-for-message-identification) lets a mailbox provider show a brand logo next to a message, IF that provider chooses to and IF its own checks pass. MailX only reports its OWN checks; it never claims a logo will actually display. See the 'disclaimer' field, present on every response.",
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {"description": "BIMI identity model", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BimiStatus"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
+    "/domains/{id}/bimi/verify": {
+      "post": {
+        "summary": "Inspect the domain's published BIMI record and MailX's readiness",
+        "description": "Requires domains:write and a VERIFIED domain (409 domain_not_verified otherwise, with no DNS query). Queries the default selector's TXT record (default._bimi.<domain>), falling back to the DMARC Organizational Domain if the domain itself published nothing. Also runs one full DMARC verification, since BIMI's DNS prerequisite is: the domain's DMARC effective policy must not be 'none' (MailX's DMARC follows RFC 9989, which removed the pct= partial-rollout tag entirely, so no separate pct check applies). Pass ?validate_assets=true to additionally fetch (HTTPS only, bounded size/time, no redirects followed, SSRF/DNS-rebinding protected — private, loopback and link-local addresses are always rejected even after DNS resolution) and structurally validate the referenced logo (SVG Tiny Portable/Secure profile: version=1.2, baseProfile=tiny-ps, a square viewBox, a title element, and none of script/foreignObject/image/style/animate elements or any external href) and, if published, the authority certificate (VMC/CMC) — parsed with crypto/x509 for structural facts (subject, issuer, validity window) ONLY; MailX has no BIMI-authority trust store, builds no certificate chain, and does not check revocation. 'dns.status': 'found', 'not_configured', 'invalid' (malformed record, or more than one BIMI-tagged TXT record at one name), 'temporary_error'. 'readiness': 'not_configured', 'declined' (the domain published l= empty, an explicit statement of no logo), 'invalid_record', 'dmarc_prerequisite_failed', 'logo_issue' / 'certificate_issue' (only meaningful when validate_assets=true), 'ready', or 'unknown' (DNS failure; nothing concluded). READINESS IS MAILX'S OWN CHECKS ONLY: see the mandatory 'disclaimer' field on every response — 'ready' never means any mailbox provider will display the logo; providers retain full discretion. This call stores nothing and changes no domain or DMARC state; it never blocks or slows sending.",
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "validate_assets", "in": "query", "required": false, "schema": {"type": "boolean", "default": false}, "description": "Also fetch and structurally validate the logo and, if published, the certificate. Adds up to two bounded outbound HTTPS requests."}
+        ],
+        "responses": {
+          "200": {"description": "Verification result", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BimiStatus"}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "404": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"},
+          "500": {"$ref": "#/components/responses/Error"}, "503": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/domains/{id}/spf": {
       "get": {
         "summary": "SPF guidance for a domain",
@@ -981,6 +1009,35 @@ const openAPISpec = `{
             "type": {"type": "string", "enum": ["TXT"]}, "name": {"type": "string"},
             "value": {"type": "string", "description": "Only set for create: 'v=DMARC1; p=none'. An existing policy is never rewritten."}}},
           "warnings": {"type": "array", "items": {"type": "string", "enum": ["deprecated_tag", "ignored_report_uri", "policy_defaulted_from_rua", "policy_not_enforcing", "testing_mode", "failure_reporting_enabled", "external_report_destination", "relay_may_alter_signed_content"]}}
+        }
+      },
+      "BimiStatus": {
+        "type": "object", "required": ["domain_id", "domain", "selector", "readiness", "dns", "dmarc", "logo", "certificate", "disclaimer"],
+        "properties": {
+          "domain_id": {"type": "string"}, "domain": {"type": "string"},
+          "selector": {"type": "string", "enum": ["default"], "description": "MailX only checks the domain-wide default selector; it does not add a per-message BIMI-Selector header."},
+          "readiness": {"type": "string", "enum": ["unchecked", "not_configured", "declined", "invalid_record", "dmarc_prerequisite_failed", "logo_issue", "certificate_issue", "ready", "unknown"], "description": "MailX's OWN checks only. Never a display guarantee — see 'disclaimer'."},
+          "dns": {"type": "object", "required": ["status", "declined"], "properties": {
+            "status": {"type": "string", "enum": ["unchecked", "not_configured", "found", "invalid", "temporary_error"]},
+            "reason": {"type": "string"}, "source": {"type": "string", "enum": ["domain", "organizational_domain"]},
+            "record_name": {"type": "string"}, "published_record": {"type": "string"},
+            "logo_location": {"type": "string", "description": "The l= URL (HTTPS)."},
+            "authority_location": {"type": "string", "description": "The a= URL (HTTPS), if published."},
+            "declined": {"type": "boolean", "description": "l= was published empty: an explicit statement of no logo."}}},
+          "dmarc": {"type": "object", "required": ["checked"], "properties": {
+            "checked": {"type": "boolean"},
+            "effective_policy": {"type": "string", "enum": ["none", "quarantine", "reject"]},
+            "organizational_domain": {"type": "string"}}},
+          "logo": {"type": "object", "required": ["checked"], "properties": {
+            "checked": {"type": "boolean", "description": "False unless ?validate_assets=true was passed."},
+            "valid": {"type": "boolean"}, "fetch_error": {"type": "string"},
+            "reasons": {"type": "array", "items": {"type": "string"}, "description": "SVG Tiny Portable/Secure structural check failures, e.g. contains_script_element, missing_title_element, viewbox_not_square."}}},
+          "certificate": {"type": "object", "required": ["checked"], "properties": {
+            "checked": {"type": "boolean"}, "parseable": {"type": "boolean"},
+            "fetch_error": {"type": "string"}, "parse_error": {"type": "string"},
+            "subject": {"type": "string"}, "issuer": {"type": "string"},
+            "currently_valid": {"type": "boolean", "description": "NotBefore/NotAfter window only — not chain-of-trust or revocation."}}},
+          "disclaimer": {"type": "string", "description": "MailX readiness is not a guarantee of mailbox-provider display."}
         }
       },
       "CreateSuppressionRequest": {

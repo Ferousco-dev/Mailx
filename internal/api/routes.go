@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/auth"
+	"github.com/Ferousco-dev/mailx/internal/bimi"
 	"github.com/Ferousco-dev/mailx/internal/dkim"
 	"github.com/Ferousco-dev/mailx/internal/dmarc"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
@@ -20,6 +21,7 @@ type routeServices struct {
 	dkim     *dkim.Service
 	spf      *spf.Service
 	dmarc    *dmarc.Service
+	bimi     *bimi.Service
 	metrics  *observability.Metrics
 	abuse    *AbuseControls
 	feedback *feedbackHandler // nil disables the ingestion route
@@ -53,9 +55,11 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	}
 	spfHandler := &spfHandler{}
 	dmarcHandler := &dmarcHandler{}
+	bimiHandler := &bimiHandler{}
 	if len(extras) > 0 {
 		spfHandler.service = extras[0].spf
 		dmarcHandler.service = extras[0].dmarc
+		bimiHandler.service = extras[0].bimi
 	}
 	domains := newDomainHandler(domainService)
 	webhooks := &webhookHandler{service: webhookService, db: h.db}
@@ -76,6 +80,8 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("POST /v1/domains/{id}/spf/verify", requireScope(auth.ScopeDomainsWrite)(spfHandler.handleVerify))
 	v1.HandleFunc("GET /v1/domains/{id}/dmarc", requireScope(auth.ScopeDomainsRead)(dmarcHandler.handleGet))
 	v1.HandleFunc("POST /v1/domains/{id}/dmarc/verify", requireScope(auth.ScopeDomainsWrite)(dmarcHandler.handleVerify))
+	v1.HandleFunc("GET /v1/domains/{id}/bimi", requireScope(auth.ScopeDomainsRead)(bimiHandler.handleGet))
+	v1.HandleFunc("POST /v1/domains/{id}/bimi/verify", requireScope(auth.ScopeDomainsWrite)(bimiHandler.handleVerify))
 	broadcasts := &broadcastHandler{db: h.db, now: func() time.Time { return time.Now().UTC() }}
 	v1.HandleFunc("POST /v1/broadcasts", requireScope(auth.ScopeBroadcastsWrite)(broadcasts.handleCreate))
 	v1.HandleFunc("GET /v1/broadcasts", requireScope(auth.ScopeBroadcastsRead)(broadcasts.handleList))

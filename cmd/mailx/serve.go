@@ -105,6 +105,10 @@ func runFull() error {
 	if err != nil {
 		return err
 	}
+	bimiSvc, err := buildBIMI(db, dmarcSvc)
+	if err != nil {
+		return err
+	}
 	webhookRuntime, err := buildWebhookRuntime(db, o)
 	if err != nil {
 		return err
@@ -115,7 +119,7 @@ func runFull() error {
 	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
-		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, MessageIDDomain: ident.Name(), Abuse: abuse.apiControls(o),
+		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, BIMI: bimiSvc, MessageIDDomain: ident.Name(), Abuse: abuse.apiControls(o),
 		Feedback: fbCfg,
 		Ready:    ready.Check,
 		Logger:   o.log, Metrics: o.metrics,

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/Ferousco-dev/mailx/internal/bimi"
 	"github.com/Ferousco-dev/mailx/internal/database"
 	"github.com/Ferousco-dev/mailx/internal/dkim"
 	"github.com/Ferousco-dev/mailx/internal/dmarc"
@@ -51,6 +52,10 @@ type Config struct {
 	// DMARC gives sender-side DMARC readiness. Optional: nil makes the DMARC
 	// endpoints answer 503 and changes nothing else (sending never consults it).
 	DMARC *dmarc.Service
+	// BIMI gives sender-side BIMI (brand indicator) readiness. Optional: nil
+	// makes the BIMI endpoints answer 503 and changes nothing else (sending
+	// never consults it).
+	BIMI *bimi.Service
 	// MessageIDDomain is the domain used in generated Message-IDs: MailX's public
 	// SMTP hostname when configured. Empty keeps the local development default.
 	MessageIDDomain string
@@ -130,7 +135,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if cfg.Feedback != nil {
 		fbHandler = &feedbackHandler{db: cfg.DB, correlator: cfg.Feedback.Correlator, ingestToken: cfg.Feedback.IngestToken, now: func() time.Time { return time.Now().UTC() }}
 	}
-	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, metrics: cfg.Metrics, feedback: fbHandler})
+	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, bimi: cfg.BIMI, metrics: cfg.Metrics, feedback: fbHandler})
 	log := cfg.Logger
 	if log == nil {
 		log = observability.Discard()
