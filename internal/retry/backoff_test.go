@@ -47,7 +47,13 @@ func TestDefaultBackoffPolicy(t *testing.T) {
 		5 * time.Minute,
 		30 * time.Minute,
 		2 * time.Hour,
-		5 * time.Hour,
+	}
+	// PR review: exactly 4 entries, one per delay between DefaultAttemptLimit's
+	// 5 operations — a 5th entry would be unreachable (the delay after the
+	// LAST allowed attempt is never scheduled).
+	if len(policy.Schedule) != DefaultAttemptLimit().MaxAttempts-1 {
+		t.Fatalf("DefaultBackoffPolicy() has %d entries, want exactly MaxAttempts-1 (%d) — an extra entry would be unreachable dead code",
+			len(policy.Schedule), DefaultAttemptLimit().MaxAttempts-1)
 	}
 	if len(policy.Schedule) != len(wants) {
 		t.Fatalf("DefaultBackoffPolicy() = %+v", policy)

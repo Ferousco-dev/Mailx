@@ -77,10 +77,18 @@ func (p BackoffPolicy) Jitter(delay time.Duration, seed int64) time.Duration {
 // mail either — only the FIRST few retries are fast, same as every prior
 // schedule considered for this project (Resend's webhook-retry schedule is
 // the pattern this follows, front-loaded then slow: see the design
-// discussion). Total exhaustion across DefaultAttemptLimit's 5 operations:
-// ~7h35m — a genuinely broken destination still gets abandoned in about the
-// same overall window as the previous exponential default, it just spends
-// that window very differently.
+// discussion).
+//
+// Exactly 4 entries, one per DELAY between DefaultAttemptLimit's 5
+// operations (attempt N's delay is used only if a 6th operation could
+// still happen; a 5-operation limit means the delay after attempt 5 is
+// NEVER scheduled — PR review caught an earlier 5-entry version whose last
+// entry was dead code). Total exhaustion across all 4 delays: ~2h35m — a
+// genuinely broken destination is abandoned faster than the old exponential
+// default (~7.5h), which is an accepted, deliberate tradeoff of this
+// schedule, not an oversight: see the design discussion for why "fails
+// fast enough for the caller to react" outweighs "keep retrying for most
+// of a day" here.
 func DefaultBackoffPolicy() BackoffPolicy {
 	return BackoffPolicy{
 		Schedule: []time.Duration{
@@ -88,7 +96,6 @@ func DefaultBackoffPolicy() BackoffPolicy {
 			5 * time.Minute,
 			30 * time.Minute,
 			2 * time.Hour,
-			5 * time.Hour,
 		},
 	}
 }
