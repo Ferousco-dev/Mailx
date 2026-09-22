@@ -15,13 +15,18 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/mail"
 )
 
-// ErrRecordExists means Save was called twice for the same record ID — the
-// message directory already exists. Callers with their own idempotent-retry
-// semantics (e.g. "does a durable record for this ID already exist
-// elsewhere") should treat this as confirmation the earlier write
-// succeeded, not as a failure to retry (PR review: a caller that blindly
-// retried on ANY Save error could loop forever on this specific one, since
-// it never stops recurring for the same ID).
+// ErrRecordExists means Save was called twice for the same record ID AND
+// the existing record is verified complete (Save checks this — see its
+// doc): the message directory exists AND loads cleanly. Callers with their
+// own idempotent-retry semantics (e.g. "does a durable record for this ID
+// already exist elsewhere") should treat this as confirmation the earlier
+// write succeeded, not as a failure to retry (PR review: a caller that
+// blindly retried on ANY Save error could loop forever on this specific
+// one, since it never stops recurring for the same ID). Save never returns
+// this for a crash-partial (incomplete) directory — it silently repairs
+// that case instead (PR review, second finding: a caller trusting
+// ErrRecordExists as "success" must never be handed it for content that
+// cannot actually be loaded later).
 var ErrRecordExists = errors.New("record already exists")
 
 const (
@@ -158,6 +163,48 @@ func (s *FileStore) Initialize() error {
 	return nil
 }
 
+// repairGracePeriod is how old an existing-but-incomplete message directory
+// must be before ensureFreshMessageDir will repair it. No genuinely
+// concurrent Save race (two goroutines/processes writing the SAME id at
+// the same instant) can span this — that resolves in microseconds — but any
+// real crash followed by a later retry (the next tick, a process restart)
+// comfortably does.
+const repairGracePeriod = 5 * time.Second
+
+// ensureFreshMessageDir returns nil once messageDir exists and is ready to
+// receive record's files (either freshly created, or repaired after being
+// found stale-and-incomplete), or ErrRecordExists if a genuinely complete
+// record is already there. See Save's and ErrRecordExists's docs for why
+// repair only fires past repairGracePeriod: completeness alone is not a
+// safe repair trigger, since two GENUINELY CONCURRENT Save calls for the
+// same id both see the directory mid-write (incomplete) — repairing on
+// that alone corrupts the race instead of just losing it cleanly (caught
+// by TestFileStoreSaveConcurrentSameID during this fix's development).
+func (s *FileStore) ensureFreshMessageDir(messageDir, id string) error {
+	if err := os.Mkdir(messageDir, 0o700); err == nil {
+		return nil
+	} else if !os.IsExist(err) {
+		return fmt.Errorf("create message directory %q: %w", messageDir, err)
+	}
+
+	if info, statErr := os.Stat(messageDir); statErr == nil && time.Since(info.ModTime()) > repairGracePeriod {
+		if _, loadErr := s.Load(id); loadErr != nil {
+			if err := os.RemoveAll(messageDir); err != nil {
+				return fmt.Errorf("remove incomplete message directory %q: %w", messageDir, err)
+			}
+			if err := os.Mkdir(messageDir, 0o700); err == nil {
+				return nil
+			} else if !os.IsExist(err) {
+				return fmt.Errorf("create message directory %q: %w", messageDir, err)
+			}
+			// else: someone else recreated it between RemoveAll and Mkdir —
+			// fall through and report ErrRecordExists like any other
+			// existing directory.
+		}
+	}
+	return fmt.Errorf("save message %q: %w", id, ErrRecordExists)
+}
+
 // Save persists a record's exact raw message and its derived metadata. A record
 // ID may be saved only once.
 func (s *FileStore) Save(record MessageRecord) error {
@@ -175,11 +222,8 @@ func (s *FileStore) Save(record MessageRecord) error {
 	}
 
 	messageDir := filepath.Join(s.MessagesDir(), record.ID)
-	if err := os.Mkdir(messageDir, 0o700); err != nil {
-		if os.IsExist(err) {
-			return fmt.Errorf("save message %q: %w", record.ID, ErrRecordExists)
-		}
-		return fmt.Errorf("create message directory %q: %w", messageDir, err)
+	if err := s.ensureFreshMessageDir(messageDir, record.ID); err != nil {
+		return err
 	}
 
 	rawPath := filepath.Join(messageDir, messageFile)
