@@ -44,6 +44,23 @@ const (
 // delivered).
 var errDeterministic = errors.New("deterministic materialization failure")
 
+// classifyDKIMError splits a dkim.SignMessage failure by dkim.SignError.
+// Outcome (PR review, 3rd round): OutcomeKeyUnavailable is the key-store
+// lookup itself failing — genuinely transient (a momentary DB issue),
+// always retried. Every other SignError outcome (corrupt/undecryptable key
+// material, a public key that no longer matches, a domain mismatch, or a
+// hard sign failure) reflects the domain's STORED key state, which retrying
+// does not change — deterministic, eligible for the bounded terminal-
+// failure counter, so a permanently-broken key cannot block its broadcast
+// from completing forever.
+func classifyDKIMError(err error) error {
+	var signErr *dkim.SignError
+	if errors.As(err, &signErr) && signErr.Outcome != dkim.OutcomeKeyUnavailable {
+		return fmt.Errorf("dkim sign: %w: %w", errDeterministic, err)
+	}
+	return fmt.Errorf("dkim sign: %w", err)
+}
+
 // Limiter is the narrow ratelimit.Store surface the expander needs — the
 // SAME tenant recipient bucket a normal /v1/emails send charges (v0.31), so
 // a broadcast cannot buy more throughput than any other send path.
@@ -303,10 +320,7 @@ func (e *Expander) materializeOne(ctx context.Context, b database.Broadcast, fro
 	if e.dkim != nil {
 		signed, _, serr := e.dkim.SignMessage(ctx, b.TenantID, fromDomain, []byte(raw))
 		if serr != nil {
-			// NOT deterministic: a DKIM key lookup can fail transiently
-			// (e.g. a momentary decrypt/store issue) and later succeed — must
-			// not consume the terminal retry budget (PR review).
-			return fmt.Errorf("dkim sign: %w", serr)
+			return classifyDKIMError(serr)
 		}
 		raw = string(signed)
 	}
@@ -320,11 +334,19 @@ func (e *Expander) materializeOne(ctx context.Context, b database.Broadcast, fro
 	// NOT deterministic beyond this point: filesystem/DB writes can fail
 	// transiently (disk pressure, connection blip) and succeed on the very
 	// next tick — never wrapped in errDeterministic (PR review).
+	//
+	// ErrRecordExists specifically means a PRIOR attempt already saved this
+	// exact recipient's file (e.g. Save succeeded, then InsertMessage failed
+	// or crashed before this function returned) — that is success, not a
+	// failure to retry: retrying Save for the same ID fails with
+	// ErrRecordExists on every future attempt too, which without this check
+	// would keep the recipient pending forever (PR review, second finding on
+	// this same fix).
 	if err := e.store.Save(storage.MessageRecord{
 		ID: r.ID, ReceivedAt: now,
 		Envelope: mail.Envelope{MailFrom: built.From, Recipients: built.Envelope},
 		Message:  parsed,
-	}); err != nil {
+	}); err != nil && !errors.Is(err, storage.ErrRecordExists) {
 		return fmt.Errorf("save file: %w", err)
 	}
 	role := "to"

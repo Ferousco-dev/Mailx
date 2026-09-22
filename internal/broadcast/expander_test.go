@@ -2,12 +2,14 @@ package broadcast
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/dkim"
 	"github.com/Ferousco-dev/mailx/internal/ratelimit"
 	"github.com/Ferousco-dev/mailx/internal/storage"
 )
@@ -560,5 +562,54 @@ func TestExpanderTransientFailureNeverTerminates(t *testing.T) {
 	}
 	if after[0].Attempts != 0 {
 		t.Fatalf("attempts = %d, want 0 — transient failures must not consume the terminal-failure budget", after[0].Attempts)
+	}
+}
+
+// TestClassifyDKIMErrorSplitsByOutcome is a unit proof of the PR review fix:
+// only genuinely transient SignError outcomes must stay retriable forever;
+// every other outcome reflects broken stored key state and is deterministic.
+func TestClassifyDKIMErrorSplitsByOutcome(t *testing.T) {
+	transient := &dkim.SignError{Outcome: dkim.OutcomeKeyUnavailable}
+	if errors.Is(classifyDKIMError(transient), errDeterministic) {
+		t.Fatal("OutcomeKeyUnavailable must stay transient (a momentary key-store lookup failure)")
+	}
+	for _, outcome := range []string{dkim.OutcomeKeyDecryptFail, dkim.OutcomeKeyInvalid, dkim.OutcomeDomainMismatch, dkim.OutcomeSignFailed} {
+		permanent := &dkim.SignError{Outcome: outcome}
+		if !errors.Is(classifyDKIMError(permanent), errDeterministic) {
+			t.Fatalf("outcome %q must be classified deterministic (retrying does not change stored key state)", outcome)
+		}
+	}
+}
+
+// TestMaterializeOneTreatsExistingFileRecordAsSuccess proves the PR review
+// fix for the "partial write" case: if a prior attempt's FileStore.Save
+// succeeded but the attempt then crashed/failed before InsertMessage,
+// retrying must NOT treat storage.ErrRecordExists as a failure (it would
+// recur on every future retry too, permanently blocking the recipient) — it
+// must proceed straight to InsertMessage, exactly like a fresh save would.
+func TestMaterializeOneTreatsExistingFileRecordAsSuccess(t *testing.T) {
+	db := newTestDB(t)
+	e := newTestExpander(t, db)
+	tn, b := setupBroadcastReady(t, db, 1)
+	ctx := context.Background()
+	db.MarkBroadcastExpanding(ctx, b.ID)
+	db.SnapshotBroadcastBatch(ctx, mustGetBroadcast(t, db, tn.ID, b.ID), 200)
+
+	recipients, _ := db.ListBroadcastRecipients(ctx, tn.ID, b.ID, 100, nil)
+	if len(recipients) != 1 {
+		t.Fatalf("%d", len(recipients))
+	}
+	r := database.BroadcastRecipient{ID: recipients[0].ID, Email: recipients[0].Email}
+
+	// First call: a normal materialize, which also writes the file record.
+	if err := e.materializeOne(ctx, mustGetBroadcast(t, db, tn.ID, b.ID), "example.com", r); err != nil {
+		t.Fatal(err)
+	}
+	// Second call for the SAME recipient id: the file record already exists
+	// (Save would return ErrRecordExists) — this must NOT be treated as a
+	// failure; materializeOne must still complete (InsertMessage's own
+	// ErrConflict handling makes the DB write idempotent too).
+	if err := e.materializeOne(ctx, mustGetBroadcast(t, db, tn.ID, b.ID), "example.com", r); err != nil {
+		t.Fatalf("retry after an existing file record must succeed, got: %v", err)
 	}
 }

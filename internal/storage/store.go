@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,15 @@ import (
 
 	"github.com/Ferousco-dev/mailx/internal/mail"
 )
+
+// ErrRecordExists means Save was called twice for the same record ID — the
+// message directory already exists. Callers with their own idempotent-retry
+// semantics (e.g. "does a durable record for this ID already exist
+// elsewhere") should treat this as confirmation the earlier write
+// succeeded, not as a failure to retry (PR review: a caller that blindly
+// retried on ANY Save error could loop forever on this specific one, since
+// it never stops recurring for the same ID).
+var ErrRecordExists = errors.New("record already exists")
 
 const (
 	// DefaultRoot is the portable development location for MailX data.
@@ -167,7 +177,7 @@ func (s *FileStore) Save(record MessageRecord) error {
 	messageDir := filepath.Join(s.MessagesDir(), record.ID)
 	if err := os.Mkdir(messageDir, 0o700); err != nil {
 		if os.IsExist(err) {
-			return fmt.Errorf("save message %q: record already exists", record.ID)
+			return fmt.Errorf("save message %q: %w", record.ID, ErrRecordExists)
 		}
 		return fmt.Errorf("create message directory %q: %w", messageDir, err)
 	}
