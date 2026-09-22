@@ -16,9 +16,9 @@
     "DES": 8,
     "TC": 0,
     "DEF": 27,
-    "CR": 22,
+    "CR": 23,
     "RSK": 40,
-    "DEC": 147,
+    "DEC": 156,
     "MET": 72,
     "ETH": 1
   },
@@ -34,10 +34,10 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.37",
-    "ilana_current_through": "v0.37",
+    "last_completed_milestone": "v0.38",
+    "ilana_current_through": "v0.38",
     "current_milestone": "none",
-    "current_milestone_status": "v0.37 complete",
-    "next_milestone": "v0.38 advanced analytics (not started)"
+    "current_milestone_status": "v0.38 complete",
+    "next_milestone": "v0.39 sending pools / routing (not started)"
   }
 }
