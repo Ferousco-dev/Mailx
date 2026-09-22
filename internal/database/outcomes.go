@@ -24,13 +24,18 @@ type DeliveryState struct {
 	Status      MessageStatus
 	Attempts    []DeliveryAttempt
 	NextRetryAt *time.Time
+	// SendingMemberID is the message's durable v0.39 routing decision (see
+	// InsertMessage/selectRoutingMember), nil for the legacy no-pool path.
+	// It never changes after the message is inserted; retry stickiness
+	// depends on that.
+	SendingMemberID *string
 }
 
 // LoadDeliveryState reconstructs the minimum durable truth a worker needs
 // before deciding whether another SMTP operation is safe.
 func (db *DB) LoadDeliveryState(ctx context.Context, messageID string) (DeliveryState, error) {
 	var state DeliveryState
-	if err := db.pool.QueryRow(ctx, `SELECT status FROM messages WHERE id = $1`, messageID).Scan(&state.Status); err != nil {
+	if err := db.pool.QueryRow(ctx, `SELECT status, sending_member_id FROM messages WHERE id = $1`, messageID).Scan(&state.Status, &state.SendingMemberID); err != nil {
 		return DeliveryState{}, normalizeErr(err)
 	}
 	attempts, err := db.ListDeliveryAttempts(ctx, messageID)
@@ -118,16 +123,41 @@ func (db *DB) PersistDeliveryOutcome(ctx context.Context, in NewDeliveryAttempt,
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO delivery_attempts
-				(id, message_id, attempt_number, decision, kind, accepted, final_code, enhanced_status,
-				 remote_message, failure_stage, recipient, quit_error, mx_attempts, started_at, finished_at)
-			VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,0),NULLIF($8,''),NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),NULLIF($12,''),$13,$14,$15)`,
-			attemptID, in.MessageID, in.AttemptNumber, in.Decision, in.Kind, in.Accepted,
-			in.FinalCode, in.EnhancedStatus, in.RemoteMessage, in.FailureStage, in.Recipient,
-			in.QuitError, mxJSON, in.StartedAt, in.FinishedAt,
-		); err != nil {
-			return fmt.Errorf("database: insert delivery outcome attempt: %w", normalizeErr(err))
+		// The v0.39 transport-snapshot columns are only ever written when
+		// at least one is actually populated (i.e. a routing.Router ran).
+		// This keeps the common statement identical to the pre-v0.39 one —
+		// load-bearing for this package's migration-upgrade regression
+		// tests (see TestSuppressionMigrationUpgradesAndDowngradesExistingData
+		// and messages.go's InsertMessage, which documents the same
+		// pattern), which insert a delivery attempt with CURRENT Go code
+		// against a schema rolled back to the previous migration(s).
+		if in.SendingMemberID == "" && in.TransportKind == "" && in.EffectiveHostname == "" && in.EffectiveSourceIP == "" {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO delivery_attempts
+					(id, message_id, attempt_number, decision, kind, accepted, final_code, enhanced_status,
+					 remote_message, failure_stage, recipient, quit_error, mx_attempts, started_at, finished_at)
+				VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,0),NULLIF($8,''),NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),NULLIF($12,''),$13,$14,$15)`,
+				attemptID, in.MessageID, in.AttemptNumber, in.Decision, in.Kind, in.Accepted,
+				in.FinalCode, in.EnhancedStatus, in.RemoteMessage, in.FailureStage, in.Recipient,
+				in.QuitError, mxJSON, in.StartedAt, in.FinishedAt,
+			); err != nil {
+				return fmt.Errorf("database: insert delivery outcome attempt: %w", normalizeErr(err))
+			}
+		} else {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO delivery_attempts
+					(id, message_id, attempt_number, decision, kind, accepted, final_code, enhanced_status,
+					 remote_message, failure_stage, recipient, quit_error, mx_attempts, started_at, finished_at,
+					 sending_member_id, transport_kind, effective_hostname, effective_source_ip)
+				VALUES ($1,$2,$3,$4,$5,$6,NULLIF($7,0),NULLIF($8,''),NULLIF($9,''),NULLIF($10,''),NULLIF($11,''),NULLIF($12,''),$13,$14,$15,
+					NULLIF($16,''),NULLIF($17,''),NULLIF($18,''),NULLIF($19,'')::inet)`,
+				attemptID, in.MessageID, in.AttemptNumber, in.Decision, in.Kind, in.Accepted,
+				in.FinalCode, in.EnhancedStatus, in.RemoteMessage, in.FailureStage, in.Recipient,
+				in.QuitError, mxJSON, in.StartedAt, in.FinishedAt,
+				in.SendingMemberID, in.TransportKind, in.EffectiveHostname, in.EffectiveSourceIP,
+			); err != nil {
+				return fmt.Errorf("database: insert delivery outcome attempt: %w", normalizeErr(err))
+			}
 		}
 	}
 

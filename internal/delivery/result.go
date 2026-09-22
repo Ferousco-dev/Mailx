@@ -63,6 +63,20 @@ type Result struct {
 	QuitError      string
 	Attempts       []Attempt
 	MXCandidates   []dns.MX
+	// EffectiveHostname / EffectiveSourceIP (v0.39) are the outbound EHLO
+	// identity and dial-source IP actually used for this operation, set by
+	// a routing.Router when Request.MemberID selected a direct pool
+	// member. Both are empty on the legacy default-Engine path — Engine
+	// itself never sets them, only a Router wrapping several Engines does.
+	// Never a secret. Persisted verbatim as delivery_attempts' historical
+	// transport snapshot.
+	EffectiveHostname string
+	EffectiveSourceIP string
+	// EffectiveMemberID mirrors Request.MemberID when a routing.Router
+	// actually dispatched to that member (not on the legacy/fallback
+	// path), so the persistence layer can snapshot which member id was
+	// live for this specific attempt without re-deriving it.
+	EffectiveMemberID string
 }
 
 // Duration reports how long the delivery operation took.

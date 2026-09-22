@@ -18,7 +18,7 @@
     "DEF": 27,
     "CR": 24,
     "RSK": 40,
-    "DEC": 156,
+    "DEC": 161,
     "MET": 72,
     "ETH": 1
   },
@@ -34,10 +34,10 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.38",
-    "ilana_current_through": "v0.38",
+    "last_completed_milestone": "v0.39",
+    "ilana_current_through": "v0.39",
     "current_milestone": "none",
-    "current_milestone_status": "v0.38 complete",
-    "next_milestone": "v0.39 sending pools / routing (not started)"
+    "current_milestone_status": "v0.39 complete",
+    "next_milestone": "v0.40 BIMI brand indicators (not started)"
   }
 }

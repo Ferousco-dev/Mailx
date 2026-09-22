@@ -26,7 +26,10 @@ func main() {
 }
 
 const usage = "usage: mailx [list | migrate | inspect <mailx-id> | " +
-	"create-tenant | create-api-key | rotate-api-key | revoke-api-key | list-api-keys | check-smtp-identity]"
+	"create-tenant | create-api-key | rotate-api-key | revoke-api-key | list-api-keys | check-smtp-identity | " +
+	"create-sending-pool | list-sending-pools | enable-sending-pool | disable-sending-pool | " +
+	"create-sending-pool-member | list-sending-pool-members | enable-sending-pool-member | disable-sending-pool-member | " +
+	"assign-domain-pool]"
 
 func run(args []string, output io.Writer) error {
 	if len(args) == 0 {
@@ -63,6 +66,26 @@ func run(args []string, output io.Writer) error {
 		return cmdListAPIKeys(args[1:], output)
 	case "check-smtp-identity":
 		return cmdCheckSMTPIdentity(args[1:], output)
+	// v0.39 sending-pool operator commands — see sendingpools.go's package
+	// doc for why these are CLI-only, never a tenant-facing REST API.
+	case "create-sending-pool":
+		return cmdCreateSendingPool(args[1:], output)
+	case "list-sending-pools":
+		return cmdListSendingPools(args[1:], output)
+	case "enable-sending-pool":
+		return cmdSetSendingPoolEnabled(args[1:], output, true)
+	case "disable-sending-pool":
+		return cmdSetSendingPoolEnabled(args[1:], output, false)
+	case "create-sending-pool-member":
+		return cmdCreateSendingPoolMember(args[1:], output)
+	case "list-sending-pool-members":
+		return cmdListSendingPoolMembers(args[1:], output)
+	case "enable-sending-pool-member":
+		return cmdSetSendingPoolMemberEnabled(args[1:], output, true)
+	case "disable-sending-pool-member":
+		return cmdSetSendingPoolMemberEnabled(args[1:], output, false)
+	case "assign-domain-pool":
+		return cmdAssignDomainPool(args[1:], output)
 	}
 	return fmt.Errorf("unknown command %q; %s", args[0], usage)
 }

@@ -77,6 +77,15 @@ type Request struct {
 	Domain   string
 	Envelope mail.Envelope
 	Raw      string
+	// MemberID is the message's durable v0.39 sending-pool routing decision
+	// (messages.sending_member_id), empty on the legacy no-pool path. Engine
+	// itself ignores this field — it always dials with its own single
+	// configured identity — a routing.Router in front of several Engines is
+	// what actually interprets it to pick which Engine handles this Deliver
+	// call. It is carried on Request (rather than threaded separately)
+	// purely so the existing single-Deliverer worker/retry plumbing did not
+	// need a second parameter added everywhere.
+	MemberID string
 }
 
 // Engine performs one synchronous delivery operation per Deliver call.

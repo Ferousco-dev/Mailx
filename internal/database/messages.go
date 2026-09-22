@@ -154,11 +154,18 @@ func (db *DB) InsertMessage(ctx context.Context, in NewMessage) (Message, error)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	// sendingPoolID is the SenderDomain's operator-assigned pool, read under
+	// the SAME FOR SHARE lock as the verified-domain check below, so it
+	// reflects a domain state that cannot change out from under this
+	// transaction. Route selection (v0.39) piggybacks on this existing
+	// domain check rather than adding a second query, and runs in the same
+	// transaction as the message insert so the durable routing decision
+	// (messages.sending_member_id) and the message become visible together.
+	var sendingPoolID *string
 	if in.SenderDomain != "" {
-		var one int
-		err := tx.QueryRow(ctx, `SELECT 1 FROM domains
+		err := tx.QueryRow(ctx, `SELECT sending_pool_id FROM domains
 			WHERE tenant_id = $1 AND name = $2 AND deleted_at IS NULL AND verification_status = 'verified' FOR SHARE`,
-			in.TenantID, in.SenderDomain).Scan(&one)
+			in.TenantID, in.SenderDomain).Scan(&sendingPoolID)
 		if errors.Is(normalizeErr(err), ErrNotFound) {
 			return Message{}, ErrSenderNotAuthorized
 		}
@@ -166,15 +173,46 @@ func (db *DB) InsertMessage(ctx context.Context, in NewMessage) (Message, error)
 			return Message{}, fmt.Errorf("database: check sender domain: %w", normalizeErr(err))
 		}
 	}
+	sendingMemberID, err := selectRoutingMember(ctx, tx, in.ID, sendingPoolID)
+	if err != nil {
+		return Message{}, err
+	}
+	var sendingMemberArg *string
+	if sendingMemberID != "" {
+		sendingMemberArg = &sendingMemberID
+	}
 
 	var msg Message
-	err = tx.QueryRow(ctx, `
-		INSERT INTO messages (id, tenant_id, mail_from, from_header, subject, message_id_header, status, queued_at)
-		VALUES ($1, $2, $3, $4, $5, $6, 'queued', now())
-		RETURNING id, tenant_id, mail_from, from_header, subject, message_id_header, status, created_at, updated_at, queued_at, delivered_at`,
-		in.ID, in.TenantID, in.MailFrom, in.FromHeader, in.Subject, in.MessageIDHeader,
-	).Scan(&msg.ID, &msg.TenantID, &msg.MailFrom, &msg.FromHeader, &msg.Subject, &msg.MessageIDHeader,
-		&msg.Status, &msg.CreatedAt, &msg.UpdatedAt, &msg.QueuedAt, &msg.DeliveredAt)
+	if sendingMemberArg != nil {
+		// Only touch sending_member_id (migration 000023) when a route was
+		// actually selected. This keeps the common/legacy no-pool insert
+		// identical to the pre-v0.39 statement — load-bearing for this
+		// package's migration-upgrade regression tests (see
+		// TestWebhookMigrationUpgradesDurabilityPrerequisite and
+		// TestDeliveryOutcomeMigrationUpgradesV021Data), which roll a test
+		// schema back to the previous migration(s) and insert a message
+		// with CURRENT Go code before upgrading — exercising exactly the
+		// rolling-deploy window where new app code briefly runs against an
+		// older schema. A message can only ever get a non-nil member
+		// (below) via SenderDomain's pool assignment, which itself
+		// requires migration 000023's domains.sending_pool_id — so this
+		// branch is only reachable once that migration has actually run.
+		err = tx.QueryRow(ctx, `
+			INSERT INTO messages (id, tenant_id, mail_from, from_header, subject, message_id_header, status, queued_at, sending_member_id)
+			VALUES ($1, $2, $3, $4, $5, $6, 'queued', now(), $7)
+			RETURNING id, tenant_id, mail_from, from_header, subject, message_id_header, status, created_at, updated_at, queued_at, delivered_at`,
+			in.ID, in.TenantID, in.MailFrom, in.FromHeader, in.Subject, in.MessageIDHeader, sendingMemberArg,
+		).Scan(&msg.ID, &msg.TenantID, &msg.MailFrom, &msg.FromHeader, &msg.Subject, &msg.MessageIDHeader,
+			&msg.Status, &msg.CreatedAt, &msg.UpdatedAt, &msg.QueuedAt, &msg.DeliveredAt)
+	} else {
+		err = tx.QueryRow(ctx, `
+			INSERT INTO messages (id, tenant_id, mail_from, from_header, subject, message_id_header, status, queued_at)
+			VALUES ($1, $2, $3, $4, $5, $6, 'queued', now())
+			RETURNING id, tenant_id, mail_from, from_header, subject, message_id_header, status, created_at, updated_at, queued_at, delivered_at`,
+			in.ID, in.TenantID, in.MailFrom, in.FromHeader, in.Subject, in.MessageIDHeader,
+		).Scan(&msg.ID, &msg.TenantID, &msg.MailFrom, &msg.FromHeader, &msg.Subject, &msg.MessageIDHeader,
+			&msg.Status, &msg.CreatedAt, &msg.UpdatedAt, &msg.QueuedAt, &msg.DeliveredAt)
+	}
 	if err != nil {
 		return Message{}, fmt.Errorf("database: insert message: %w", normalizeErr(err))
 	}

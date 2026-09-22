@@ -29,6 +29,10 @@ var _ worker.SuppressionGate = databaseOutcomeStore{}
 // permits work in production.
 var _ worker.TenantLookup = databaseOutcomeStore{}
 
+// databaseOutcomeStore also enforces the v0.39 sending-pool member/pool
+// kill switch, so a disabled member cannot receive a new SMTP attempt.
+var _ worker.MemberRoutingGate = databaseOutcomeStore{}
+
 func (s databaseOutcomeStore) Load(ctx context.Context, messageID string) (worker.DurableDeliveryState, error) {
 	durable, err := s.db.LoadDeliveryState(ctx, messageID)
 	if err != nil {
@@ -56,7 +60,13 @@ func (s databaseOutcomeStore) Load(ctx context.Context, messageID string) (worke
 	}
 	return worker.DurableDeliveryState{
 		RetryState: state, Terminal: durable.Terminal(), NextRetryAt: durable.NextRetryAt,
+		SendingMemberID: durable.SendingMemberID,
 	}, nil
+}
+
+// MemberRoutingEnabled implements worker.MemberRoutingGate.
+func (s databaseOutcomeStore) MemberRoutingEnabled(ctx context.Context, memberID string) (bool, error) {
+	return s.db.MemberRoutingEnabled(ctx, memberID)
 }
 
 func (s databaseOutcomeStore) Persist(ctx context.Context, messageID string, attempt retry.DeliveryAttempt, outcome retry.Outcome) error {
@@ -82,6 +92,16 @@ func (s databaseOutcomeStore) Persist(ctx context.Context, messageID string, att
 		// not qualify (see suppression.QualifiesHardBounce).
 		SuppressRecipient: attempt.Decision == retry.TerminalFailure && result.Kind == delivery.KindTransferPermanent &&
 			suppression.QualifiesHardBounce(result.FailureStage, true, result.Accepted, result.FinalCode, result.EnhancedStatus, result.Recipient),
+		// v0.39 historical transport snapshot. TransportKind reuses
+		// Result.Transport ("direct"/"relay", already set by every Engine,
+		// legacy or per-member) so it is populated for every attempt.
+		// SendingMemberID/EffectiveHostname/EffectiveSourceIP are set only
+		// by routing.Router when it actually dispatched to a pool member,
+		// and stay empty on the legacy no-pool path.
+		SendingMemberID:   result.EffectiveMemberID,
+		TransportKind:     result.Transport,
+		EffectiveHostname: result.EffectiveHostname,
+		EffectiveSourceIP: result.EffectiveSourceIP,
 	}
 	for _, mx := range result.Attempts {
 		in.MXAttempts = append(in.MXAttempts, database.MXAttempt{
