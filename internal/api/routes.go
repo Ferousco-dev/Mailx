@@ -66,6 +66,7 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 
 	v1 := http.NewServeMux()
 	v1.HandleFunc("POST /v1/emails", requireScope(auth.ScopeEmailsSend)(h.handleSend))
+	v1.HandleFunc("POST /v1/emails/batch", requireScope(auth.ScopeEmailsSend)(h.handleSendBatch))
 	v1.HandleFunc("GET /v1/emails/{id}", requireScope(auth.ScopeEmailsRead)(h.handleGet))
 	v1.HandleFunc("GET /v1/emails", requireScope(auth.ScopeEmailsRead)(h.handleList))
 	v1.HandleFunc("POST /v1/domains", requireScope(auth.ScopeDomainsWrite)(domains.handleCreate))
