@@ -27,11 +27,15 @@ const (
 	// whether that was learned synchronously or later keeps the public
 	// vocabulary from growing needlessly.
 	EventComplained EventType = "complained"
+	// EventOpened/EventClicked (v0.43) are opt-in, unreliable-by-nature
+	// engagement signals — never treated as proof a human read a message.
+	EventOpened  EventType = "opened"
+	EventClicked EventType = "clicked"
 )
 
 func (e EventType) valid() bool {
 	switch e {
-	case EventQueued, EventDeliveryAttempted, EventDelivered, EventDeferred, EventBounced, EventFailed, EventSuppressed, EventComplained:
+	case EventQueued, EventDeliveryAttempted, EventDelivered, EventDeferred, EventBounced, EventFailed, EventSuppressed, EventComplained, EventOpened, EventClicked:
 		return true
 	}
 	return false
@@ -56,6 +60,10 @@ func PublicEventType(e EventType) (string, bool) {
 		return "email.suppressed", true
 	case EventComplained:
 		return "email.complained", true
+	case EventOpened:
+		return "email.opened", true
+	case EventClicked:
+		return "email.clicked", true
 	default:
 		return "", false
 	}
@@ -165,7 +173,7 @@ func (db *DB) listTenantEvents(ctx context.Context, tenantID string, limit int, 
 		FROM events
 		WHERE tenant_id = $1
 		  AND ($2::timestamptz IS NULL OR (occurred_at, id) < ($2, $3))
-		  AND (NOT $5 OR event_type IN ('queued','delivered','deferred','failed','bounced','suppressed','complained'))
+		  AND (NOT $5 OR event_type IN ('queued','delivered','deferred','failed','bounced','suppressed','complained','opened','clicked'))
 		ORDER BY occurred_at DESC, id DESC
 		LIMIT $4`,
 		tenantID, afterTime, afterID, limit, publicOnly,

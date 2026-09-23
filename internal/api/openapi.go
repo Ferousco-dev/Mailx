@@ -706,7 +706,9 @@ const openAPISpec = `{
           "text": {"type": "string"},
           "template_id": {"type": "string", "description": "Alternative to subject/html/text: renders the given template (must belong to this account) with 'variables' before building the message. Cannot be combined with subject/html/text (422 template_and_content_conflict)."},
           "variables": {"type": "object", "additionalProperties": {"type": "string"}, "description": "Substitution values for the template's {{name}} tokens; requires template_id (422 variables_without_template otherwise). At most 50 entries, 64-char keys, 4096-char values."},
-          "scheduled_at": {"type": "string", "format": "date-time", "nullable": true, "description": "RFC 3339. Omit to send immediately."}
+          "scheduled_at": {"type": "string", "format": "date-time", "nullable": true, "description": "RFC 3339. Omit to send immediately."},
+          "track_opens": {"type": "boolean", "default": false, "description": "Opt-in, off by default. Injects a tracking pixel into the HTML body. Opens are an unreliable signal (image proxies, privacy features, scanners) — never proof a human read the message. No-op if the server has no tracking secret configured or the message has no HTML body."},
+          "track_clicks": {"type": "boolean", "default": false, "description": "Opt-in, off by default. Rewrites HTTP(S) links in the HTML body to route through a signed redirect; links containing 'unsubscribe' are never rewritten. No-op if the server has no tracking secret configured or the message has no HTML body."}
         },
         "additionalProperties": false
       },

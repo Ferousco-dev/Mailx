@@ -55,7 +55,9 @@ type Config struct {
 	// BIMI gives sender-side BIMI (brand indicator) readiness. Optional: nil
 	// makes the BIMI endpoints answer 503 and changes nothing else (sending
 	// never consults it).
-	BIMI *bimi.Service
+	BIMI            *bimi.Service
+	TrackingSecret  []byte
+	TrackingBaseURL string
 	// MessageIDDomain is the domain used in generated Message-IDs: MailX's public
 	// SMTP hostname when configured. Empty keeps the local development default.
 	MessageIDDomain string
@@ -131,11 +133,17 @@ func NewServer(cfg Config) (*Server, error) {
 		return cfg.Ready(ctx)
 	}
 	h.abuse = cfg.Abuse
+	h.trackingSecret = cfg.TrackingSecret
+	h.trackingBaseURL = cfg.TrackingBaseURL
 	var fbHandler *feedbackHandler
 	if cfg.Feedback != nil {
 		fbHandler = &feedbackHandler{db: cfg.DB, correlator: cfg.Feedback.Correlator, ingestToken: cfg.Feedback.IngestToken, now: func() time.Time { return time.Now().UTC() }}
 	}
-	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, bimi: cfg.BIMI, metrics: cfg.Metrics, feedback: fbHandler})
+	var trackH *trackHandler
+	if len(cfg.TrackingSecret) > 0 {
+		trackH = &trackHandler{db: cfg.DB, secret: cfg.TrackingSecret}
+	}
+	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, bimi: cfg.BIMI, metrics: cfg.Metrics, feedback: fbHandler, track: trackH})
 	log := cfg.Logger
 	if log == nil {
 		log = observability.Discard()

@@ -55,7 +55,9 @@ type emailHandler struct {
 	// batchProcessingBudget's doc. A field (defaulted in newEmailHandler,
 	// like now above) rather than a bare constant so tests can exercise
 	// the timeout path deterministically without a real multi-second wait.
-	batchBudget time.Duration
+	batchBudget     time.Duration
+	trackingSecret  []byte
+	trackingBaseURL string
 }
 
 // recipientLimit is the per-message recipient cap: the abuse policy's value when
@@ -191,6 +193,17 @@ func (h *emailHandler) acceptOne(ctx context.Context, tenantID string, req sendE
 			return email{}, false, terr
 		}
 		subject, text, html = rendered.Subject, rendered.Text, rendered.HTML
+	}
+	if req.TrackOpens || req.TrackClicks {
+		primary := ""
+		if len(req.To) > 0 {
+			primary = req.To[0]
+		}
+		tracked, terr := h.injectTracking(tenantID, id, primary, html, req.TrackOpens, req.TrackClicks)
+		if terr != nil {
+			return email{}, false, newError(ErrInternal, "internal_error", "failed to inject tracking")
+		}
+		html = tracked
 	}
 
 	// req itself (never subject/text/html above) is what idempotency.Fingerprint

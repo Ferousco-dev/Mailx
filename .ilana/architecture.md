@@ -449,3 +449,12 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 - `internal/smtp.Config.RequireAuth`/`Authenticator`: AUTH PLAIN only, inline form; MAIL FROM refused (530) until authenticated (DEC-182). Authenticator wraps `auth.Service.Authenticate` + an `emails:send` scope check.
 - `api.SubmissionAcceptor` (`internal/api/submission.go`) wraps the unexported `emailHandler.acceptOne` so submitted mail goes through the IDENTICAL pipeline `POST /v1/emails` uses — no second accept path (DEC-183).
 - Verified end-to-end with a real TLS SMTP client before commit, not just unit tests (DEC-184's bug — disabled-receiver-crashes-server — was only caught this way).
+
+## Open & Link Tracking (v0.43; design decisions DEC-185..189)
+
+- Opt-in per send (`track_opens`/`track_clicks`, off by default), reusing the existing `events` table with two new types (`opened`,`clicked`, migration 000024) — no new aggregate table, consistent with v0.38's posture and v0.38's own deliberate deferral reasoning (DEC-155).
+- No durable per-link table: `internal/tracking` issues self-contained HMAC-signed tokens (tenant/message/recipient/URL) via `MAILX_TRACKING_SECRET`; the click redirect can never be an open redirect since MailX itself signed the exact destination at send time (DEC-186). Unconfigured (`MAILX_TRACKING_SECRET`/`MAILX_TRACKING_BASE_URL` unset) silently no-ops rather than producing broken links.
+- `emailHandler.injectTracking` (regexp-based `href` rewrite + pixel append) runs in `acceptOne` after template rendering, before `outbound.Build`/DKIM signing — so the tracked HTML is what actually gets signed and sent. Links containing "unsubscribe" are never rewritten (DEC-187; MailX has no unsubscribe-link feature yet to special-case further).
+- `GET /track/open/{token}` (1x1 GIF) and `GET /track/click/{token}` (302) are PUBLIC routes (outside `/v1`, no auth), registered only when a tracking secret is configured.
+- Attribution uses `req.To[0]` only — MailX's regular send path shares one rendered body across all RCPT, so true per-recipient attribution isn't resolvable without per-recipient rendering (DEC-188).
+- Deferred: webhook subscription-side `email.opened`/`email.clicked` support (DEC-189), template-level tracking defaults, HTML-parser-based (vs regexp) link rewriting.

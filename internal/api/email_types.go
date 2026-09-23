@@ -37,6 +37,8 @@ type sendEmailRequest struct {
 	TemplateID  string            `json:"template_id"`
 	Variables   map[string]string `json:"variables"`
 	ScheduledAt *string           `json:"scheduled_at"` // RFC 3339; nil/absent = send now
+	TrackOpens  bool              `json:"track_opens"`
+	TrackClicks bool              `json:"track_clicks"`
 }
 
 func (req sendEmailRequest) validate(now time.Time, maxRecipients int) (scheduledAt time.Time, err *apiError) {
