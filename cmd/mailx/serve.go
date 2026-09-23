@@ -139,6 +139,9 @@ func runFull() error {
 
 	components := []component{
 		o.logged("smtp", func(ctx context.Context) error { return runSMTPReceiver(ctx, store, o) }),
+		o.logged("submission", func(ctx context.Context) error {
+			return runSubmissionReceiver(ctx, db, store, dkimSvc, abuse.apiControls(o), authSvc, ident.Name(), o)
+		}),
 		o.logged("dispatch", disp.Run),
 		o.logged("worker", pool.Run),
 		o.logged("broadcast-expansion", expander.Run),

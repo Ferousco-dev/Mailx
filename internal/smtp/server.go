@@ -3,6 +3,7 @@ package smtp
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net"
@@ -31,9 +32,11 @@ type dataReadResult struct {
 
 type Session struct {
 	// ID is a process-local random session identifier for log correlation.
-	ID       string
-	state    state
-	Envelope mail.Envelope
+	ID            string
+	state         state
+	Envelope      mail.Envelope
+	Authenticated bool
+	TenantID      string
 }
 
 func (s *Session) resetTransaction() {
@@ -116,7 +119,11 @@ func (c *connection) serve(sink func(Session, mail.Message) error) error {
 			s.resetTransaction()
 			s.state = greeted
 			if cmd == "EHLO" {
-				err = c.reply(multilineReply(250, "localhost", "ENHANCEDSTATUSCODES"))
+				if c.config.RequireAuth {
+					err = c.reply(multilineReply(250, "localhost", "ENHANCEDSTATUSCODES", "AUTH PLAIN"))
+				} else {
+					err = c.reply(multilineReply(250, "localhost", "ENHANCEDSTATUSCODES"))
+				}
 			} else {
 				err = c.reply(standardReply(250, "localhost"))
 			}
@@ -133,7 +140,39 @@ func (c *connection) serve(sink func(Session, mail.Message) error) error {
 			}
 			s.resetTransaction()
 			err = c.reply(enhancedReply(250, statusOtherSuccess, "OK"))
+		case "AUTH":
+			if !hasArgument {
+				err = c.reply(enhancedReply(501, statusInvalidArguments, "Syntax: AUTH PLAIN <response>"))
+				break
+			}
+			mech, resp, _ := strings.Cut(arg, " ")
+			if !strings.EqualFold(mech, "PLAIN") || resp == "" {
+				err = c.reply(enhancedReply(504, statusInvalidCommand, "Unrecognized authentication mechanism"))
+				break
+			}
+			raw, decErr := base64.StdEncoding.DecodeString(resp)
+			parts := bytes.SplitN(raw, []byte{0}, 3)
+			if decErr != nil || len(parts) != 3 {
+				err = c.reply(enhancedReply(501, statusInvalidArguments, "Invalid AUTH PLAIN response"))
+				break
+			}
+			if c.config.Authenticator == nil {
+				err = c.reply(enhancedReply(535, statusInvalidCommand, "Authentication not available"))
+				break
+			}
+			tenantID, ok := c.config.Authenticator(string(parts[1]), string(parts[2]))
+			if !ok {
+				err = c.reply(enhancedReply(535, statusInvalidCommand, "Authentication credentials invalid"))
+				break
+			}
+			s.Authenticated = true
+			s.TenantID = tenantID
+			err = c.reply(enhancedReply(235, statusOtherSuccess, "Authentication successful"))
 		case "MAIL":
+			if c.config.RequireAuth && !s.Authenticated {
+				err = c.reply(enhancedReply(530, statusInvalidCommand, "Authentication required"))
+				break
+			}
 			path, valid := parsePathArgument(arg, hasArgument, "FROM", true)
 			if !valid {
 				err = c.reply(enhancedReply(501, statusInvalidArguments, "Syntax: MAIL FROM:<address>"))
@@ -384,7 +423,7 @@ func command(line string) (verb, argument string, hasArgument, valid bool) {
 
 func isKnownCommand(command string) bool {
 	switch command {
-	case "EHLO", "HELO", "MAIL", "RCPT", "DATA", "RSET", "NOOP", "QUIT":
+	case "EHLO", "HELO", "MAIL", "RCPT", "DATA", "RSET", "NOOP", "QUIT", "AUTH":
 		return true
 	default:
 		return false

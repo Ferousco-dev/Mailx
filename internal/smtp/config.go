@@ -35,6 +35,10 @@ type Config struct {
 	MaxRecipients int
 	// Observer receives session events; nil disables observation.
 	Observer Observer
+	// RequireAuth, when true, rejects MAIL FROM until AUTH succeeds.
+	RequireAuth bool
+	// Authenticator verifies user/pass and returns the owning tenant id.
+	Authenticator func(user, pass string) (tenantID string, ok bool)
 }
 
 func DefaultConfig() Config {
