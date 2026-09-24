@@ -120,6 +120,7 @@ func runFull() error {
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
 		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, BIMI: bimiSvc, MessageIDDomain: ident.Name(), Abuse: abuse.apiControls(o),
+		TrackingSecret: trackingSecret(), TrackingBaseURL: os.Getenv("MAILX_TRACKING_BASE_URL"),
 		Feedback: fbCfg,
 		Ready:    ready.Check,
 		Logger:   o.log, Metrics: o.metrics,
@@ -139,6 +140,9 @@ func runFull() error {
 
 	components := []component{
 		o.logged("smtp", func(ctx context.Context) error { return runSMTPReceiver(ctx, store, o) }),
+		o.logged("submission", func(ctx context.Context) error {
+			return runSubmissionReceiver(ctx, db, store, dkimSvc, abuse.apiControls(o), authSvc, ident.Name(), o)
+		}),
 		o.logged("dispatch", disp.Run),
 		o.logged("worker", pool.Run),
 		o.logged("broadcast-expansion", expander.Run),
@@ -285,6 +289,13 @@ func apiKeyPepper() []byte {
 		return []byte(p)
 	}
 	slog.Warn("api_key_pepper_not_set", "detail", "API key verifiers are unkeyed SHA-256; fine for local development, set MAILX_API_KEY_PEPPER before handling real credentials")
+	return nil
+}
+
+func trackingSecret() []byte {
+	if s := os.Getenv("MAILX_TRACKING_SECRET"); s != "" {
+		return []byte(s)
+	}
 	return nil
 }
 

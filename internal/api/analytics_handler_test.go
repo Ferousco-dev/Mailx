@@ -184,3 +184,80 @@ func TestAnalyticsBroadcastReturnsSnapshotCounts(t *testing.T) {
 		t.Fatalf("%+v", resp)
 	}
 }
+
+func TestAnalyticsOverviewIncludesRates(t *testing.T) {
+	a := newDKIMAPI(t)
+	ac, _ := a.scopedActor("acme", auth.ScopeEmailsSend, auth.ScopeAnalyticsRead)
+	verifyTestDomain(t, a.db, ac.tenant.ID, "example.com")
+	sendRec := doJSON(t, ac.h, "POST", "/v1/emails", map[string]any{
+		"from": "a@example.com", "to": []string{"b@example.com"}, "text": "hi",
+	})
+	if sendRec.Code != http.StatusAccepted {
+		t.Fatal(sendRec.Body.String())
+	}
+	now := time.Now().UTC()
+	rec := doJSON(t, ac.h, "GET",
+		"/v1/analytics/overview?from="+now.Add(-time.Hour).Format(time.RFC3339)+"&to="+now.Add(time.Hour).Format(time.RFC3339), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	var resp analyticsOverviewResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Counts.Queued != 1 {
+		t.Fatalf("expected 1 queued fact from the real send, got %+v", resp.Counts)
+	}
+	// Rates must never divide by zero and must be derivable from counts.
+	if resp.Rates.DeliveryRate < 0 || resp.Rates.DeliveryRate > 1 {
+		t.Fatalf("delivery_rate out of [0,1]: %+v", resp.Rates)
+	}
+}
+
+func TestAnalyticsDomainsRequiresScope(t *testing.T) {
+	a := newDKIMAPI(t)
+	noScope, _ := a.scopedActor("acme", auth.ScopeEmailsRead)
+	now := time.Now().UTC()
+	rec := doJSON(t, noScope.h, "GET",
+		"/v1/analytics/domains?from="+now.Add(-time.Hour).Format(time.RFC3339)+"&to="+now.Format(time.RFC3339), nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAnalyticsDomainsMissingRangeRejected(t *testing.T) {
+	a := newDKIMAPI(t)
+	ac, _ := a.scopedActor("acme", auth.ScopeAnalyticsRead)
+	if rec := doJSON(t, ac.h, "GET", "/v1/analytics/domains", nil); rec.Code != 422 {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAnalyticsDomainsGroupsRealSendByDomain(t *testing.T) {
+	a := newDKIMAPI(t)
+	ac, _ := a.scopedActor("acme", auth.ScopeEmailsSend, auth.ScopeAnalyticsRead)
+	verifyTestDomain(t, a.db, ac.tenant.ID, "example.com")
+	sendRec := doJSON(t, ac.h, "POST", "/v1/emails", map[string]any{
+		"from": "a@example.com", "to": []string{"b@example.com"}, "text": "hi",
+	})
+	if sendRec.Code != http.StatusAccepted {
+		t.Fatal(sendRec.Body.String())
+	}
+	now := time.Now().UTC()
+	rec := doJSON(t, ac.h, "GET",
+		"/v1/analytics/domains?from="+now.Add(-time.Hour).Format(time.RFC3339)+"&to="+now.Add(time.Hour).Format(time.RFC3339), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	var resp []domainBreakdownResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, d := range resp {
+		if d.Domain == "example.com" && d.Total >= 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected example.com in domain breakdown, got %+v", resp)
+	}
+}

@@ -1,0 +1,47 @@
+name: SDK Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Package and release SDKs
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Package SDKs
+        run: |
+          mkdir -p dist
+          for sdk in node python go php ruby; do
+            if [ -d "sdk/$sdk" ]; then
+              tar -czf "dist/mailx-sdk-$sdk.tar.gz" -C sdk "$sdk"
+            fi
+          done
+
+      - name: Compute tag
+        id: tag
+        run: echo "tag=sdk-$(date -u +%Y.%m.%d)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: MailX SDKs ${{ steps.tag.outputs.tag }}
+          files: dist/*.tar.gz
+          body: |
+            **⚠️ Under active development.** These SDKs (Node, Python, Go, PHP, Ruby) are not
+            yet stable — APIs may change without notice and none are published to a package
+            registry (npm/PyPI/pkg.go.dev/Packagist/RubyGems) yet. This release is an automatic
+            snapshot of `sdk/` built from every merge to `main`, not a versioned, supported
+            release.
+
+            Commit: ${{ github.sha }}

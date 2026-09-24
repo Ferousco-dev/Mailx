@@ -25,6 +25,7 @@ type routeServices struct {
 	metrics  *observability.Metrics
 	abuse    *AbuseControls
 	feedback *feedbackHandler // nil disables the ingestion route
+	track    *trackHandler    // nil disables /track routes
 }
 
 // newMux registers every /v1 route plus health checks. Handlers stay
@@ -93,6 +94,7 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("GET /v1/analytics/overview", requireScope(auth.ScopeAnalyticsRead)(analytics.handleOverview))
 	v1.HandleFunc("GET /v1/analytics/timeseries", requireScope(auth.ScopeAnalyticsRead)(analytics.handleTimeseries))
 	v1.HandleFunc("GET /v1/analytics/broadcasts/{id}", requireScope(auth.ScopeAnalyticsRead)(analytics.handleBroadcast))
+	v1.HandleFunc("GET /v1/analytics/domains", requireScope(auth.ScopeAnalyticsRead)(analytics.handleDomains))
 
 	audiences := &audienceHandler{db: h.db}
 	v1.HandleFunc("POST /v1/audiences", requireScope(auth.ScopeAudiencesWrite)(audiences.handleCreate))
@@ -162,6 +164,10 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		// operator-only feedback ingestion boundary (see feedback_handler.go),
 		// not a tenant-facing route.
 		mux.HandleFunc("POST /internal/feedback", extras[0].feedback.handleIngest)
+	}
+	if len(extras) > 0 && extras[0].track != nil {
+		mux.HandleFunc("GET /track/open/{token}", extras[0].track.handleOpen)
+		mux.HandleFunc("GET /track/click/{token}", extras[0].track.handleClick)
 	}
 	mux.HandleFunc("GET /openapi.json", serveOpenAPI)
 	mux.HandleFunc("GET /docs", serveDocs)

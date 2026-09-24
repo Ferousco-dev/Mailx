@@ -72,7 +72,7 @@ Auth: `Authorization: Bearer mx_<key_id>_<secret>` (not a JWT). Scopes: `emails:
 Operator listener (`MAILX_OBSERVABILITY_ADDR`, default `:9090`, separate from the API): `GET /metrics`, `/health/live` (no dependency calls), `/health/ready`; no `/v1`.
 Routes: `POST /v1/emails`, `GET /v1/emails[/{id}]`, `/v1/domains` (+`/{id}`, `/{id}/verify`, DELETE), `/v1/webhooks` (+`/{id}`, `/{id}/rotate-secret`, `/{id}/deliveries`, DELETE), `GET /v1/events`, `GET /v1/domains/{id}/dkim` (+POST, `/verify`), `GET /v1/domains/{id}/spf`, `POST /v1/domains/{id}/spf/verify`, `GET /v1/domains/{id}/dmarc`, `POST /v1/domains/{id}/dmarc/verify`, `POST|GET /v1/suppressions`, `GET|DELETE /v1/suppressions/{id}`.
 `POST /v1/emails` in v0.22: text/html body, to/cc/bcc, reply-to; **all recipients must share one domain (422 `mixed_recipient_domains`)**; attachments/tags/custom headers deferred.
-OpenAPI is hand-written (`internal/api/openapi.go`) and guarded by a runtime drift test: API changes must update it.
+OpenAPI is hand-written (`internal/api/openapi.go`) and guarded by a runtime drift test: API changes must update it. As of DEC-196 the spec carries `tags` (13 resource groups) + `operationId` on every operation, and `info.contact`/`info.license` + two `servers` entries (production + self-hosted relative) — a company-standard, Swagger-UI-groupable contract, not just a flat route dump. `/docs` (Swagger UI at `internal/api/openapi.go`'s `docsPage`, CDN-served, dev-only) has deep linking, persisted auth, and a tag/operation filter box enabled.
 
 ## Database (PostgreSQL 16; migrations 000001-000014; forward-only fixes, applied migrations never edited)
 
@@ -442,3 +442,37 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 - Deferred/out of scope: no batch-level transaction/atomicity option, no per-tenant/per-plan batch-size tuning (no plan/tier concept exists yet in this codebase), no async/webhook-only batch result delivery (the full result set is always returned synchronously in the 202 body).
 - Request-rate-limit charge is proportional to batch size (DEC-179, PR #19 review): `requestLimitMiddleware` charges Cost:1 per HTTP request regardless of body size, which let one token buy up to 100x the DKIM/DB work of a normal send. `handleSendBatch` now charges the SAME tenant/API-key request buckets the remaining `N-1` tokens BEFORE any per-item work runs; a refusal rejects the whole batch (429) with zero items touched. A single-item batch charges nothing extra.
 - Batch-wide processing deadline (DEC-180, PR #19 review): `pollIdempotencyCompletion` can block up to 5s per item on an in-progress key; sequential across up to 100 items this could exceed `writeTimeout` (15s) and silently drop unprocessed items when the connection closes. `emailHandler.batchBudget` (defaulted to 10s, a field like `now` so tests can inject a near-zero budget deterministically) bounds the whole loop; once spent, remaining items get an explicit `batch_processing_timeout` result rather than being attempted or silently dropped.
+
+## SMTP Submission (v0.42; design decisions DEC-181..184)
+
+- `cmd/mailx/submission.go`'s `runSubmissionReceiver`: implicit-TLS listener (`crypto/tls.Listen`), disabled unless `MAILX_SUBMISSION_ADDR`+`MAILX_SUBMISSION_TLS_CERT`+`MAILX_SUBMISSION_TLS_KEY` are all set (DEC-181). Distinct from the pre-existing unauthenticated dev-receiver on port 2525 (`runSMTPReceiver`), which is untouched.
+- `internal/smtp.Config.RequireAuth`/`Authenticator`: AUTH PLAIN only, inline form; MAIL FROM refused (530) until authenticated (DEC-182). Authenticator wraps `auth.Service.Authenticate` + an `emails:send` scope check.
+- `api.SubmissionAcceptor` (`internal/api/submission.go`) wraps the unexported `emailHandler.acceptOne` so submitted mail goes through the IDENTICAL pipeline `POST /v1/emails` uses — no second accept path (DEC-183).
+- Verified end-to-end with a real TLS SMTP client before commit, not just unit tests (DEC-184's bug — disabled-receiver-crashes-server — was only caught this way).
+
+## Open & Link Tracking (v0.43; design decisions DEC-185..189)
+
+- Opt-in per send (`track_opens`/`track_clicks`, off by default), reusing the existing `events` table with two new types (`opened`,`clicked`, migration 000024) — no new aggregate table, consistent with v0.38's posture and v0.38's own deliberate deferral reasoning (DEC-155).
+- No durable per-link table: `internal/tracking` issues self-contained HMAC-signed tokens (tenant/message/recipient/URL) via `MAILX_TRACKING_SECRET`; the click redirect can never be an open redirect since MailX itself signed the exact destination at send time (DEC-186). Unconfigured (`MAILX_TRACKING_SECRET`/`MAILX_TRACKING_BASE_URL` unset) silently no-ops rather than producing broken links.
+- `emailHandler.injectTracking` (regexp-based `href` rewrite + pixel append) runs in `acceptOne` after template rendering, before `outbound.Build`/DKIM signing — so the tracked HTML is what actually gets signed and sent. Links containing "unsubscribe" are never rewritten (DEC-187; MailX has no unsubscribe-link feature yet to special-case further).
+- `GET /track/open/{token}` (1x1 GIF) and `GET /track/click/{token}` (302) are PUBLIC routes (outside `/v1`, no auth), registered only when a tracking secret is configured.
+- Attribution uses `req.To[0]` only — MailX's regular send path shares one rendered body across all RCPT, so true per-recipient attribution isn't resolvable without per-recipient rendering (DEC-188).
+- Deferred: webhook subscription-side `email.opened`/`email.clicked` support (DEC-189), template-level tracking defaults, HTML-parser-based (vs regexp) link rewriting.
+
+## Deliverability Insights (v0.45; design decision DEC-195)
+
+- Pure extension of v0.38's read-only analytics layer (`internal/database/analytics.go`, `internal/api/analytics_handler.go`) — no new tables, no new writes, no new event types.
+- `AnalyticsCounts` (shared by overview and timeseries) gained `Opened`/`Clicked`, sourced from v0.43's existing `opened`/`clicked` event types.
+- `GET /v1/analytics/overview` response gained a `rates` object (`delivery_rate`, `bounce_rate`, `failure_rate`, `complaint_rate`, `open_rate`, `click_rate`), server-computed as count/`queued` (queued is the only stable denominator — see the non-mutually-exclusive-facts doc in analytics.go). All-zero when `queued` is 0.
+- New `GET /v1/analytics/domains?from=&to=` — `database.DomainBreakdown` groups CURRENT `recipients.status` (not the historical events stream) by recipient email domain, joined through `messages` for tenant scope and filtered by `recipients.created_at`. Ordered by total desc, capped at 50 rows (`AnalyticsMaxDomains`). Domain extraction trims a trailing `>` since real recipient rows are stored in raw `<addr>` header form.
+
+## Official SDKs (v0.44; design decisions DEC-190..194)
+
+- `sdk/node` (TypeScript, `@mailx/sdk`), `sdk/python` (`mailx_sdk`), `sdk/go` (Go module `github.com/Ferousco-dev/mailx-go`), `sdk/php` (Composer package `mailx/sdk`), and `sdk/ruby` (gem `mailx-sdk`) — all separate from the main Go module, zero coupling to `internal/`. Thin clients: generic request core (auth header, JSON, retry on 429/5xx honoring `Retry-After`), typed method per OpenAPI resource.
+- Go SDK specifics: functional options (`WithBaseURL`, `WithHTTPClient`, `WithMaxRetries`), `context.Context` first-param on every method, `*APIError` on failure. Same fully-typed/loose-JSON split as Node/Python (`SendEmail`/`SendBatch`/`GetEmail`/`ListEmails` typed; rest return `mailx.JSON`).
+- PHP/Ruby specifics: every method takes/returns a plain associative array (PHP) or hash (Ruby) mirroring OpenAPI field names — no hand-typed request/response classes for any resource, including email send (unlike Node/Python/Go's core-typed methods), since PHP/Ruby callers get less value from static structs. PHP's `Client` takes an injectable `Transport` (default `CurlTransport`); Ruby's `Client` takes an injectable `http_client` callable. Both used for test isolation, not runtime configuration.
+- Release automation: `.github/workflows/sdk-release.yml` tars every `sdk/<lang>` dir and publishes a GitHub Release on each push to `main`, explicitly labeled "under active development" — no package-registry publishing (npm/PyPI/pkg.go.dev/Packagist/RubyGems) yet.
+- Core send/batch/get/list email methods are fully typed against `internal/api`'s `SendEmailRequest`/`Email`/`BatchSendRequest`/`BatchSendResponse`; every other resource has a typed signature with a loosely-typed body/result (see each SDK's README for the exact-shape reference: `GET /openapi.json`).
+- React Email: no SDK code — `@react-email/render`'s output is already the `html`/`text` shape `sendEmail` accepts (documented pattern only).
+- Both SDKs have unit tests (fake HTTP layer: request shape, auth header, 429-retry-then-succeed, error mapping) and a gated contract test (`MAILX_SDK_TEST_BASE_URL`/`_API_KEY`) that runs against a real server when configured, skips cleanly otherwise.
+- Go server side confirmed untouched (`git status` outside `sdk/` was empty before commit).

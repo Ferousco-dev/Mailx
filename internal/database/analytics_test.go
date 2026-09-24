@@ -293,3 +293,155 @@ func TestAnalyticsHotQueriesUseIndexes(t *testing.T) {
 	}
 	t.Logf("overview plan:\n%s\ntimeseries plan:\n%s", overviewPlan, tsPlan)
 }
+
+// TestDomainBreakdownUsesIndex mirrors TestAnalyticsHotQueriesUseIndexes for
+// the domains query: it filters messages.created_at (not
+// recipients.created_at, which has no supporting index — see
+// DomainBreakdown's doc), so it must use idx_messages_tenant_created, not a
+// sequential scan of either table.
+func TestDomainBreakdownUsesIndex(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+
+	base := time.Now().UTC().Add(-90 * 24 * time.Hour)
+	const n = 2000
+	const recent = 5 // kept inside the query window; the rest are backdated
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		id, err := newID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := NewMessage{
+			ID: id, TenantID: tn.ID, MailFrom: "<sender@example.com>",
+			FromHeader: "Sender <sender@example.com>", Subject: "hi",
+			MessageIDHeader: "<" + id + "@example.com>",
+			Recipients:      []RecipientInput{{Address: "user@acme.com", HeaderKind: strPtr("to")}},
+		}
+		if _, err := db.InsertMessage(ctx, msg); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	// Backdate all but the last `recent` messages 90 days into the past, so
+	// the 24h query window below is genuinely SELECTIVE (~0.25% of the
+	// table) - same rationale as the events scale test above: querying
+	// nearly 100% of a table correctly prefers a sequential scan, so the
+	// plan must be judged at realistic selectivity.
+	if _, err := db.pool.Exec(ctx,
+		`UPDATE messages SET created_at = $1 WHERE tenant_id = $2 AND id = ANY($3)`,
+		base, tn.ID, ids[:n-recent]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx, `ANALYZE messages`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx, `ANALYZE recipients`); err != nil {
+		t.Fatal(err)
+	}
+
+	to := time.Now().UTC()
+	from := to.Add(-24 * time.Hour)
+	plan := explainAnalyze(t, db, `
+		SELECT
+			lower(trim(trailing '>' from split_part(r.address, '@', 2))) AS domain,
+			count(*) AS total,
+			count(*) FILTER (WHERE r.status = 'delivered')  AS delivered,
+			count(*) FILTER (WHERE r.status = 'failed')     AS failed,
+			count(*) FILTER (WHERE r.status = 'suppressed') AS suppressed,
+			count(*) FILTER (WHERE r.status = 'pending')    AS pending
+		FROM recipients r
+		JOIN messages m ON m.id = r.message_id
+		WHERE m.tenant_id = $1 AND m.created_at >= $2 AND m.created_at < $3
+		GROUP BY domain
+		ORDER BY total DESC
+		LIMIT $4`, tn.ID, from, to, AnalyticsMaxDomains)
+	if strings.Contains(plan, "Seq Scan on messages") {
+		t.Fatalf("domain breakdown sequentially scans messages at %d rows:\n%s", n, plan)
+	}
+	t.Logf("domain breakdown plan:\n%s", plan)
+}
+
+func TestAnalyticsOverviewIncludesOpenedAndClicked(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+	msg, err := db.InsertMessage(ctx, sampleNewMessage(t, tn.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	insertEvent(t, db, tn.ID, msg.ID, EventQueued, base)
+	insertEvent(t, db, tn.ID, msg.ID, EventOpened, base.Add(time.Minute))
+	insertEvent(t, db, tn.ID, msg.ID, EventClicked, base.Add(2*time.Minute))
+
+	out, err := db.AnalyticsOverview(ctx, tn.ID, base.Add(-time.Minute), base.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Counts.Opened != 1 || out.Counts.Clicked != 1 {
+		t.Fatalf("expected opened=1 clicked=1, got %+v", out.Counts)
+	}
+}
+
+func TestDomainBreakdownGroupsByRecipientDomain(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+
+	newMsg := func(addr string) NewMessage {
+		id, err := newID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return NewMessage{
+			ID: id, TenantID: tn.ID, MailFrom: "<sender@example.com>",
+			FromHeader: "Sender <sender@example.com>", Subject: "hi",
+			MessageIDHeader: "<" + id + "@example.com>",
+			Recipients:      []RecipientInput{{Address: addr, HeaderKind: strPtr("to")}},
+		}
+	}
+
+	m1, err := db.InsertMessage(ctx, newMsg("bob@acme.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := db.InsertMessage(ctx, newMsg("carol@acme.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m3, err := db.InsertMessage(ctx, newMsg("dave@other.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.UpdateRecipientStatuses(ctx, m1.ID, []RecipientStatusUpdate{{Address: "bob@acme.com", Status: RecipientDelivered}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateRecipientStatuses(ctx, m2.ID, []RecipientStatusUpdate{{Address: "carol@acme.com", Status: RecipientFailed}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateRecipientStatuses(ctx, m3.ID, []RecipientStatusUpdate{{Address: "dave@other.com", Status: RecipientDelivered}}); err != nil {
+		t.Fatal(err)
+	}
+
+	from := time.Now().Add(-time.Hour)
+	to := time.Now().Add(time.Hour)
+	rows, err := db.DomainBreakdown(ctx, tn.ID, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byDomain := map[string]DomainBreakdown{}
+	for _, r := range rows {
+		byDomain[r.Domain] = r
+	}
+	acme, ok := byDomain["acme.com"]
+	if !ok || acme.Total != 2 || acme.Delivered != 1 || acme.Failed != 1 {
+		t.Fatalf("unexpected acme.com breakdown: %+v (ok=%v)", acme, ok)
+	}
+	other, ok := byDomain["other.com"]
+	if !ok || other.Total != 1 || other.Delivered != 1 {
+		t.Fatalf("unexpected other.com breakdown: %+v (ok=%v)", other, ok)
+	}
+}
