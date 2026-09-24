@@ -72,7 +72,7 @@ Auth: `Authorization: Bearer mx_<key_id>_<secret>` (not a JWT). Scopes: `emails:
 Operator listener (`MAILX_OBSERVABILITY_ADDR`, default `:9090`, separate from the API): `GET /metrics`, `/health/live` (no dependency calls), `/health/ready`; no `/v1`.
 Routes: `POST /v1/emails`, `GET /v1/emails[/{id}]`, `/v1/domains` (+`/{id}`, `/{id}/verify`, DELETE), `/v1/webhooks` (+`/{id}`, `/{id}/rotate-secret`, `/{id}/deliveries`, DELETE), `GET /v1/events`, `GET /v1/domains/{id}/dkim` (+POST, `/verify`), `GET /v1/domains/{id}/spf`, `POST /v1/domains/{id}/spf/verify`, `GET /v1/domains/{id}/dmarc`, `POST /v1/domains/{id}/dmarc/verify`, `POST|GET /v1/suppressions`, `GET|DELETE /v1/suppressions/{id}`.
 `POST /v1/emails` in v0.22: text/html body, to/cc/bcc, reply-to; **all recipients must share one domain (422 `mixed_recipient_domains`)**; attachments/tags/custom headers deferred.
-OpenAPI is hand-written (`internal/api/openapi.go`) and guarded by a runtime drift test: API changes must update it.
+OpenAPI is hand-written (`internal/api/openapi.go`) and guarded by a runtime drift test: API changes must update it. As of DEC-196 the spec carries `tags` (13 resource groups) + `operationId` on every operation, and `info.contact`/`info.license` + two `servers` entries (production + self-hosted relative) — a company-standard, Swagger-UI-groupable contract, not just a flat route dump. `/docs` (Swagger UI at `internal/api/openapi.go`'s `docsPage`, CDN-served, dev-only) has deep linking, persisted auth, and a tag/operation filter box enabled.
 
 ## Database (PostgreSQL 16; migrations 000001-000014; forward-only fixes, applied migrations never edited)
 
