@@ -18,22 +18,38 @@ func submissionAddr() string {
 	return os.Getenv("MAILX_SUBMISSION_ADDR")
 }
 
-// submissionEnvelope picks the SMTP envelope (MAIL FROM / RCPT TO) over the
-// parsed message headers as the actual return path and recipient list a
-// normal SMTP client negotiated - a Bcc recipient in particular has no
-// header representation at all, and the header From can legitimately
-// differ from the envelope sender. Falls back to the header values only if
-// the envelope is somehow empty (should not happen once DATA is reached).
-func submissionEnvelope(s smtp.Session, m mail.Message) (from string, to []string) {
+// submissionEnvelope combines the SMTP envelope with the parsed message
+// headers: the envelope MAIL FROM is authoritative for the return path
+// (the header From can legitimately differ), but the VISIBLE recipient
+// structure (to/cc) must come from the headers, not the envelope — a
+// normal MUA never sends a Bcc header line at all, so any RCPT TO address
+// that is not also in the parsed To/Cc headers is a hidden Bcc recipient
+// and must stay invisible in the outgoing message while still being
+// delivered to. Putting the full envelope into `to` would instead leak
+// every Bcc address into the visible To header once outbound.Build
+// rebuilds the message from these fields.
+func submissionEnvelope(s smtp.Session, m mail.Message) (from string, to, cc, bcc []string) {
 	from = s.Envelope.MailFrom
 	if from == "" {
 		from = m.From
 	}
-	to = s.Envelope.Recipients
-	if len(to) == 0 {
-		to = m.To
+	to, cc = m.To, m.Cc
+	if len(s.Envelope.Recipients) == 0 {
+		return from, to, cc, m.Bcc
 	}
-	return from, to
+	visible := make(map[string]bool, len(to)+len(cc))
+	for _, addr := range to {
+		visible[addr] = true
+	}
+	for _, addr := range cc {
+		visible[addr] = true
+	}
+	for _, addr := range s.Envelope.Recipients {
+		if !visible[addr] {
+			bcc = append(bcc, addr)
+		}
+	}
+	return from, to, cc, bcc
 }
 
 func runSubmissionReceiver(ctx context.Context, db *database.DB, store *storage.FileStore, dkimSvc *dkim.Service, abuse *api.AbuseControls, authSvc *auth.Service, msgDomain string, o obs) error {
@@ -73,8 +89,8 @@ func runSubmissionReceiver(ctx context.Context, db *database.DB, store *storage.
 		return "", false
 	}
 	sink := func(s smtp.Session, m mail.Message) error {
-		from, to := submissionEnvelope(s, m)
-		_, err := acceptor.Accept(context.Background(), s.TenantID, from, to, nil, nil, "", m.Subject, m.TextBody, m.HTMLBody)
+		from, to, cc, bcc := submissionEnvelope(s, m)
+		_, err := acceptor.Accept(context.Background(), s.TenantID, from, to, cc, bcc, "", m.Subject, m.TextBody, m.HTMLBody)
 		return err
 	}
 	server, err := smtp.NewServer(cfg, sink)
