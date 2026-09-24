@@ -459,6 +459,13 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 - Attribution uses `req.To[0]` only — MailX's regular send path shares one rendered body across all RCPT, so true per-recipient attribution isn't resolvable without per-recipient rendering (DEC-188).
 - Deferred: webhook subscription-side `email.opened`/`email.clicked` support (DEC-189), template-level tracking defaults, HTML-parser-based (vs regexp) link rewriting.
 
+## Deliverability Insights (v0.45; design decision DEC-195)
+
+- Pure extension of v0.38's read-only analytics layer (`internal/database/analytics.go`, `internal/api/analytics_handler.go`) — no new tables, no new writes, no new event types.
+- `AnalyticsCounts` (shared by overview and timeseries) gained `Opened`/`Clicked`, sourced from v0.43's existing `opened`/`clicked` event types.
+- `GET /v1/analytics/overview` response gained a `rates` object (`delivery_rate`, `bounce_rate`, `failure_rate`, `complaint_rate`, `open_rate`, `click_rate`), server-computed as count/`queued` (queued is the only stable denominator — see the non-mutually-exclusive-facts doc in analytics.go). All-zero when `queued` is 0.
+- New `GET /v1/analytics/domains?from=&to=` — `database.DomainBreakdown` groups CURRENT `recipients.status` (not the historical events stream) by recipient email domain, joined through `messages` for tenant scope and filtered by `recipients.created_at`. Ordered by total desc, capped at 50 rows (`AnalyticsMaxDomains`). Domain extraction trims a trailing `>` since real recipient rows are stored in raw `<addr>` header form.
+
 ## Official SDKs (v0.44; design decisions DEC-190..194)
 
 - `sdk/node` (TypeScript, `@mailx/sdk`), `sdk/python` (`mailx_sdk`), `sdk/go` (Go module `github.com/Ferousco-dev/mailx-go`), `sdk/php` (Composer package `mailx/sdk`), and `sdk/ruby` (gem `mailx-sdk`) — all separate from the main Go module, zero coupling to `internal/`. Thin clients: generic request core (auth header, JSON, retry on 429/5xx honoring `Retry-After`), typed method per OpenAPI resource.

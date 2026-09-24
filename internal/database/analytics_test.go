@@ -293,3 +293,86 @@ func TestAnalyticsHotQueriesUseIndexes(t *testing.T) {
 	}
 	t.Logf("overview plan:\n%s\ntimeseries plan:\n%s", overviewPlan, tsPlan)
 }
+
+func TestAnalyticsOverviewIncludesOpenedAndClicked(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+	msg, err := db.InsertMessage(ctx, sampleNewMessage(t, tn.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	insertEvent(t, db, tn.ID, msg.ID, EventQueued, base)
+	insertEvent(t, db, tn.ID, msg.ID, EventOpened, base.Add(time.Minute))
+	insertEvent(t, db, tn.ID, msg.ID, EventClicked, base.Add(2*time.Minute))
+
+	out, err := db.AnalyticsOverview(ctx, tn.ID, base.Add(-time.Minute), base.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Counts.Opened != 1 || out.Counts.Clicked != 1 {
+		t.Fatalf("expected opened=1 clicked=1, got %+v", out.Counts)
+	}
+}
+
+func TestDomainBreakdownGroupsByRecipientDomain(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+
+	newMsg := func(addr string) NewMessage {
+		id, err := newID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return NewMessage{
+			ID: id, TenantID: tn.ID, MailFrom: "<sender@example.com>",
+			FromHeader: "Sender <sender@example.com>", Subject: "hi",
+			MessageIDHeader: "<" + id + "@example.com>",
+			Recipients:      []RecipientInput{{Address: addr, HeaderKind: strPtr("to")}},
+		}
+	}
+
+	m1, err := db.InsertMessage(ctx, newMsg("bob@acme.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2, err := db.InsertMessage(ctx, newMsg("carol@acme.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m3, err := db.InsertMessage(ctx, newMsg("dave@other.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.UpdateRecipientStatuses(ctx, m1.ID, []RecipientStatusUpdate{{Address: "bob@acme.com", Status: RecipientDelivered}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateRecipientStatuses(ctx, m2.ID, []RecipientStatusUpdate{{Address: "carol@acme.com", Status: RecipientFailed}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpdateRecipientStatuses(ctx, m3.ID, []RecipientStatusUpdate{{Address: "dave@other.com", Status: RecipientDelivered}}); err != nil {
+		t.Fatal(err)
+	}
+
+	from := time.Now().Add(-time.Hour)
+	to := time.Now().Add(time.Hour)
+	rows, err := db.DomainBreakdown(ctx, tn.ID, from, to)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byDomain := map[string]DomainBreakdown{}
+	for _, r := range rows {
+		byDomain[r.Domain] = r
+	}
+	acme, ok := byDomain["acme.com"]
+	if !ok || acme.Total != 2 || acme.Delivered != 1 || acme.Failed != 1 {
+		t.Fatalf("unexpected acme.com breakdown: %+v (ok=%v)", acme, ok)
+	}
+	other, ok := byDomain["other.com"]
+	if !ok || other.Total != 1 || other.Delivered != 1 {
+		t.Fatalf("unexpected other.com breakdown: %+v (ok=%v)", other, ok)
+	}
+}

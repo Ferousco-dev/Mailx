@@ -71,6 +71,8 @@ type AnalyticsCounts struct {
 	Failed     int
 	Suppressed int
 	Complained int
+	Opened     int
+	Clicked    int
 }
 
 // AnalyticsOverview is AnalyticsCounts across [From, To) plus the one
@@ -93,7 +95,9 @@ const eventTypeCountColumns = `
 	count(*) FILTER (WHERE event_type = 'bounced')    AS bounced,
 	count(*) FILTER (WHERE event_type = 'failed')     AS failed,
 	count(*) FILTER (WHERE event_type = 'suppressed') AS suppressed,
-	count(*) FILTER (WHERE event_type = 'complained') AS complained`
+	count(*) FILTER (WHERE event_type = 'complained') AS complained,
+	count(*) FILTER (WHERE event_type = 'opened')     AS opened,
+	count(*) FILTER (WHERE event_type = 'clicked')    AS clicked`
 
 // AnalyticsOverview aggregates event-derived counts for tenantID across the
 // half-open range [from, to) in ONE indexed query (idx_events_tenant_occurred
@@ -113,7 +117,8 @@ func (db *DB) AnalyticsOverview(ctx context.Context, tenantID string, from, to t
 		WHERE tenant_id = $1 AND occurred_at >= $2 AND occurred_at < $3`,
 		tenantID, from, to,
 	).Scan(&out.Counts.Queued, &out.Counts.Delivered, &out.Counts.Deferred,
-		&out.Counts.Bounced, &out.Counts.Failed, &out.Counts.Suppressed, &out.Counts.Complained)
+		&out.Counts.Bounced, &out.Counts.Failed, &out.Counts.Suppressed, &out.Counts.Complained,
+		&out.Counts.Opened, &out.Counts.Clicked)
 	if err != nil {
 		return AnalyticsOverview{}, fmt.Errorf("database: analytics overview: %w", normalizeErr(err))
 	}
@@ -187,7 +192,8 @@ func (db *DB) AnalyticsTimeseries(ctx context.Context, tenantID string, from, to
 	for rows.Next() {
 		var b AnalyticsBucket
 		if err := rows.Scan(&b.Timestamp, &b.Counts.Queued, &b.Counts.Delivered, &b.Counts.Deferred,
-			&b.Counts.Bounced, &b.Counts.Failed, &b.Counts.Suppressed, &b.Counts.Complained); err != nil {
+			&b.Counts.Bounced, &b.Counts.Failed, &b.Counts.Suppressed, &b.Counts.Complained,
+			&b.Counts.Opened, &b.Counts.Clicked); err != nil {
 			return nil, fmt.Errorf("database: scan analytics bucket: %w", err)
 		}
 		out = append(out, b)
@@ -263,6 +269,74 @@ func (db *DB) BroadcastAnalytics(ctx context.Context, tenantID, broadcastID stri
 	).Scan(&out.Delivered, &out.Bounced, &out.Complained, &out.Failed)
 	if err != nil {
 		return BroadcastAnalytics{}, fmt.Errorf("database: broadcast delivery outcomes: %w", normalizeErr(err))
+	}
+	return out, nil
+}
+
+// AnalyticsMaxDomains bounds how many per-domain rows DomainBreakdown
+// returns, so a tenant sending to thousands of distinct domains cannot
+// force an unbounded response — same posture as AnalyticsMaxBuckets.
+const AnalyticsMaxDomains = 50
+
+// DomainBreakdown is one recipient-domain's outcome counts across
+// [from, to), scoped by recipients.created_at (recipients are created in
+// the same transaction as their message, so this is equivalent to
+// filtering by send time without needing a join-time column on
+// recipients). Counts reflect the CURRENT per-recipient status (pending/
+// delivered/failed/suppressed) — see the recipients table's status
+// semantics — not the full historical event stream used elsewhere in this
+// file, so a recipient that is later retried and delivered is counted
+// once, under its current outcome.
+type DomainBreakdown struct {
+	Domain     string
+	Total      int
+	Delivered  int
+	Failed     int
+	Suppressed int
+	Pending    int
+}
+
+// DomainBreakdown aggregates recipient outcomes for tenantID across
+// [from, to) by the recipient address's domain (case-folded), joined
+// through messages for tenant scoping. Ordered by Total descending, capped
+// at AnalyticsMaxDomains rows.
+func (db *DB) DomainBreakdown(ctx context.Context, tenantID string, from, to time.Time) ([]DomainBreakdown, error) {
+	if tenantID == "" {
+		return nil, errors.New("database: tenant ID is empty")
+	}
+	if !to.After(from) {
+		return nil, errors.New("database: to must be after from")
+	}
+	rows, err := db.pool.Query(ctx, `
+		SELECT
+			lower(trim(trailing '>' from split_part(r.address, '@', 2))) AS domain,
+			count(*) AS total,
+			count(*) FILTER (WHERE r.status = 'delivered')  AS delivered,
+			count(*) FILTER (WHERE r.status = 'failed')     AS failed,
+			count(*) FILTER (WHERE r.status = 'suppressed') AS suppressed,
+			count(*) FILTER (WHERE r.status = 'pending')    AS pending
+		FROM recipients r
+		JOIN messages m ON m.id = r.message_id
+		WHERE m.tenant_id = $1 AND r.created_at >= $2 AND r.created_at < $3
+		GROUP BY domain
+		ORDER BY total DESC
+		LIMIT $4`,
+		tenantID, from, to, AnalyticsMaxDomains,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("database: domain breakdown: %w", normalizeErr(err))
+	}
+	defer rows.Close()
+	var out []DomainBreakdown
+	for rows.Next() {
+		var d DomainBreakdown
+		if err := rows.Scan(&d.Domain, &d.Total, &d.Delivered, &d.Failed, &d.Suppressed, &d.Pending); err != nil {
+			return nil, fmt.Errorf("database: scan domain breakdown row: %w", err)
+		}
+		out = append(out, d)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

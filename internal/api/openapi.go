@@ -213,6 +213,21 @@ const openAPISpec = `{
         }
       }
     },
+    "/analytics/domains": {
+      "get": {
+        "summary": "Per-recipient-domain deliverability breakdown",
+        "description": "Requires analytics:read. Recipient outcome counts (total/delivered/failed/suppressed/pending) grouped by the recipient address's domain, scoped to [from, to) by recipient creation time. Reflects each recipient's CURRENT status (recipients.status), not the full historical event stream - a recipient later retried and delivered is counted once, under its current outcome. Ordered by total descending, capped at 50 domains.",
+        "parameters": [
+          {"name": "from", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}},
+          {"name": "to", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}}
+        ],
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/DomainBreakdown"}}}}},
+          "401": {"$ref": "#/components/responses/Error"}, "403": {"$ref": "#/components/responses/Error"},
+          "422": {"$ref": "#/components/responses/Error"}
+        }
+      }
+    },
     "/audiences": {
       "post": {
         "summary": "Create an audience",
@@ -827,7 +842,21 @@ const openAPISpec = `{
           "bounced": {"type": "integer", "description": "Reused for both a synchronous rejection and v0.32 asynchronous DSN feedback."},
           "failed": {"type": "integer", "description": "A permanent (non-retriable) delivery failure."},
           "suppressed": {"type": "integer", "description": "This specific send was skipped because the recipient was already suppressed at send time."},
-          "complained": {"type": "integer", "description": "v0.32 asynchronous complaint feedback matched a recipient of this message."}
+          "complained": {"type": "integer", "description": "v0.32 asynchronous complaint feedback matched a recipient of this message."},
+          "opened": {"type": "integer", "description": "v0.43 tracked-open event; opt-in and unreliable by nature (image-blocking clients undercount)."},
+          "clicked": {"type": "integer", "description": "v0.43 tracked-click event; opt-in."}
+        }
+      },
+      "DeliverabilityRates": {
+        "type": "object",
+        "description": "Plain ratios derived from AnalyticsCounts, always divided by queued (the only stable denominator, since the count fields are not mutually exclusive). All zero when queued is zero.",
+        "properties": {
+          "delivery_rate": {"type": "number"},
+          "bounce_rate": {"type": "number"},
+          "failure_rate": {"type": "number"},
+          "complaint_rate": {"type": "number"},
+          "open_rate": {"type": "number"},
+          "click_rate": {"type": "number"}
         }
       },
       "AnalyticsOverview": {
@@ -836,7 +865,19 @@ const openAPISpec = `{
           "from": {"type": "string", "format": "date-time"},
           "to": {"type": "string", "format": "date-time"},
           "counts": {"$ref": "#/components/schemas/AnalyticsCounts"},
+          "rates": {"$ref": "#/components/schemas/DeliverabilityRates"},
           "currently_suppressed": {"type": "integer", "description": "CURRENT-STATE snapshot of how many addresses are suppressed for this account right now - independent of from/to, not a historical/time-bucketed count."}
+        }
+      },
+      "DomainBreakdown": {
+        "type": "object",
+        "properties": {
+          "domain": {"type": "string"},
+          "total": {"type": "integer"},
+          "delivered": {"type": "integer"},
+          "failed": {"type": "integer"},
+          "suppressed": {"type": "integer"},
+          "pending": {"type": "integer"}
         }
       },
       "AnalyticsBucket": {
