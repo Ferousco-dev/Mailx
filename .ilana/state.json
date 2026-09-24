@@ -18,7 +18,7 @@
     "DEF": 27,
     "CR": 24,
     "RSK": 40,
-    "DEC": 189,
+    "DEC": 191,
     "MET": 72,
     "ETH": 1
   },
@@ -34,10 +34,10 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.43",
-    "ilana_current_through": "v0.43",
+    "last_completed_milestone": "v0.44",
+    "ilana_current_through": "v0.44",
     "current_milestone": "none",
-    "current_milestone_status": "v0.43 complete",
-    "next_milestone": "v0.44 Official SDKs (not started)"
+    "current_milestone_status": "v0.44 complete",
+    "next_milestone": "v0.45 Deliverability Insights (not started)"
   }
 }
