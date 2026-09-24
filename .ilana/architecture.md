@@ -459,9 +459,10 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 - Attribution uses `req.To[0]` only — MailX's regular send path shares one rendered body across all RCPT, so true per-recipient attribution isn't resolvable without per-recipient rendering (DEC-188).
 - Deferred: webhook subscription-side `email.opened`/`email.clicked` support (DEC-189), template-level tracking defaults, HTML-parser-based (vs regexp) link rewriting.
 
-## Official SDKs (v0.44; design decisions DEC-190..191)
+## Official SDKs (v0.44; design decisions DEC-190..192)
 
-- `sdk/node` (TypeScript, `@mailx/sdk`) and `sdk/python` (`mailx_sdk`) — separate from the Go module, zero coupling to `internal/`. Thin clients: generic request core (auth header, JSON, retry on 429/5xx honoring `Retry-After`), typed method per OpenAPI resource.
+- `sdk/node` (TypeScript, `@mailx/sdk`), `sdk/python` (`mailx_sdk`), and `sdk/go` (Go module `github.com/Ferousco-dev/mailx-go`) — all separate from the main Go module, zero coupling to `internal/`. Thin clients: generic request core (auth header, JSON, retry on 429/5xx honoring `Retry-After`), typed method per OpenAPI resource.
+- Go SDK specifics: functional options (`WithBaseURL`, `WithHTTPClient`, `WithMaxRetries`), `context.Context` first-param on every method, `*APIError` on failure. Same fully-typed/loose-JSON split as Node/Python (`SendEmail`/`SendBatch`/`GetEmail`/`ListEmails` typed; rest return `mailx.JSON`).
 - Core send/batch/get/list email methods are fully typed against `internal/api`'s `SendEmailRequest`/`Email`/`BatchSendRequest`/`BatchSendResponse`; every other resource has a typed signature with a loosely-typed body/result (see each SDK's README for the exact-shape reference: `GET /openapi.json`).
 - React Email: no SDK code — `@react-email/render`'s output is already the `html`/`text` shape `sendEmail` accepts (documented pattern only).
 - Both SDKs have unit tests (fake HTTP layer: request shape, auth header, 429-retry-then-succeed, error mapping) and a gated contract test (`MAILX_SDK_TEST_BASE_URL`/`_API_KEY`) that runs against a real server when configured, skips cleanly otherwise.
