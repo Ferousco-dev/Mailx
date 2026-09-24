@@ -4,6 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"os"
+	"strings"
+
+	stdmail "net/mail"
 
 	"github.com/Ferousco-dev/mailx/internal/api"
 	"github.com/Ferousco-dev/mailx/internal/auth"
@@ -28,6 +31,13 @@ func submissionAddr() string {
 // delivered to. Putting the full envelope into `to` would instead leak
 // every Bcc address into the visible To header once outbound.Build
 // rebuilds the message from these fields.
+//
+// Comparison uses each address's parsed mailbox, not the raw strings: RCPT
+// TO paths are always bracket-form ("<user@example.com>") while parsed
+// headers are bare or display-name form ("user@example.com" /
+// "Name <user@example.com>") — an exact-string comparison never matches,
+// so every visible recipient would incorrectly be re-added as Bcc too
+// (double-counted, and delivered twice).
 func submissionEnvelope(s smtp.Session, m mail.Message) (from string, to, cc, bcc []string) {
 	from = s.Envelope.MailFrom
 	if from == "" {
@@ -39,17 +49,32 @@ func submissionEnvelope(s smtp.Session, m mail.Message) (from string, to, cc, bc
 	}
 	visible := make(map[string]bool, len(to)+len(cc))
 	for _, addr := range to {
-		visible[addr] = true
+		visible[normalizeMailboxKey(addr)] = true
 	}
 	for _, addr := range cc {
-		visible[addr] = true
+		visible[normalizeMailboxKey(addr)] = true
 	}
 	for _, addr := range s.Envelope.Recipients {
-		if !visible[addr] {
+		if !visible[normalizeMailboxKey(addr)] {
 			bcc = append(bcc, addr)
 		}
 	}
 	return from, to, cc, bcc
+}
+
+// normalizeMailboxKey extracts just the bare mailbox (lower-cased) from any
+// of RCPT TO's bracket form, a bare header address, or a display-name
+// header address, so the same recipient compares equal regardless of which
+// of those three forms it arrived in. Falls back to the trimmed, lower-cased
+// input unchanged if it doesn't parse — a comparison key must never fail
+// outright here, since an unparseable address should still end up
+// somewhere (as Bcc, the conservative default) rather than panicking or
+// being silently dropped.
+func normalizeMailboxKey(addr string) string {
+	if parsed, err := stdmail.ParseAddress(addr); err == nil {
+		return strings.ToLower(parsed.Address)
+	}
+	return strings.ToLower(strings.TrimSpace(addr))
 }
 
 func runSubmissionReceiver(ctx context.Context, db *database.DB, store *storage.FileStore, dkimSvc *dkim.Service, abuse *api.AbuseControls, authSvc *auth.Service, msgDomain string, o obs) error {
