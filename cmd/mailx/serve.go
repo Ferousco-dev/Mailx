@@ -150,6 +150,7 @@ func runFull() error {
 		o.logged("webhook-worker", webhookRuntime.workers.Run),
 		o.logged("api", apiServer.Run),
 		o.logged("idempotency-cleanup", func(ctx context.Context) error { return runIdempotencyCleanup(ctx, db, o) }),
+		o.logged("retention-purge", func(ctx context.Context) error { return runRetentionPurge(ctx, db, store, o) }),
 	}
 	if addr := observabilityAddr(); addr != "" {
 		op := observability.NewServer(addr, observability.OperatorMux(o.metrics, ready))
@@ -216,6 +217,37 @@ func runIdempotencyCleanup(ctx context.Context, db *database.DB, o obs) error {
 			}
 			if n > 0 {
 				o.log.Info("idempotency_cleanup", "removed", n)
+			}
+		}
+	}
+}
+
+// retentionPurgeInterval is hourly, not minutes like idempotency cleanup:
+// retention windows are measured in days, so an hourly cadence is already
+// far more granular than the feature needs, and a slower cadence keeps the
+// (larger, cross-table) purge query from competing with request traffic.
+const retentionPurgeInterval = time.Hour
+
+func runRetentionPurge(ctx context.Context, db *database.DB, store *storage.FileStore, o obs) error {
+	ticker := time.NewTicker(retentionPurgeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			ids, err := db.PurgeExpiredMessages(ctx)
+			if err != nil {
+				o.log.Warn("retention_purge_failed", "error", err.Error())
+				continue
+			}
+			for _, id := range ids {
+				if err := store.Delete(id); err != nil {
+					o.log.Warn("retention_purge_disk_cleanup_failed", "message_id", id, "error", err.Error())
+				}
+			}
+			if len(ids) > 0 {
+				o.log.Info("retention_purge", "purged", len(ids))
 			}
 		}
 	}

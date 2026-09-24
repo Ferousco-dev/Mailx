@@ -459,6 +459,13 @@ Redis queue polling (200ms..2s), not blocking primitives (multi-condition wake-u
 - Attribution uses `req.To[0]` only — MailX's regular send path shares one rendered body across all RCPT, so true per-recipient attribution isn't resolvable without per-recipient rendering (DEC-188).
 - Deferred: webhook subscription-side `email.opened`/`email.clicked` support (DEC-189), template-level tracking defaults, HTML-parser-based (vs regexp) link rewriting.
 
+## Data Retention & GDPR Tooling (v0.46; design decision DEC-205)
+
+- `tenants.retention_days` (nullable INTEGER, migration 000025): per-tenant retention window override. NULL means "use `database.DefaultRetentionDays`" (90), not "retain forever" — set via `mailx set-retention -tenant <id> -days <n|default>`, read via `mailx show-retention -tenant <id>`.
+- `database.PurgeExpiredMessages`: one tenant-joined query finds every message older than `COALESCE(tenants.retention_days, 90)` days, then hard-deletes them in a transaction — recipients/delivery_attempts/events cascade via existing FKs; `broadcast_recipients.message_id` (which has no FK) is explicitly nulled first. Runs as the `retention-purge` component (hourly ticker, same shape as `idempotency-cleanup`) and via `mailx purge-expired` for manual/cron use. Callers must also call `storage.FileStore.Delete(id)` for each purged id — the database function only owns the DB side.
+- GDPR subject requests are operator-only CLI, not an API endpoint (matches v0.19's tenant/key-management precedent): `mailx gdpr-export -tenant -email` (read-only: contact record, audience memberships, recipient history) and `mailx gdpr-delete -tenant -email -confirm` (deletes the contact row + matching recipient rows only — never the parent message, other recipients on it, or suppressions).
+- Recipient-address matching (both retention-adjacent GDPR lookups) decodes bracket/bare/display-name forms via `net/mail.ParseAddress` before running the result through `contact.Normalize` — `contact.Normalize` alone rejects display-name input, so it can't be called directly on a raw stored recipient address.
+
 ## Deliverability Insights (v0.45; design decision DEC-195)
 
 - Pure extension of v0.38's read-only analytics layer (`internal/database/analytics.go`, `internal/api/analytics_handler.go`) — no new tables, no new writes, no new event types.

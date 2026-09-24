@@ -18,7 +18,7 @@
     "DEF": 27,
     "CR": 24,
     "RSK": 40,
-    "DEC": 204,
+    "DEC": 205,
     "MET": 72,
     "ETH": 1
   },
@@ -34,10 +34,10 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.45",
-    "ilana_current_through": "v0.45",
+    "last_completed_milestone": "v0.46",
+    "ilana_current_through": "v0.46",
     "current_milestone": "none",
-    "current_milestone_status": "v0.45 complete",
-    "next_milestone": "v0.46 Data Retention & GDPR Tooling (not started; needs a retention-policy design pass first)"
+    "current_milestone_status": "v0.46 complete",
+    "next_milestone": "v0.47 Dashboard Backend (Human Accounts -> Organizations -> Dashboard) (not started; needs a design pass first per its own milestone note)"
   }
 }

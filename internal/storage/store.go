@@ -260,6 +260,21 @@ func (s *FileStore) Save(record MessageRecord) error {
 	return nil
 }
 
+// Delete removes id's entire message directory (raw .eml, metadata,
+// attachments). Used by v0.46's retention purge after the database has
+// already deleted the corresponding messages row. A missing directory is
+// not an error - deleting something already gone is the desired end state,
+// not a failure (e.g. a retry after a partial prior purge).
+func (s *FileStore) Delete(id string) error {
+	if err := validateID(id); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Join(s.MessagesDir(), id)); err != nil {
+		return fmt.Errorf("delete message %q: %w", id, err)
+	}
+	return nil
+}
+
 // Load reads one persisted message by its MailX-owned ID. The raw message is
 // read from message.eml; all other returned information comes from
 // metadata.json.
