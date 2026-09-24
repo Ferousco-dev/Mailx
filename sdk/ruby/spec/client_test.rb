@@ -19,7 +19,7 @@ class ClientTest < Minitest::Test
 
   def test_retries_on_429_then_succeeds
     responses = [
-      [429, { "retry-after" => "0" }, JSON.generate({ "type" => "rate_limited", "code" => "too_many_requests", "message" => "slow down" })],
+      [429, { "retry-after" => "0" }, JSON.generate({ "error" => { "type" => "rate_limited", "code" => "too_many_requests", "message" => "slow down" } })],
       [200, {}, JSON.generate({ "id" => "em_2" })]
     ]
     fake = lambda { |uri, req| responses.shift }
@@ -32,7 +32,7 @@ class ClientTest < Minitest::Test
 
   def test_non_retryable_error_raises
     fake = lambda do |uri, req|
-      [400, {}, JSON.generate({ "type" => "invalid_request", "code" => "missing_field", "message" => "from is required" })]
+      [400, {}, JSON.generate({ "error" => { "type" => "invalid_request", "code" => "missing_field", "message" => "from is required" } })]
     end
     client = MailX::Client.new("test-key", http_client: fake)
 

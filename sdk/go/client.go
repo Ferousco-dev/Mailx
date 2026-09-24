@@ -118,11 +118,15 @@ func backoff(attempt int, lastErr error) time.Duration {
 }
 
 func parseAPIError(status int, retryAfterHeader string, body []byte) *APIError {
+	// Every MailX error response is {"error": {type, code, message,
+	// request_id}} - see internal/api/errors.go's errorBody.
 	var parsed struct {
-		Type      string `json:"type"`
-		Code      string `json:"code"`
-		Message   string `json:"message"`
-		RequestID string `json:"request_id"`
+		Error struct {
+			Type      string `json:"type"`
+			Code      string `json:"code"`
+			Message   string `json:"message"`
+			RequestID string `json:"request_id"`
+		} `json:"error"`
 	}
 	_ = json.Unmarshal(body, &parsed)
 	var retryAfter time.Duration
@@ -133,10 +137,10 @@ func parseAPIError(status int, retryAfterHeader string, body []byte) *APIError {
 	}
 	return &APIError{
 		Status:     status,
-		Type:       parsed.Type,
-		Code:       parsed.Code,
-		Message:    parsed.Message,
-		RequestID:  parsed.RequestID,
+		Type:       parsed.Error.Type,
+		Code:       parsed.Error.Code,
+		Message:    parsed.Error.Message,
+		RequestID:  parsed.Error.RequestID,
 		RetryAfter: retryAfter,
 	}
 }
@@ -173,9 +177,13 @@ func (c *Client) ListEmails(ctx context.Context, query string) (*EmailList, erro
 	return &out, nil
 }
 
-func (c *Client) ListEvents(ctx context.Context, emailID string) (JSON, error) {
+// ListEvents lists this tenant's public delivery events, newest first,
+// keyset paginated. query is the raw querystring (e.g.
+// "?limit=20&cursor=...") appended as-is - GET /v1/events has no
+// per-email filter.
+func (c *Client) ListEvents(ctx context.Context, query string) (JSON, error) {
 	var out JSON
-	if err := c.request(ctx, http.MethodGet, "/v1/emails/"+emailID+"/events", nil, &out); err != nil {
+	if err := c.request(ctx, http.MethodGet, "/v1/events"+query, nil, &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -211,8 +219,11 @@ func (c *Client) GetSPF(ctx context.Context, domainID string) (JSON, error) {
 func (c *Client) GetDMARC(ctx context.Context, domainID string) (JSON, error) {
 	return c.resource(ctx, http.MethodGet, "/v1/domains/"+domainID+"/dmarc", nil)
 }
-func (c *Client) SetBIMI(ctx context.Context, domainID string, body JSON) (JSON, error) {
-	return c.resource(ctx, http.MethodPut, "/v1/domains/"+domainID+"/bimi", body)
+func (c *Client) GetBIMI(ctx context.Context, domainID string) (JSON, error) {
+	return c.resource(ctx, http.MethodGet, "/v1/domains/"+domainID+"/bimi", nil)
+}
+func (c *Client) VerifyBIMI(ctx context.Context, domainID string) (JSON, error) {
+	return c.resource(ctx, http.MethodPost, "/v1/domains/"+domainID+"/bimi/verify", nil)
 }
 
 func (c *Client) CreateTemplate(ctx context.Context, body JSON) (JSON, error) {
@@ -272,10 +283,6 @@ func (c *Client) GetBroadcast(ctx context.Context, id string) (JSON, error) {
 func (c *Client) ListBroadcasts(ctx context.Context) (JSON, error) {
 	return c.resource(ctx, http.MethodGet, "/v1/broadcasts", nil)
 }
-func (c *Client) SendBroadcast(ctx context.Context, id string) (JSON, error) {
-	return c.resource(ctx, http.MethodPost, "/v1/broadcasts/"+id+"/send", nil)
-}
-
 func (c *Client) GetAnalytics(ctx context.Context, query string) (JSON, error) {
 	return c.resource(ctx, http.MethodGet, "/v1/analytics"+query, nil)
 }

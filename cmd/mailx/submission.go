@@ -18,6 +18,24 @@ func submissionAddr() string {
 	return os.Getenv("MAILX_SUBMISSION_ADDR")
 }
 
+// submissionEnvelope picks the SMTP envelope (MAIL FROM / RCPT TO) over the
+// parsed message headers as the actual return path and recipient list a
+// normal SMTP client negotiated - a Bcc recipient in particular has no
+// header representation at all, and the header From can legitimately
+// differ from the envelope sender. Falls back to the header values only if
+// the envelope is somehow empty (should not happen once DATA is reached).
+func submissionEnvelope(s smtp.Session, m mail.Message) (from string, to []string) {
+	from = s.Envelope.MailFrom
+	if from == "" {
+		from = m.From
+	}
+	to = s.Envelope.Recipients
+	if len(to) == 0 {
+		to = m.To
+	}
+	return from, to
+}
+
 func runSubmissionReceiver(ctx context.Context, db *database.DB, store *storage.FileStore, dkimSvc *dkim.Service, abuse *api.AbuseControls, authSvc *auth.Service, msgDomain string, o obs) error {
 	addr := submissionAddr()
 	certFile := os.Getenv("MAILX_SUBMISSION_TLS_CERT")
@@ -55,7 +73,8 @@ func runSubmissionReceiver(ctx context.Context, db *database.DB, store *storage.
 		return "", false
 	}
 	sink := func(s smtp.Session, m mail.Message) error {
-		_, err := acceptor.Accept(context.Background(), s.TenantID, m.From, m.To, m.Cc, m.Bcc, "", m.Subject, m.TextBody, m.HTMLBody)
+		from, to := submissionEnvelope(s, m)
+		_, err := acceptor.Accept(context.Background(), s.TenantID, from, to, nil, nil, "", m.Subject, m.TextBody, m.HTMLBody)
 		return err
 	}
 	server, err := smtp.NewServer(cfg, sink)

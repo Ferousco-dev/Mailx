@@ -279,14 +279,16 @@ func (db *DB) BroadcastAnalytics(ctx context.Context, tenantID, broadcastID stri
 const AnalyticsMaxDomains = 50
 
 // DomainBreakdown is one recipient-domain's outcome counts across
-// [from, to), scoped by recipients.created_at (recipients are created in
-// the same transaction as their message, so this is equivalent to
-// filtering by send time without needing a join-time column on
-// recipients). Counts reflect the CURRENT per-recipient status (pending/
-// delivered/failed/suppressed) — see the recipients table's status
-// semantics — not the full historical event stream used elsewhere in this
-// file, so a recipient that is later retried and delivered is counted
-// once, under its current outcome.
+// [from, to), scoped by the PARENT MESSAGE's created_at (recipients are
+// inserted in the same transaction as their message — see InsertMessage —
+// so this is equivalent to filtering by send time) rather than a column on
+// recipients itself, specifically so the range predicate can use the
+// existing idx_messages_tenant_created (tenant_id, created_at DESC) index
+// instead of an unindexed scan over recipients.created_at. Counts reflect
+// the CURRENT per-recipient status (pending/delivered/failed/suppressed) —
+// see the recipients table's status semantics — not the full historical
+// event stream used elsewhere in this file, so a recipient that is later
+// retried and delivered is counted once, under its current outcome.
 type DomainBreakdown struct {
 	Domain     string
 	Total      int
@@ -298,8 +300,10 @@ type DomainBreakdown struct {
 
 // DomainBreakdown aggregates recipient outcomes for tenantID across
 // [from, to) by the recipient address's domain (case-folded), joined
-// through messages for tenant scoping. Ordered by Total descending, capped
-// at AnalyticsMaxDomains rows.
+// through messages for tenant scoping AND the indexed time range (see the
+// type doc above for why the filter is on messages.created_at, not
+// recipients.created_at). Ordered by Total descending, capped at
+// AnalyticsMaxDomains rows.
 func (db *DB) DomainBreakdown(ctx context.Context, tenantID string, from, to time.Time) ([]DomainBreakdown, error) {
 	if tenantID == "" {
 		return nil, errors.New("database: tenant ID is empty")
@@ -317,7 +321,7 @@ func (db *DB) DomainBreakdown(ctx context.Context, tenantID string, from, to tim
 			count(*) FILTER (WHERE r.status = 'pending')    AS pending
 		FROM recipients r
 		JOIN messages m ON m.id = r.message_id
-		WHERE m.tenant_id = $1 AND r.created_at >= $2 AND r.created_at < $3
+		WHERE m.tenant_id = $1 AND m.created_at >= $2 AND m.created_at < $3
 		GROUP BY domain
 		ORDER BY total DESC
 		LIMIT $4`,

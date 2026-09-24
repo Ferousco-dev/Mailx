@@ -38,7 +38,7 @@ func TestRetriesOn429ThenSucceeds(t *testing.T) {
 		if attempts < 2 {
 			w.Header().Set("Retry-After", "0")
 			w.WriteHeader(http.StatusTooManyRequests)
-			json.NewEncoder(w).Encode(map[string]string{"type": "rate_limited", "code": "too_many_requests", "message": "slow down"})
+			json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"type": "rate_limited", "code": "too_many_requests", "message": "slow down"}})
 			return
 		}
 		w.WriteHeader(http.StatusOK)
@@ -62,7 +62,7 @@ func TestRetriesOn429ThenSucceeds(t *testing.T) {
 func TestNonRetryableErrorReturnsAPIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"type": "invalid_request", "code": "missing_field", "message": "from is required"})
+		json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"type": "invalid_request", "code": "missing_field", "message": "from is required"}})
 	}))
 	defer srv.Close()
 

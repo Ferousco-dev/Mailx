@@ -31,8 +31,8 @@ module MailX
       request(:get, "/v1/emails#{query}")
     end
 
-    def list_events(email_id)
-      request(:get, "/v1/emails/#{email_id}/events")
+    def list_events(query = "")
+      request(:get, "/v1/events#{query}")
     end
 
     def create_domain(body); request(:post, "/v1/domains", body); end
@@ -42,7 +42,8 @@ module MailX
     def verify_dkim(domain_id); request(:post, "/v1/domains/#{domain_id}/dkim/verify"); end
     def get_spf(domain_id); request(:get, "/v1/domains/#{domain_id}/spf"); end
     def get_dmarc(domain_id); request(:get, "/v1/domains/#{domain_id}/dmarc"); end
-    def set_bimi(domain_id, body); request(:put, "/v1/domains/#{domain_id}/bimi", body); end
+    def get_bimi(domain_id); request(:get, "/v1/domains/#{domain_id}/bimi"); end
+    def verify_bimi(domain_id); request(:post, "/v1/domains/#{domain_id}/bimi/verify"); end
 
     def create_template(body); request(:post, "/v1/templates", body); end
     def get_template(id); request(:get, "/v1/templates/#{id}"); end
@@ -64,7 +65,6 @@ module MailX
     def create_broadcast(body); request(:post, "/v1/broadcasts", body); end
     def get_broadcast(id); request(:get, "/v1/broadcasts/#{id}"); end
     def list_broadcasts; request(:get, "/v1/broadcasts"); end
-    def send_broadcast(id); request(:post, "/v1/broadcasts/#{id}/send"); end
 
     def get_analytics(query = ""); request(:get, "/v1/analytics#{query}"); end
 
@@ -97,7 +97,10 @@ module MailX
           return resp_body.nil? || resp_body.empty? ? {} : JSON.parse(resp_body)
         end
 
-        parsed = resp_body && !resp_body.empty? ? (JSON.parse(resp_body) rescue {}) : {}
+        # Every MailX error response is {"error": {type, code, message,
+        # request_id}} - see internal/api/errors.go's errorBody.
+        body = resp_body && !resp_body.empty? ? (JSON.parse(resp_body) rescue {}) : {}
+        parsed = body["error"] || {}
         retry_after = headers["retry-after"] ? headers["retry-after"].to_i : nil
         error = APIError.new(
           status: status,

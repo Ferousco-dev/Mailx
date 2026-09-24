@@ -7,7 +7,10 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/tracking"
 )
 
-var hrefPattern = regexp.MustCompile(`(?i)href\s*=\s*"(https?://[^"]+)"`)
+// hrefPattern matches both valid HTML attribute-quoting styles
+// (href="..." and href='...') - only recognizing double quotes would
+// silently leave single-quoted links untracked.
+var hrefPattern = regexp.MustCompile(`(?i)href\s*=\s*(?:"(https?://[^"]+)"|'(https?://[^']+)')`)
 
 func (h *emailHandler) injectTracking(tenantID, messageID, recipient, html string, trackOpens, trackClicks bool) (string, error) {
 	if html == "" || h.trackingSecret == nil || h.trackingBaseURL == "" {
@@ -22,6 +25,9 @@ func (h *emailHandler) injectTracking(tenantID, messageID, recipient, html strin
 			}
 			sub := hrefPattern.FindStringSubmatch(m)
 			url := sub[1]
+			if url == "" {
+				url = sub[2]
+			}
 			if strings.Contains(strings.ToLower(url), "unsubscribe") {
 				return m
 			}

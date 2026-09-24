@@ -41,7 +41,9 @@ class Client
                 return $respBody === '' ? [] : json_decode($respBody, true);
             }
 
-            $decoded = json_decode($respBody, true) ?? [];
+            // Every MailX error response is {"error": {type, code, message,
+            // request_id}} - see internal/api/errors.go's errorBody.
+            $decoded = (json_decode($respBody, true) ?? [])['error'] ?? [];
             $retryAfter = isset($respHeaders['retry-after']) ? (int) $respHeaders['retry-after'] : null;
             $exception = new MailXException(
                 $status,
@@ -90,9 +92,9 @@ class Client
         return $this->request('GET', '/v1/emails' . $query);
     }
 
-    public function listEvents(string $emailId): array
+    public function listEvents(string $query = ''): array
     {
-        return $this->request('GET', '/v1/emails/' . $emailId . '/events');
+        return $this->request('GET', '/v1/events' . $query);
     }
 
     public function createDomain(array $body): array { return $this->request('POST', '/v1/domains', $body); }
@@ -102,7 +104,8 @@ class Client
     public function verifyDkim(string $domainId): array { return $this->request('POST', '/v1/domains/' . $domainId . '/dkim/verify'); }
     public function getSpf(string $domainId): array { return $this->request('GET', '/v1/domains/' . $domainId . '/spf'); }
     public function getDmarc(string $domainId): array { return $this->request('GET', '/v1/domains/' . $domainId . '/dmarc'); }
-    public function setBimi(string $domainId, array $body): array { return $this->request('PUT', '/v1/domains/' . $domainId . '/bimi', $body); }
+    public function getBimi(string $domainId): array { return $this->request('GET', '/v1/domains/' . $domainId . '/bimi'); }
+    public function verifyBimi(string $domainId): array { return $this->request('POST', '/v1/domains/' . $domainId . '/bimi/verify'); }
 
     public function createTemplate(array $body): array { return $this->request('POST', '/v1/templates', $body); }
     public function getTemplate(string $id): array { return $this->request('GET', '/v1/templates/' . $id); }
@@ -124,7 +127,6 @@ class Client
     public function createBroadcast(array $body): array { return $this->request('POST', '/v1/broadcasts', $body); }
     public function getBroadcast(string $id): array { return $this->request('GET', '/v1/broadcasts/' . $id); }
     public function listBroadcasts(): array { return $this->request('GET', '/v1/broadcasts'); }
-    public function sendBroadcast(string $id): array { return $this->request('POST', '/v1/broadcasts/' . $id . '/send'); }
 
     public function getAnalytics(string $query = ''): array { return $this->request('GET', '/v1/analytics' . $query); }
 

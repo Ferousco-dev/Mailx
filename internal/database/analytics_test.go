@@ -294,6 +294,75 @@ func TestAnalyticsHotQueriesUseIndexes(t *testing.T) {
 	t.Logf("overview plan:\n%s\ntimeseries plan:\n%s", overviewPlan, tsPlan)
 }
 
+// TestDomainBreakdownUsesIndex mirrors TestAnalyticsHotQueriesUseIndexes for
+// the domains query: it filters messages.created_at (not
+// recipients.created_at, which has no supporting index — see
+// DomainBreakdown's doc), so it must use idx_messages_tenant_created, not a
+// sequential scan of either table.
+func TestDomainBreakdownUsesIndex(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+
+	base := time.Now().UTC().Add(-90 * 24 * time.Hour)
+	const n = 2000
+	const recent = 5 // kept inside the query window; the rest are backdated
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		id, err := newID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := NewMessage{
+			ID: id, TenantID: tn.ID, MailFrom: "<sender@example.com>",
+			FromHeader: "Sender <sender@example.com>", Subject: "hi",
+			MessageIDHeader: "<" + id + "@example.com>",
+			Recipients:      []RecipientInput{{Address: "user@acme.com", HeaderKind: strPtr("to")}},
+		}
+		if _, err := db.InsertMessage(ctx, msg); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	// Backdate all but the last `recent` messages 90 days into the past, so
+	// the 24h query window below is genuinely SELECTIVE (~0.25% of the
+	// table) - same rationale as the events scale test above: querying
+	// nearly 100% of a table correctly prefers a sequential scan, so the
+	// plan must be judged at realistic selectivity.
+	if _, err := db.pool.Exec(ctx,
+		`UPDATE messages SET created_at = $1 WHERE tenant_id = $2 AND id = ANY($3)`,
+		base, tn.ID, ids[:n-recent]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx, `ANALYZE messages`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx, `ANALYZE recipients`); err != nil {
+		t.Fatal(err)
+	}
+
+	to := time.Now().UTC()
+	from := to.Add(-24 * time.Hour)
+	plan := explainAnalyze(t, db, `
+		SELECT
+			lower(trim(trailing '>' from split_part(r.address, '@', 2))) AS domain,
+			count(*) AS total,
+			count(*) FILTER (WHERE r.status = 'delivered')  AS delivered,
+			count(*) FILTER (WHERE r.status = 'failed')     AS failed,
+			count(*) FILTER (WHERE r.status = 'suppressed') AS suppressed,
+			count(*) FILTER (WHERE r.status = 'pending')    AS pending
+		FROM recipients r
+		JOIN messages m ON m.id = r.message_id
+		WHERE m.tenant_id = $1 AND m.created_at >= $2 AND m.created_at < $3
+		GROUP BY domain
+		ORDER BY total DESC
+		LIMIT $4`, tn.ID, from, to, AnalyticsMaxDomains)
+	if strings.Contains(plan, "Seq Scan on messages") {
+		t.Fatalf("domain breakdown sequentially scans messages at %d rows:\n%s", n, plan)
+	}
+	t.Logf("domain breakdown plan:\n%s", plan)
+}
+
 func TestAnalyticsOverviewIncludesOpenedAndClicked(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()

@@ -24,7 +24,7 @@ class ClientTest extends TestCase
     public function testRetriesOn429ThenSucceeds(): void
     {
         $transport = new FakeTransport([
-            [429, ['retry-after' => '0'], json_encode(['type' => 'rate_limited', 'code' => 'too_many_requests', 'message' => 'slow down'])],
+            [429, ['retry-after' => '0'], json_encode(['error' => ['type' => 'rate_limited', 'code' => 'too_many_requests', 'message' => 'slow down']])],
             [200, [], json_encode(['id' => 'em_2'])],
         ]);
         $client = new Client('test-key', 'https://api.mailx.dev', 3, $transport);
@@ -38,7 +38,7 @@ class ClientTest extends TestCase
     public function testNonRetryableErrorThrows(): void
     {
         $transport = new FakeTransport([
-            [400, [], json_encode(['type' => 'invalid_request', 'code' => 'missing_field', 'message' => 'from is required'])],
+            [400, [], json_encode(['error' => ['type' => 'invalid_request', 'code' => 'missing_field', 'message' => 'from is required']])],
         ]);
         $client = new Client('test-key', 'https://api.mailx.dev', 3, $transport);
 
