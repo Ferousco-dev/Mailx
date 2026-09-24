@@ -107,6 +107,18 @@ docker compose -f compose.yaml -f compose.low-memory.yaml up -d
 
 See `docs/low-memory-deployment.md` for what it changes, the measured effect and the trade-offs.
 
+## Client libraries
+
+Official SDKs live in their own repos under the [UseMailx](https://github.com/UseMailx) organization, not in this one — a self-hosted server checkout doesn't need client-side code in five languages sitting in it. Each SDK defaults to the hosted API's base URL but takes an override, so the same client code works against a self-hosted deployment.
+
+| Language | Repo |
+| --- | --- |
+| Node.js / TypeScript | [UseMailx/mailx-node](https://github.com/UseMailx/mailx-node) |
+| Python | [UseMailx/mailx-python](https://github.com/UseMailx/mailx-python) |
+| Go | [UseMailx/mailx-go](https://github.com/UseMailx/mailx-go) |
+| PHP | [UseMailx/mailx-php](https://github.com/UseMailx/mailx-php) |
+| Ruby | [UseMailx/mailx-ruby](https://github.com/UseMailx/mailx-ruby) |
+
 ## API example
 
 Every `/v1` endpoint requires a scoped MailX API key. Tenant and key management are deliberately operator-only CLI operations.
