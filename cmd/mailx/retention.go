@@ -168,6 +168,14 @@ func cmdGDPRExport(args []string, output io.Writer) error {
 	for _, r := range data.Recipients {
 		fmt.Fprintf(output, "  - message_id=%s address=%s status=%s created_at=%s\n", r.MessageID, r.Address, r.Status, r.CreatedAt.Format(time.RFC3339))
 	}
+	fmt.Fprintf(output, "broadcast_snapshots: %d\n", len(data.BroadcastSnapshots))
+	for _, s := range data.BroadcastSnapshots {
+		fmt.Fprintf(output, "  - broadcast_id=%s email=%s name=%q status=%s created_at=%s\n",
+			s.BroadcastID, s.Email, s.Name, s.Status, s.CreatedAt.Format(time.RFC3339))
+		for k, v := range s.Attributes {
+			fmt.Fprintf(output, "      attribute: %s=%s\n", k, v)
+		}
+	}
 	return nil
 }
 

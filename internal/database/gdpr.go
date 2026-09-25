@@ -24,6 +24,7 @@ package database
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	stdmail "net/mail"
@@ -42,13 +43,30 @@ type GDPRRecipientRecord struct {
 	CreatedAt time.Time
 }
 
+// GDPRBroadcastSnapshot is one broadcast_recipients row matching the
+// subject - its OWN independent snapshot (email/name/attributes captured
+// at broadcast-creation time), not reachable via the contacts FK, so it
+// must be reported separately from Contact/Recipients or an access
+// request would silently omit real personal data MailX still holds - see
+// DEC-209/DEC-210.
+type GDPRBroadcastSnapshot struct {
+	ID          string
+	BroadcastID string
+	Email       string
+	Name        string
+	Attributes  map[string]string
+	Status      string
+	CreatedAt   time.Time
+}
+
 // GDPRSubjectData is everything MailX holds about one address within one
 // tenant, across the scope this package covers.
 type GDPRSubjectData struct {
-	Email      string
-	Contact    *Contact
-	AudienceID []string
-	Recipients []GDPRRecipientRecord
+	Email              string
+	Contact            *Contact
+	AudienceID         []string
+	Recipients         []GDPRRecipientRecord
+	BroadcastSnapshots []GDPRBroadcastSnapshot
 }
 
 // ExportSubjectData answers a GDPR-style access request: everything MailX
@@ -95,6 +113,10 @@ func (db *DB) ExportSubjectData(ctx context.Context, tenantID, email string) (GD
 	if err != nil {
 		return GDPRSubjectData{}, err
 	}
+	out.BroadcastSnapshots, err = db.findBroadcastSnapshotsByAddress(ctx, tenantID, key)
+	if err != nil {
+		return GDPRSubjectData{}, err
+	}
 	return out, nil
 }
 
@@ -117,9 +139,13 @@ func (db *DB) DeleteSubjectData(ctx context.Context, tenantID, email string) (GD
 	if err != nil {
 		return GDPRDeleteResult{}, err
 	}
-	broadcastRecipientIDs, err := db.findBroadcastRecipientIDsByAddress(ctx, tenantID, key)
+	broadcastSnapshots, err := db.findBroadcastSnapshotsByAddress(ctx, tenantID, key)
 	if err != nil {
 		return GDPRDeleteResult{}, err
+	}
+	broadcastRecipientIDs := make([]string, len(broadcastSnapshots))
+	for i, s := range broadcastSnapshots {
+		broadcastRecipientIDs[i] = s.ID
 	}
 
 	tx, err := db.pool.Begin(ctx)
@@ -207,29 +233,40 @@ func (db *DB) findRecipientsByAddress(ctx context.Context, tenantID, normalizedE
 	return out, rows.Err()
 }
 
-// findBroadcastRecipientIDsByAddress scans this tenant's broadcast_recipients
+// findBroadcastSnapshotsByAddress scans this tenant's broadcast_recipients
 // (its email column is a plain address snapshot, not bracket/display-name
 // form like recipients.address, but still run through the same normalize
-// step for a correct case-insensitive match against key) and returns the
-// ids whose email matches.
-func (db *DB) findBroadcastRecipientIDsByAddress(ctx context.Context, tenantID, normalizedEmail string) ([]string, error) {
+// step for a correct case-insensitive match against key) and returns every
+// full row whose email matches - used by BOTH ExportSubjectData (must
+// report these, see GDPRBroadcastSnapshot's doc) and DeleteSubjectData
+// (deletes them by ID), one query instead of two divergent ones.
+func (db *DB) findBroadcastSnapshotsByAddress(ctx context.Context, tenantID, normalizedEmail string) ([]GDPRBroadcastSnapshot, error) {
 	rows, err := db.pool.Query(ctx, `
-		SELECT id, email FROM broadcast_recipients WHERE tenant_id = $1`,
+		SELECT id, broadcast_id, email, name, attributes, status, created_at
+		FROM broadcast_recipients WHERE tenant_id = $1`,
 		tenantID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("database: scan broadcast_recipients for gdpr match: %w", normalizeErr(err))
 	}
 	defer rows.Close()
-	var out []string
+	var out []GDPRBroadcastSnapshot
 	for rows.Next() {
-		var id, email string
-		if err := rows.Scan(&id, &email); err != nil {
+		var s GDPRBroadcastSnapshot
+		var attrs []byte
+		if err := rows.Scan(&s.ID, &s.BroadcastID, &s.Email, &s.Name, &attrs, &s.Status, &s.CreatedAt); err != nil {
 			return nil, err
 		}
-		if key, err := contact.Normalize(email); err == nil && key == normalizedEmail {
-			out = append(out, id)
+		key, err := contact.Normalize(s.Email)
+		if err != nil || key != normalizedEmail {
+			continue
 		}
+		if len(attrs) > 0 {
+			if err := json.Unmarshal(attrs, &s.Attributes); err != nil {
+				return nil, fmt.Errorf("database: decode broadcast_recipients attributes: %w", err)
+			}
+		}
+		out = append(out, s)
 	}
 	return out, rows.Err()
 }

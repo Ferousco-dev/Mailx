@@ -123,13 +123,21 @@ func (db *DB) GetRefreshTokenByHash(ctx context.Context, tokenHash string) (Refr
 	return t, nil
 }
 
-// RevokeRefreshToken marks one refresh token row revoked (idempotent).
-func (db *DB) RevokeRefreshToken(ctx context.Context, id string, now time.Time) error {
-	_, err := db.pool.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL`, id, now)
+// RevokeRefreshToken marks one refresh token row revoked, but ONLY if it
+// was not already revoked - the boolean return is load-bearing, not
+// informational: two concurrent Refresh calls for the same token both
+// pass the caller's earlier not-revoked check before either one gets
+// here, so whichever UPDATE actually flips revoked_at (RowsAffected=1,
+// returns true) is the sole winner of that rotation; the loser
+// (RowsAffected=0, returns false) MUST NOT mint a new session, or a
+// single-use refresh token could hand out two valid sessions from one
+// concurrent race.
+func (db *DB) RevokeRefreshToken(ctx context.Context, id string, now time.Time) (bool, error) {
+	tag, err := db.pool.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL`, id, now)
 	if err != nil {
-		return normalizeErr(err)
+		return false, normalizeErr(err)
 	}
-	return nil
+	return tag.RowsAffected() > 0, nil
 }
 
 // RevokeAllRefreshTokensForHuman revokes every active refresh token for a

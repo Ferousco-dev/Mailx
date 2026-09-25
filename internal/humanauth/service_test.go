@@ -127,6 +127,42 @@ func TestRefreshRotatesAndOldTokenStopsWorking(t *testing.T) {
 	}
 }
 
+// TestConcurrentRefreshOnlyOneWins proves the fix for the race Greptile
+// flagged: two goroutines calling Refresh with the SAME token at the same
+// time must not both mint a session (RevokeRefreshToken's RowsAffected
+// check is what prevents a single-use refresh token from producing two
+// valid sessions).
+func TestConcurrentRefreshOnlyOneWins(t *testing.T) {
+	db := newTestDB(t)
+	svc, err := NewService(db, testSecret())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sess, err := svc.SignUp(ctx, "Ada", "ada@example.com", "correct-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 10
+	results := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			_, err := svc.Refresh(ctx, sess.RefreshToken)
+			results <- err
+		}()
+	}
+	successes := 0
+	for i := 0; i < n; i++ {
+		if err := <-results; err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("expected exactly 1 of %d concurrent refreshes to succeed, got %d", n, successes)
+	}
+}
+
 func TestRefreshReuseOfRevokedTokenRevokesWholeSession(t *testing.T) {
 	db := newTestDB(t)
 	svc, err := NewService(db, testSecret())

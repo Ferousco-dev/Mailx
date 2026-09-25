@@ -88,6 +88,8 @@ func loadAbusePolicy(get func(string) string) (policy ratelimit.Policy, enabled 
 	n("MAILX_LIMIT_MAX_PENDING_DISPATCH", &policy.MaxPendingDispatch)
 	n("MAILX_LIMIT_TENANT_CONCURRENCY", &policy.TenantDeliveryConcurrency)
 	n("MAILX_LIMIT_DESTINATION_CONCURRENCY", &policy.DestinationDeliveryConcurrency)
+	f("MAILX_LIMIT_AUTH_IP_RPS", &policy.AuthIPRate)
+	n("MAILX_LIMIT_AUTH_IP_BURST", &policy.AuthIPBurst)
 	n("MAILX_RETRY_JITTER_PERCENT", &policy.RetryJitterPercent)
 	if raw := strings.TrimSpace(get("MAILX_LIMIT_PERMIT_TTL")); raw != "" {
 		d, e := time.ParseDuration(raw)

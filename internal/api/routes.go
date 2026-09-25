@@ -170,9 +170,14 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		// over the "/v1/" catch-all, so these never pass through
 		// authenticateMiddleware/requireScope.
 		ha := &humanAuthHandler{svc: extras[0].humanAuth}
-		mux.HandleFunc("POST /v1/auth/signup", ha.handleSignup)
-		mux.HandleFunc("POST /v1/auth/login", ha.handleLogin)
-		mux.HandleFunc("POST /v1/auth/refresh", ha.handleRefresh)
+		// IP-keyed rate limit: this surface is unauthenticated by
+		// definition (no tenant/API key exists yet), so it never passes
+		// through requestLimitMiddleware above — see authIPLimitMiddleware's
+		// doc for why that would otherwise leave password-guessing/
+		// signup-flooding completely unthrottled.
+		mux.Handle("POST /v1/auth/signup", chain(http.HandlerFunc(ha.handleSignup), authIPLimitMiddleware(abuse)))
+		mux.Handle("POST /v1/auth/login", chain(http.HandlerFunc(ha.handleLogin), authIPLimitMiddleware(abuse)))
+		mux.Handle("POST /v1/auth/refresh", chain(http.HandlerFunc(ha.handleRefresh), authIPLimitMiddleware(abuse)))
 		mux.HandleFunc("POST /v1/auth/logout", ha.handleLogout)
 		orgsAuthenticated := humanAuthMiddleware(extras[0].humanAuth)
 		mux.Handle("POST /v1/orgs", orgsAuthenticated(http.HandlerFunc(ha.handleCreateOrg)))

@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // DefaultRetentionDays applies to any tenant whose retention_days is NULL.
@@ -69,57 +70,38 @@ func (db *DB) SetTenantRetention(ctx context.Context, tenantID string, days *int
 // survives to be retried - together with its disk file - on the next purge
 // tick. deleteDisk should treat "file already absent" as success.
 //
+// Known, accepted narrow race (not fixed - see risks.md): if deleteDisk
+// succeeds for an id but the DB transaction below then fails (a connection
+// drop between here and commit), that id's disk file is gone while its row
+// survives - a lookup in that window returns a record with no body. This
+// is self-healing: the row is still an eligible candidate next cycle,
+// deleteDisk is idempotent (an already-absent file is success), so the next
+// purge tick completes the DB delete. A truly atomic fix needs a two-phase
+// "pending purge" marker column, out of scope for this fix pass - the
+// alternative (DB delete before disk delete) was the ORIGINAL bug this
+// ordering exists to prevent (permanent orphan, not a self-healing window),
+// so this ordering is the deliberately lesser risk.
+//
+// candidateScanFactor bounds how many EXTRA rows beyond purgeBatchLimit one
+// call will page through to work around persistently-failing deletes: a
+// message whose deleteDisk keeps failing (e.g. a permissions problem)
+// would otherwise be reselected first, in the same oldest-first order,
+// every single cycle - starving every other expired message behind it from
+// ever being reached. Paging past failures (up to this many rows scanned)
+// lets the batch fill with whatever GOOD candidates exist beyond the stuck
+// one, while the stuck id itself is simply left for a later cycle (its row
+// is untouched, so it is not lost - just deferred).
+//
 // broadcast_recipients.message_id has no foreign key to messages (it
 // predates this feature and was never given one), so a purged message's
 // id is explicitly nulled out there first to avoid leaving a dangling
 // reference.
+const candidateScanFactor = 10
+
 func (db *DB) PurgeExpiredMessages(ctx context.Context, deleteDisk func(id string) error) ([]string, error) {
-	// Only terminal messages are eligible: 'queued'/'processing'/'retrying'
-	// (messages_status_check, migration 000013) mean the message has not
-	// finished its delivery lifecycle yet - a scheduled send accepted long
-	// before its send_at, or one still being retried, has created_at older
-	// than the window but must not be purged before the worker ever loads
-	// it. Only 'delivered'/'failed'/'bounced'/'suppressed' are terminal.
-	rows, err := db.pool.Query(ctx, `
-		SELECT m.id
-		FROM messages m
-		JOIN tenants t ON t.id = m.tenant_id
-		WHERE m.created_at < now() - make_interval(days => COALESCE(t.retention_days, $1))
-		  AND m.status NOT IN ('queued', 'processing', 'retrying')
-		ORDER BY m.created_at
-		LIMIT $2`,
-		DefaultRetentionDays, purgeBatchLimit,
-	)
+	ids, err := db.collectPurgeableIDs(ctx, deleteDisk)
 	if err != nil {
-		return nil, fmt.Errorf("database: select expired messages: %w", normalizeErr(err))
-	}
-	var candidates []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("database: scan expired message id: %w", err)
-		}
-		candidates = append(candidates, id)
-	}
-	if err := rows.Err(); err != nil {
 		return nil, err
-	}
-	rows.Close()
-
-	if len(candidates) == 0 {
-		return nil, nil
-	}
-
-	// Disk cleanup happens BEFORE any database row is deleted (see doc
-	// above) - only ids that succeed here are eligible for the DB delete
-	// below.
-	ids := make([]string, 0, len(candidates))
-	for _, id := range candidates {
-		if err := deleteDisk(id); err != nil {
-			continue
-		}
-		ids = append(ids, id)
 	}
 	if len(ids) == 0 {
 		return nil, nil
@@ -139,6 +121,73 @@ func (db *DB) PurgeExpiredMessages(ctx context.Context, deleteDisk func(id strin
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("database: commit purge: %w", normalizeErr(err))
+	}
+	return ids, nil
+}
+
+// collectPurgeableIDs pages through expired-message candidates (oldest
+// first) via (created_at, id) keyset pagination, calling deleteDisk on
+// each and keeping only the ones that succeed - see PurgeExpiredMessages's
+// doc for why a persistently-failing id must not block progress on the
+// rest of the backlog. Stops once purgeBatchLimit successes are collected
+// or candidateScanFactor*purgeBatchLimit rows have been scanned, whichever
+// comes first (the latter bounds one call's work even if almost every
+// candidate in a very large backlog is currently failing).
+func (db *DB) collectPurgeableIDs(ctx context.Context, deleteDisk func(id string) error) ([]string, error) {
+	const pageSize = 200
+	maxScanned := purgeBatchLimit * candidateScanFactor
+
+	ids := make([]string, 0, purgeBatchLimit)
+	var afterCreatedAt time.Time
+	var afterID string
+	scanned := 0
+
+	for len(ids) < purgeBatchLimit && scanned < maxScanned {
+		rows, err := db.pool.Query(ctx, `
+			SELECT m.id, m.created_at
+			FROM messages m
+			JOIN tenants t ON t.id = m.tenant_id
+			WHERE m.created_at < now() - make_interval(days => COALESCE(t.retention_days, $1))
+			  AND m.status NOT IN ('queued', 'processing', 'retrying')
+			  AND (m.created_at, m.id) > ($2, $3)
+			ORDER BY m.created_at, m.id
+			LIMIT $4`,
+			DefaultRetentionDays, afterCreatedAt, afterID, pageSize,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("database: select expired messages: %w", normalizeErr(err))
+		}
+		type candidate struct {
+			id        string
+			createdAt time.Time
+		}
+		var page []candidate
+		for rows.Next() {
+			var c candidate
+			if err := rows.Scan(&c.id, &c.createdAt); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("database: scan expired message id: %w", err)
+			}
+			page = append(page, c)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		rows.Close()
+
+		if len(page) == 0 {
+			break // no more candidates at all
+		}
+		for _, c := range page {
+			scanned++
+			if deleteDisk(c.id) == nil {
+				ids = append(ids, c.id)
+				if len(ids) >= purgeBatchLimit {
+					break
+				}
+			}
+			afterCreatedAt, afterID = c.createdAt, c.id
+		}
 	}
 	return ids, nil
 }

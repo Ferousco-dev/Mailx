@@ -189,8 +189,17 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (Session,
 		return Session{}, fmt.Errorf("humanauth: get human: %w", err)
 	}
 
-	if err := s.db.RevokeRefreshToken(ctx, rec.ID, now); err != nil {
+	revoked, err := s.db.RevokeRefreshToken(ctx, rec.ID, now)
+	if err != nil {
 		return Session{}, fmt.Errorf("humanauth: revoke old refresh token: %w", err)
+	}
+	if !revoked {
+		// Lost a concurrent rotation race: another request already
+		// revoked this exact token between our read above and this
+		// UPDATE. Do NOT mint a session here — the winner of the race
+		// already got one, and minting a second would let one refresh
+		// token produce two valid sessions.
+		return Session{}, ErrRefreshTokenInvalid
 	}
 	return s.mintSession(ctx, h)
 }
@@ -204,7 +213,8 @@ func (s *Service) Logout(ctx context.Context, rawRefreshToken string) error {
 		}
 		return fmt.Errorf("humanauth: get refresh token: %w", err)
 	}
-	return s.db.RevokeRefreshToken(ctx, rec.ID, s.now())
+	_, err = s.db.RevokeRefreshToken(ctx, rec.ID, s.now())
+	return err
 }
 
 // VerifyAccessToken validates a JWT access token and returns its claims,

@@ -86,11 +86,29 @@ type NewMessage struct {
 	// verified and not deleted (FOR SHARE), so a domain deleted between the API's
 	// pre-check and the commit cannot slip an unauthorized message through.
 	SenderDomain string
+	// RequireBroadcastRecipientID, when non-empty, re-checks in the SAME
+	// transaction (FOR UPDATE - a real row lock, not just a read) that this
+	// broadcast_recipients row still exists before inserting the message.
+	// The broadcast expander sets this: it claims a recipient's snapshot
+	// (email/name/attributes) into memory well before this insert, and a
+	// GDPR erasure (database.DeleteSubjectData) deleting that same row
+	// concurrently must not still let this message go out to the erased
+	// address. FOR UPDATE means whichever transaction (this insert, or the
+	// erasure's DELETE) commits first wins; the other sees a consistent
+	// state instead of racing on stale in-memory data. See ErrRecipientErased.
+	RequireBroadcastRecipientID string
 }
 
 // ErrSenderNotAuthorized means the tenant does not (or no longer does) own the
 // From domain as a verified domain.
 var ErrSenderNotAuthorized = errors.New("database: sender domain is not authorized for this tenant")
+
+// ErrRecipientErased means RequireBroadcastRecipientID no longer exists -
+// the recipient was removed (e.g. by a GDPR erasure) after being claimed
+// for materialization. Callers should treat this as a successful skip
+// (the recipient's own request to be forgotten wins), never as a failure
+// to retry.
+var ErrRecipientErased = errors.New("database: broadcast recipient no longer exists")
 
 // IdempotencyCompletion identifies the idempotency_keys row to complete.
 // TenantID is taken from NewMessage.TenantID (the two must always agree,
@@ -153,6 +171,18 @@ func (db *DB) InsertMessage(ctx context.Context, in NewMessage) (Message, error)
 		return Message{}, fmt.Errorf("database: begin insert message: %w", normalizeErr(err))
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+
+	if in.RequireBroadcastRecipientID != "" {
+		var exists int
+		err := tx.QueryRow(ctx, `SELECT 1 FROM broadcast_recipients WHERE id = $1 FOR UPDATE`,
+			in.RequireBroadcastRecipientID).Scan(&exists)
+		if errors.Is(normalizeErr(err), ErrNotFound) {
+			return Message{}, ErrRecipientErased
+		}
+		if err != nil {
+			return Message{}, fmt.Errorf("database: check broadcast recipient still exists: %w", normalizeErr(err))
+		}
+	}
 
 	// sendingPoolID is the SenderDomain's operator-assigned pool, read under
 	// the SAME FOR SHARE lock as the verified-domain check below, so it

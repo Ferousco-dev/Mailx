@@ -263,3 +263,47 @@ func TestDeleteSubjectDataNoMatchIsNotAnError(t *testing.T) {
 		t.Fatalf("expected a no-op result, got %+v", result)
 	}
 }
+
+func TestExportSubjectDataIncludesBroadcastSnapshots(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+
+	aud, err := db.CreateAudience(ctx, NewAudience{TenantID: tn.ID, Name: "gdpr-export-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := db.CreateTemplate(ctx, NewTemplate{TenantID: tn.ID, Name: "gdpr-export-tmpl", Subject: "hi", HTML: "<p>hi</p>"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := db.CreateBroadcast(ctx, NewBroadcast{TenantID: tn.ID, Name: "gdpr-export-broadcast", AudienceID: aud.ID, TemplateID: tmpl.ID, FromAddress: "a@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dummyContactID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx,
+		`INSERT INTO broadcast_recipients (id, broadcast_id, tenant_id, contact_id, email, name, attributes, status) VALUES ($1,$2,$3,$4,$5,$6,$7,'materialized')`,
+		snapID, b.ID, tn.ID, dummyContactID, "snapshot@example.com", "Snapshot Person", []byte(`{"plan":"pro"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := db.ExportSubjectData(ctx, tn.ID, "snapshot@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data.BroadcastSnapshots) != 1 {
+		t.Fatalf("expected 1 broadcast snapshot in export, got %d", len(data.BroadcastSnapshots))
+	}
+	s := data.BroadcastSnapshots[0]
+	if s.ID != snapID || s.Name != "Snapshot Person" || s.Attributes["plan"] != "pro" {
+		t.Fatalf("unexpected snapshot data: %+v", s)
+	}
+}

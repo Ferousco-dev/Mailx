@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -94,6 +95,56 @@ func requestLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
 				writeError(w, r, e)
 			default:
 				a.Metrics.AbuseDecision("request", "allowed")
+				next.ServeHTTP(w, r)
+			}
+		})
+	}
+}
+
+// authIPLimitMiddleware protects the unauthenticated human-auth surface
+// (POST /v1/auth/signup|login|refresh) from password-guessing/account-
+// enumeration/signup-flooding — these requests are registered OUTSIDE the
+// /v1/ authenticated chain (see routes.go's comment on why) and so never
+// pass through requestLimitMiddleware, which is keyed by tenant/API key
+// that don't exist yet at this point. The only identity available
+// pre-auth is the client's IP.
+//
+// Deliberately RemoteAddr only, not X-Forwarded-For: trusting a
+// client-supplied header without a configured trusted-proxy allowlist
+// would let an attacker spoof a different IP per request and bypass this
+// entirely. A reverse-proxy deployment wanting real client IPs here needs
+// that trust boundary established first — a separate, later change.
+func authIPLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if a == nil || a.Limiter == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				ip = r.RemoteAddr // no port present (e.g. unix socket, some test harnesses)
+			}
+			p := a.Policy
+			dec, err := a.Limiter.Allow(r.Context(),
+				ratelimit.Bucket{Key: "auth:ip:" + ip, Rate: p.AuthIPRate, Burst: p.AuthIPBurst, Cost: 1},
+			)
+			switch {
+			case err != nil:
+				a.Metrics.AbuseDecision("auth", "unavailable")
+				a.log().Error("rate_limiter_unavailable", "route_class", "auth")
+				e := newError(ErrTemporarilyUnavailable, "rate_limiter_unavailable", "request limiting is temporarily unavailable; retry later")
+				e.RetryAfter = unavailableRetryAfter
+				writeError(w, r, e)
+			case dec.Impossible:
+				a.Metrics.AbuseDecision("auth", "impossible")
+				writeError(w, r, newError(ErrInternal, "internal_error", "request limit is misconfigured"))
+			case !dec.Allowed:
+				a.Metrics.AbuseDecision("auth", "limited")
+				e := newError(ErrRateLimited, "auth_rate_limited", "too many authentication attempts from this address; retry after the interval in Retry-After")
+				e.RetryAfter = ratelimit.RetryAfterSeconds(dec.RetryAfter)
+				writeError(w, r, e)
+			default:
+				a.Metrics.AbuseDecision("auth", "allowed")
 				next.ServeHTTP(w, r)
 			}
 		})

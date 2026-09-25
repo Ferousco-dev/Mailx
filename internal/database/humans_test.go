@@ -52,8 +52,12 @@ func TestRefreshTokenLifecycle(t *testing.T) {
 	if got.RevokedAt != nil {
 		t.Fatal("expected not revoked")
 	}
-	if err := db.RevokeRefreshToken(ctx, tok.ID, now); err != nil {
+	revoked, err := db.RevokeRefreshToken(ctx, tok.ID, now)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !revoked {
+		t.Fatal("expected RevokeRefreshToken to report it revoked the row")
 	}
 	got, err = db.GetRefreshTokenByHash(ctx, "hash-of-raw")
 	if err != nil {
@@ -61,6 +65,14 @@ func TestRefreshTokenLifecycle(t *testing.T) {
 	}
 	if got.RevokedAt == nil {
 		t.Fatal("expected revoked")
+	}
+
+	revokedAgain, err := db.RevokeRefreshToken(ctx, tok.ID, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revokedAgain {
+		t.Fatal("expected a second revoke of the same already-revoked token to report false (the race-safety signal)")
 	}
 }
 

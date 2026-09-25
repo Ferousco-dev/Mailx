@@ -308,3 +308,61 @@ func TestPurgeExpiredMessagesKeepsDBRowWhenDiskDeleteFails(t *testing.T) {
 		t.Fatalf("expected the successfully disk-deleted message's DB row to be gone: %v", err)
 	}
 }
+
+// TestPurgeExpiredMessagesSkipsPastConsecutiveFailures proves the fix for
+// the starvation Greptile flagged: several persistently-failing OLDEST
+// candidates must not prevent a NEWER, successfully-deleted candidate from
+// being purged in the same call. (Reproducing the original bug at its real
+// scale - over purgeBatchLimit=1000 failing candidates persisting across
+// multiple purge ticks - is impractical for a unit test; this exercises
+// the same underlying mechanism, collectPurgeableIDs's cursor advancing
+// past a failure instead of getting stuck re-selecting it, at a small
+// scale.)
+func TestPurgeExpiredMessagesSkipsPastConsecutiveFailures(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+
+	one := 1
+	if err := db.SetTenantRetention(ctx, tn.ID, &one); err != nil {
+		t.Fatal(err)
+	}
+
+	const numFailing = 5
+	failingIDs := make(map[string]bool, numFailing)
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	for i := 0; i < numFailing; i++ {
+		msg, err := db.InsertMessage(ctx, sampleNewMessage(t, tn.ID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		backdateMessage(t, db, msg.ID, old.Add(time.Duration(i)*time.Second)) // oldest first
+		markMessageTerminal(t, db, msg.ID, "delivered")
+		failingIDs[msg.ID] = true
+	}
+	okMsg, err := db.InsertMessage(ctx, sampleNewMessage(t, tn.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backdateMessage(t, db, okMsg.ID, old.Add(numFailing*time.Second)) // newest of the expired set
+	markMessageTerminal(t, db, okMsg.ID, "delivered")
+
+	deleteDisk := func(id string) error {
+		if failingIDs[id] {
+			return errors.New("simulated persistent disk failure")
+		}
+		return nil
+	}
+	purged, err := db.PurgeExpiredMessages(ctx, deleteDisk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(purged) != 1 || purged[0] != okMsg.ID {
+		t.Fatalf("expected the newer message to be purged despite older persistent failures ahead of it, got %v", purged)
+	}
+	for id := range failingIDs {
+		if _, err := db.GetMessage(ctx, tn.ID, id); err != nil {
+			t.Fatalf("expected failing message %s's row to survive for retry: %v", id, err)
+		}
+	}
+}

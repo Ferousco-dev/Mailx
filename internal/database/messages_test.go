@@ -498,3 +498,96 @@ func TestContextCancellationDuringQuery(t *testing.T) {
 }
 
 var _ = fmt.Sprintf
+
+// TestInsertMessageRequireBroadcastRecipientIDBlocksOnAlreadyDeletedRow
+// proves the fix for the race Greptile flagged: a broadcast_recipients row
+// erased (e.g. by GDPR gdpr-delete) between being claimed by the expander
+// and this insert must stop the insert, atomically (via FOR UPDATE row
+// locking), rather than trusting stale in-memory claim data.
+func TestInsertMessageRequireBroadcastRecipientIDBlocksOnAlreadyDeletedRow(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+
+	aud, err := db.CreateAudience(ctx, NewAudience{TenantID: tn.ID, Name: "race-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := db.CreateTemplate(ctx, NewTemplate{TenantID: tn.ID, Name: "race-tmpl", Subject: "hi", HTML: "<p>hi</p>"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := db.CreateBroadcast(ctx, NewBroadcast{TenantID: tn.ID, Name: "race-broadcast", AudienceID: aud.ID, TemplateID: tmpl.ID, FromAddress: "a@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dummyContactID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx,
+		`INSERT INTO broadcast_recipients (id, broadcast_id, tenant_id, contact_id, email, status) VALUES ($1,$2,$3,$4,$5,'pending')`,
+		recID, b.ID, tn.ID, dummyContactID, "raced@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate the erasure: delete the row exactly as gdpr-delete does,
+	// BEFORE the "expander" (this test) gets to InsertMessage.
+	if _, err := db.pool.Exec(ctx, `DELETE FROM broadcast_recipients WHERE id = $1`, recID); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := sampleNewMessage(t, tn.ID)
+	msg.RequireBroadcastRecipientID = recID
+	if _, err := db.InsertMessage(ctx, msg); !errors.Is(err, ErrRecipientErased) {
+		t.Fatalf("expected ErrRecipientErased, got %v", err)
+	}
+	if _, err := db.GetMessage(ctx, tn.ID, msg.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected no message to have been inserted, got %v", err)
+	}
+}
+
+// TestInsertMessageRequireBroadcastRecipientIDAllowsExistingRow is the
+// control case: the row still exists, so the insert must proceed exactly
+// as it would without RequireBroadcastRecipientID set.
+func TestInsertMessageRequireBroadcastRecipientIDAllowsExistingRow(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+
+	aud, err := db.CreateAudience(ctx, NewAudience{TenantID: tn.ID, Name: "race-test-ok"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := db.CreateTemplate(ctx, NewTemplate{TenantID: tn.ID, Name: "race-tmpl-ok", Subject: "hi", HTML: "<p>hi</p>"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := db.CreateBroadcast(ctx, NewBroadcast{TenantID: tn.ID, Name: "race-broadcast-ok", AudienceID: aud.ID, TemplateID: tmpl.ID, FromAddress: "a@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dummyContactID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx,
+		`INSERT INTO broadcast_recipients (id, broadcast_id, tenant_id, contact_id, email, status) VALUES ($1,$2,$3,$4,$5,'pending')`,
+		recID, b.ID, tn.ID, dummyContactID, "notraced@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	msg := sampleNewMessage(t, tn.ID)
+	msg.RequireBroadcastRecipientID = recID
+	if _, err := db.InsertMessage(ctx, msg); err != nil {
+		t.Fatalf("expected insert to succeed while the recipient row still exists: %v", err)
+	}
+}

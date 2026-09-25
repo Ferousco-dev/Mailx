@@ -353,9 +353,22 @@ func (e *Expander) materializeOne(ctx context.Context, b database.Broadcast, fro
 	_, err = e.db.InsertMessage(ctx, database.NewMessage{
 		ID: r.ID, TenantID: b.TenantID, MailFrom: built.From, FromHeader: b.FromAddress,
 		Subject: rendered.Subject, MessageIDHeader: messageID,
-		Recipients:   []database.RecipientInput{{Address: built.Envelope[0], HeaderKind: &role}},
-		SenderDomain: fromDomain,
+		Recipients:                  []database.RecipientInput{{Address: built.Envelope[0], HeaderKind: &role}},
+		SenderDomain:                fromDomain,
+		RequireBroadcastRecipientID: r.ID,
 	})
+	if errors.Is(err, database.ErrRecipientErased) {
+		// The recipient was erased (GDPR gdpr-delete) between being claimed
+		// above and this insert — the file just saved above is now for a
+		// message that will never exist in the DB; clean it up rather than
+		// leaving it orphaned on disk. Treat this exactly like ErrConflict
+		// below: a terminal, non-retryable outcome for this recipient, not
+		// a failure.
+		if delErr := e.store.Delete(r.ID); delErr != nil {
+			e.log.Warn("erased_recipient_disk_cleanup_failed", "recipient_id", r.ID, "error", delErr.Error())
+		}
+		return nil
+	}
 	if err != nil && !errors.Is(err, database.ErrConflict) { // ErrConflict here = already inserted by a prior crashed attempt: idempotent success
 		return fmt.Errorf("insert message: %w", err)
 	}
