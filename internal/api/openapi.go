@@ -46,6 +46,75 @@ const openAPISpec = `{
     }
   ],
   "paths": {
+    "/auth/signup": {
+      "post": {
+        "summary": "Create a human account",
+        "description": "Public (no auth required). Distinct from the tenant-scoped API-key surface: this creates a human/browser session, not a tenant.",
+        "security": [],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SignUpRequest"}}}},
+        "responses": {
+          "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}},
+          "409": {"description": "Email already registered", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "422": {"description": "Validation error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/auth/login": {
+      "post": {
+        "summary": "Log in with email and password",
+        "description": "Public (no auth required). Returns the same generic invalid_credentials error for an unknown email and a wrong password, to avoid email enumeration.",
+        "security": [],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LoginRequest"}}}},
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}},
+          "401": {"description": "Invalid credentials", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "summary": "Rotate a refresh token for a new access/refresh pair",
+        "description": "Public, but requires a valid refresh token in the body. Reuse of an already-rotated token revokes the whole session.",
+        "security": [],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefreshRequest"}}}},
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}},
+          "401": {"description": "Invalid, expired, or revoked refresh token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "summary": "Revoke a refresh token",
+        "description": "Public, but requires a valid refresh token in the body.",
+        "security": [],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefreshRequest"}}}},
+        "responses": {
+          "204": {"description": "No Content"}
+        }
+      }
+    },
+    "/orgs": {
+      "post": {
+        "summary": "Create an organization",
+        "description": "Requires a human access token (HumanAuth), not an API key. An organization is a MailX tenant plus an owner membership row, created atomically.",
+        "security": [{"HumanAuth": []}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateOrganizationRequest"}}}},
+        "responses": {
+          "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Organization"}}}},
+          "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      },
+      "get": {
+        "summary": "List organizations the caller belongs to",
+        "description": "Requires a human access token (HumanAuth). Returns only organizations the caller is a member of.",
+        "security": [{"HumanAuth": []}],
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrganizationList"}}}},
+          "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
     "/emails": {
       "post": {
         "summary": "Send an email",
@@ -2677,6 +2746,12 @@ const openAPISpec = `{
         "type": "http",
         "scheme": "bearer",
         "description": "A MailX API key (format mx_<key_id>_<secret>), created via the mailx CLI - NOT a JWT. Paste the raw key (including the mx_ prefix) into Swagger UI's Authorize button to try requests here."
+      },
+      "HumanAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "A short-lived (~15 minute) human-session access token returned by /auth/login, /auth/signup, or /auth/refresh. Separate mechanism from ApiKeyAuth: this authenticates a human/browser caller, never a tenant-scoped integration."
       }
     },
     "responses": {
@@ -2692,6 +2767,69 @@ const openAPISpec = `{
       }
     },
     "schemas": {
+      "SignUpRequest": {
+        "type": "object",
+        "required": ["name", "email", "password"],
+        "properties": {
+          "name": {"type": "string", "example": "Ada Lovelace"},
+          "email": {"type": "string", "format": "email"},
+          "password": {"type": "string", "format": "password", "minLength": 8}
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": ["email", "password"],
+        "properties": {
+          "email": {"type": "string", "format": "email"},
+          "password": {"type": "string", "format": "password"},
+          "remember": {"type": "boolean"}
+        }
+      },
+      "RefreshRequest": {
+        "type": "object",
+        "required": ["refresh_token"],
+        "properties": {
+          "refresh_token": {"type": "string"}
+        }
+      },
+      "Human": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "email": {"type": "string", "format": "email"}
+        }
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "human": {"$ref": "#/components/schemas/Human"},
+          "access_token": {"type": "string", "description": "Short-lived (~15 minute) JWT."},
+          "refresh_token": {"type": "string", "description": "Longer-lived, rotating, revocable."}
+        }
+      },
+      "CreateOrganizationRequest": {
+        "type": "object",
+        "required": ["name", "slug"],
+        "properties": {
+          "name": {"type": "string"},
+          "slug": {"type": "string"}
+        }
+      },
+      "Organization": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "name": {"type": "string"},
+          "created_at": {"type": "string", "format": "date-time"}
+        }
+      },
+      "OrganizationList": {
+        "type": "object",
+        "properties": {
+          "data": {"type": "array", "items": {"$ref": "#/components/schemas/Organization"}}
+        }
+      },
       "SendEmailRequest": {
         "type": "object",
         "required": [

@@ -84,3 +84,16 @@ commit dates (all v0.1-v0.15 work is dated 2026-09-13..15).
 - v0.48 Stress Test (pre-deployment): **PLANNED, NOT STARTED.** The longest milestone in the roadmap. A comprehensive load/stress test of every MailX feature (send with attachments, templates, contacts, audiences, broadcasts, scheduled sending, analytics, webhooks) run locally in a virtual environment before any real deployment, using Mailpit as the local mail-capture target. Traffic profile: measured from low traffic up to heavy traffic, with heavy-traffic ceilings deliberately calibrated against the actual target deployment constraint — an AWS instance around the $7/month tier (plus a ~$200 AWS free-credit window usable only once real deployment begins, not during local testing) — so results are used to find MailX's real operating limits on that hardware class, not an arbitrary synthetic number. Must produce concrete evidence (throughput, latency, resource usage, failure modes at saturation, backpressure/abuse-control behavior under load) before v1/production readiness is declared. Needs its own design pass before implementation: exact traffic profiles, measurement methodology, and pass/fail criteria are not yet defined.
 
 Deliberately excluded from the roadmap (infra/org concerns, not MailX code): SOC 2 Type II certification, penetration testing, DDoS protection, automated backups. General inbound email remains excluded pre-v1 (CR-015).
+
+## v0.47 (PARTIAL) — Human Accounts & Organizations, Phase 1
+
+Status: Phase 1 complete — human signup/login/JWT-access/rotating-refresh-token auth, and
+organizations-as-tenants membership (owner role), wired into the existing API server under
+`/v1/auth/*` and `/v1/orgs`. Billing/plans, password reset/verification, OAuth, and MFA are
+explicitly deferred to a later phase — v0.47 as a whole is NOT complete.
+
+- Migration 000025 (`humans`, `refresh_tokens`, `tenant_members`).
+- `internal/humanauth` package (see architecture.md and DEC-205/DEC-206).
+- `internal/api` gained `humanauth_handler.go` and `humanAuthMiddleware`, wired via `api.Config.HumanAuth`.
+- `internal/api/openapi.go` documents `/auth/signup`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/orgs` (GET/POST) and a `HumanAuth` security scheme; `TestOpenAPIRoutesMatchRuntime`/`TestOpenAPISpecParses` still pass.
+- Tests: `internal/database/humans_test.go` (7 cases, real Postgres) and `internal/humanauth/service_test.go` (7 cases, real Postgres), covering duplicate-email rejection, case-insensitive login, refresh rotation, reuse-of-revoked-token session-wide revocation, logout, atomic org creation (including the failure-leaves-no-orphan case), membership-scoped listing, and JWT round-trip/tamper/expiry.

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,7 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/delivery"
 	"github.com/Ferousco-dev/mailx/internal/dispatch"
 	"github.com/Ferousco-dev/mailx/internal/dns"
+	"github.com/Ferousco-dev/mailx/internal/humanauth"
 	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/queue"
 	"github.com/Ferousco-dev/mailx/internal/retry"
@@ -117,13 +119,18 @@ func runFull() error {
 	if err != nil {
 		return err
 	}
+	humanAuthSvc, err := humanauth.NewService(db, jwtSecret())
+	if err != nil {
+		return err
+	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
 		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, BIMI: bimiSvc, MessageIDDomain: ident.Name(), Abuse: abuse.apiControls(o),
 		TrackingSecret: trackingSecret(), TrackingBaseURL: os.Getenv("MAILX_TRACKING_BASE_URL"),
-		Feedback: fbCfg,
-		Ready:    ready.Check,
-		Logger:   o.log, Metrics: o.metrics,
+		Feedback:  fbCfg,
+		HumanAuth: humanAuthSvc,
+		Ready:     ready.Check,
+		Logger:    o.log, Metrics: o.metrics,
 	})
 	if err != nil {
 		return err
@@ -290,6 +297,23 @@ func apiKeyPepper() []byte {
 	}
 	slog.Warn("api_key_pepper_not_set", "detail", "API key verifiers are unkeyed SHA-256; fine for local development, set MAILX_API_KEY_PEPPER before handling real credentials")
 	return nil
+}
+
+// jwtSecret follows apiKeyPepper's convention: read from an env var,
+// warn-and-fall-back for local development. Unlike the pepper, a human
+// JWT cannot sign with an empty secret, so the fallback is a random
+// per-process secret (invalidates all sessions on restart) rather than
+// no keying at all.
+func jwtSecret() []byte {
+	if s := os.Getenv("MAILX_JWT_SECRET"); s != "" {
+		return []byte(s)
+	}
+	slog.Warn("jwt_secret_not_set", "detail", "MAILX_JWT_SECRET not set; using an ephemeral per-process secret, which invalidates all human sessions on restart. Set MAILX_JWT_SECRET before handling real accounts.")
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("jwt secret fallback: %v", err))
+	}
+	return b
 }
 
 func trackingSecret() []byte {

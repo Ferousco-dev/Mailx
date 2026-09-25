@@ -18,7 +18,7 @@
     "DEF": 27,
     "CR": 24,
     "RSK": 40,
-    "DEC": 204,
+    "DEC": 206,
     "MET": 72,
     "ETH": 1
   },
@@ -34,10 +34,10 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.45",
-    "ilana_current_through": "v0.45",
-    "current_milestone": "none",
-    "current_milestone_status": "v0.45 complete",
-    "next_milestone": "v0.46 Data Retention & GDPR Tooling (not started; needs a retention-policy design pass first)"
+    "last_completed_milestone": "v0.46",
+    "ilana_current_through": "v0.47 (partial)",
+    "current_milestone": "v0.47 Human Accounts & Organizations",
+    "current_milestone_status": "v0.47 phase 1 complete (human auth + org membership); billing/plans, password reset, OAuth, MFA deferred to a later phase",
+    "next_milestone": "v0.47 phase 2 (billing/plans) or v0.48 (TBD)"
   }
 }
