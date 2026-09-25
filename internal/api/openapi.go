@@ -151,6 +151,90 @@ const openAPISpec = `{
           "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"message": {"type": "string"}}}}}},
           "403": {"description": "Caller is not an owner of this organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
         }
+      },
+      "get": {
+        "summary": "List pending invitations",
+        "description": "Owner only (it reveals invitees' email addresses). Returns unaccepted, unexpired invitations, newest first.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}],
+        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"data": {"type": "array", "items": {"type": "object", "properties": {"id": {"type": "string"}, "email": {"type": "string"}, "invited_by": {"type": "string", "description": "Inviting human ID."}, "expires_at": {"type": "string", "format": "date-time"}, "created_at": {"type": "string", "format": "date-time"}}}}}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "403": {"description": "Caller is a member but not an owner of this organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      }
+    },
+    "/me": {
+      "get": {
+        "summary": "Get the caller's profile and organizations",
+        "description": "Requires a human access token (HumanAuth).",
+        "security": [{"HumanAuth": []}],
+        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "email": {"type": "string"}, "avatar_url": {"type": "string", "nullable": true}, "last_login_at": {"type": "string", "format": "date-time", "nullable": true}, "created_at": {"type": "string", "format": "date-time"}, "organizations": {"type": "array", "items": {"$ref": "#/components/schemas/Organization"}}}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      },
+      "patch": {
+        "summary": "Update the caller's name and/or avatar_url",
+        "description": "Requires a human access token (HumanAuth). Omitted fields are unchanged. Email cannot be changed here.",
+        "security": [{"HumanAuth": []}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 200}, "avatar_url": {"type": "string", "description": "Absolute http(s) URL, max 2048 chars; empty string clears it."}}}}}},
+        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "email": {"type": "string"}, "avatar_url": {"type": "string", "nullable": true}, "last_login_at": {"type": "string", "format": "date-time", "nullable": true}, "created_at": {"type": "string", "format": "date-time"}, "organizations": {"type": "array", "items": {"$ref": "#/components/schemas/Organization"}}}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "422": {"description": "Invalid name or URL", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      }
+    },
+    "/orgs/{id}": {
+      "get": {
+        "summary": "Get an organization",
+        "description": "Requires a human access token (HumanAuth) of any member; a non-member gets 404 organization_not_found, the same as a nonexistent organization.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}],
+        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "logo_url": {"type": "string", "nullable": true}, "plan": {"type": "string", "enum": ["free", "plus", "pro"]}, "plan_status": {"type": "string", "enum": ["active", "lapsed"]}, "plan_current_period_end": {"type": "string", "format": "date-time", "nullable": true}, "created_at": {"type": "string", "format": "date-time"}}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      },
+      "patch": {
+        "summary": "Update an organization's name and/or logo_url",
+        "description": "Owner only (403 not_org_owner for other members, 404 for non-members). Omitted fields are unchanged.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 200}, "logo_url": {"type": "string", "description": "Absolute http(s) URL, max 2048 chars; empty string clears it."}}}}}},
+        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "logo_url": {"type": "string", "nullable": true}, "plan": {"type": "string", "enum": ["free", "plus", "pro"]}, "plan_status": {"type": "string", "enum": ["active", "lapsed"]}, "plan_current_period_end": {"type": "string", "format": "date-time", "nullable": true}, "created_at": {"type": "string", "format": "date-time"}}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "403": {"description": "Caller is a member but not an owner of this organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "422": {"description": "Invalid name or URL", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      }
+    },
+    "/orgs/{id}/members": {
+      "get": {
+        "summary": "List an organization's members",
+        "description": "Any member may call it; non-members get 404.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}],
+        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"data": {"type": "array", "items": {"type": "object", "properties": {"human_id": {"type": "string"}, "name": {"type": "string"}, "email": {"type": "string"}, "avatar_url": {"type": "string", "nullable": true}, "role": {"type": "string"}, "joined_at": {"type": "string", "format": "date-time"}}}}}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      }
+    },
+    "/orgs/{id}/members/{humanId}": {
+      "delete": {
+        "summary": "Remove a member",
+        "description": "Owner only. An owner cannot remove themselves (409 cannot_remove_self), and an organization always keeps at least one owner (409 last_owner). Removals for one organization are serialized, so concurrent removals can never leave it ownerless.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}, {"name": "humanId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": { "204": {"description": "Removed"}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "403": {"description": "Caller is a member but not an owner of this organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization or member not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "409": {"description": "Self-removal or last owner", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      }
+    },
+    "/orgs/{id}/invites/{inviteId}": {
+      "delete": {
+        "summary": "Revoke a pending invitation",
+        "description": "Owner only. Expires the invitation immediately. Idempotent: revoking an already expired or accepted invitation succeeds and changes nothing.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}, {"name": "inviteId", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": { "204": {"description": "Revoked (or already inactive)"}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "403": {"description": "Caller is a member but not an owner of this organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization or invitation not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      }
+    },
+    "/orgs/{id}/analytics/overview": {
+      "get": {
+        "summary": "Organization analytics overview (dashboard)",
+        "description": "Same semantics and response as GET /analytics/overview, but authenticated by a human access token of any member of the organization instead of an API key. Non-members get 404.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}, {"name": "from", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}}, {"name": "to", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}}],
+        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AnalyticsOverview"}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "422": {"description": "Invalid range", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      }
+    },
+    "/orgs/{id}/analytics/timeseries": {
+      "get": {
+        "summary": "Organization analytics timeseries (dashboard)",
+        "description": "Same semantics and response as GET /analytics/timeseries, but authenticated by a human access token of any member of the organization instead of an API key. Non-members get 404.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}, {"name": "from", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}}, {"name": "to", "in": "query", "required": true, "schema": {"type": "string", "format": "date-time"}}, {"name": "interval", "in": "query", "required": true, "schema": {"type": "string", "enum": ["hour", "day"]}}],
+        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/AnalyticsBucket"}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "422": {"description": "Invalid range or interval", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
       }
     },
     "/orgs/invites/accept": {

@@ -106,3 +106,8 @@ explicitly deferred to a later phase — v0.47 as a whole is NOT complete.
 - Routes (only when `MAILX_PAYSTACK_SECRET_KEY` set): POST /v1/billing/checkout, GET /v1/billing/subscription, POST /v1/billing/webhook; `plan-lapse` hourly component.
 - Enforcement wired into admitSend (daily volume), domain create, invite send + both accept transactions (member cap, row-locked), broadcast create, webhook create, retention purge default. All inert when billing is not configured (DEC-221..225).
 - Tests: `internal/billing/billing_test.go`, `internal/database/plans_test.go` (incl. concurrent-accept race), `internal/api/billing_handler_test.go`, `internal/humanauth` member-cap test. Full `go test -race ./...` clean against real Postgres+Redis (0 skips in database/api/humanauth); migration down/up round-trip on a disposable DB; Docker rebuild+boot clean.
+
+## v0.47 phase 3a — Dashboard backend proper (profile, org detail, members, invites, org analytics) — COMPLETE (scope per DEC-228..230)
+- 10 human-JWT routes in `internal/api/dashboard_handler.go`, DB layer `internal/database/dashboard.go`, OpenAPI documented; no migration.
+- Tests: `internal/database/dashboard_test.go` (rules, concurrent mutual-removal race, invite list/revoke idempotency, profile/org update), `internal/api/dashboard_handler_test.go` (every endpoint: happy path, non-member 404, non-owner 403, validation).
+- Deferred: leave org / transfer ownership / role changes, email change, org slug column. Plan auto-renewal and OAuth/MFA are separate parallel work, not part of 3a.
