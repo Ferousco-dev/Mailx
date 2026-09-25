@@ -228,6 +228,7 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 			billingAuthenticated := humanAuthMiddleware(extras[0].humanAuth)
 			mux.Handle("POST /v1/billing/checkout", billingAuthenticated(http.HandlerFunc(bh.handleCheckout)))
 			mux.Handle("GET /v1/billing/subscription", billingAuthenticated(http.HandlerFunc(bh.handleSubscription)))
+			mux.Handle("PATCH /v1/billing/auto-renew", billingAuthenticated(http.HandlerFunc(bh.handleAutoRenew)))
 		}
 	}
 	if len(extras) > 0 && extras[0].feedback != nil {
