@@ -467,17 +467,18 @@ func (s *Service) InviteToOrganization(ctx context.Context, inviterHumanID, tena
 	if err != nil {
 		return err
 	}
-	if _, err := s.db.CreateOrgInvitation(ctx, tenantID, inviterHumanID, email, hashRawToken(raw), s.now().Add(OrgInvitationTTL)); err != nil {
-		return fmt.Errorf("humanauth: create org invitation: %w", err)
-	}
 	if s.mailer == nil {
-		return fmt.Errorf("humanauth: org invitation created but no mailer is configured")
+		return fmt.Errorf("humanauth: no mailer is configured; cannot send an org invitation")
 	}
 	if s.dashboardBaseURL == "" {
 		// A mailer without a dashboard URL would send a relative
 		// "/accept-invite?token=..." link the recipient has no host to
 		// resolve against - same fix as ForgotPassword's (Greptile P1, PR #23).
 		return fmt.Errorf("humanauth: mailer is configured but dashboard base URL is not; refusing to send an unusable invitation link")
+	}
+	inv, err := s.db.CreateOrgInvitation(ctx, tenantID, inviterHumanID, email, hashRawToken(raw), s.now().Add(OrgInvitationTTL))
+	if err != nil {
+		return fmt.Errorf("humanauth: create org invitation: %w", err)
 	}
 	link := s.dashboardBaseURL + "/accept-invite?token=" + raw
 	subject := fmt.Sprintf("%s invites you to join the organization", tenant.Name)
@@ -487,7 +488,17 @@ func (s *Service) InviteToOrganization(ctx context.Context, inviterHumanID, tena
 		inviter.Name, inviter.Email, tenant.Name, link)
 	html := orgInvitationHTML(tenant, inviter, link)
 	if err := s.mailer.SendSystemEmail(ctx, email, subject, text, html); err != nil {
+		// Deliberately do NOT supersede any prior pending invitation here:
+		// this new one was never delivered, so invalidating an older,
+		// still-working link would leave the invitee with nothing usable
+		// at all (Greptile P1, PR #23).
 		return fmt.Errorf("humanauth: send org invitation email: %w", err)
+	}
+	// Only now that the new link is confirmed delivered is it safe to kill
+	// any other pending invitation to the same address - see
+	// SupersedeOtherPendingOrgInvitations's doc.
+	if err := s.db.SupersedeOtherPendingOrgInvitations(ctx, tenantID, email, inv.ID, s.now()); err != nil {
+		return fmt.Errorf("humanauth: supersede prior invitations: %w", err)
 	}
 	return nil
 }

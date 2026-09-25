@@ -323,10 +323,15 @@ func TestAccessTokenRoundTripsAndRejectsTamperedOrExpired(t *testing.T) {
 // fakeMailer records calls instead of sending; ForgotPassword's
 // anti-enumeration behavior only calls it when the account exists.
 type fakeMailer struct {
-	calls []struct{ to, subject, text, html string }
+	calls    []struct{ to, subject, text, html string }
+	failNext bool // when true, the NEXT call fails (and is not recorded) then resets
 }
 
 func (m *fakeMailer) SendSystemEmail(_ context.Context, to, subject, text, html string) error {
+	if m.failNext {
+		m.failNext = false
+		return fmt.Errorf("fakeMailer: simulated send failure")
+	}
 	m.calls = append(m.calls, struct{ to, subject, text, html string }{to, subject, text, html})
 	return nil
 }

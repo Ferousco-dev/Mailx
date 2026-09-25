@@ -340,3 +340,41 @@ func TestReInvitingSameAddressInvalidatesThePriorLink(t *testing.T) {
 		t.Fatalf("expected the second (current) invitation link to still work: %v", err)
 	}
 }
+
+// TestFailedResendDoesNotInvalidateTheWorkingLink is a regression test for
+// Greptile's P1 finding on the dedup fix itself (PR #23): a resend whose
+// email delivery fails must NOT invalidate the previous, still-working
+// invitation - otherwise a transient mailer failure leaves the invitee
+// with neither a delivered new link nor a working old one.
+func TestFailedResendDoesNotInvalidateTheWorkingLink(t *testing.T) {
+	db := newTestDB(t)
+	mailer := &fakeMailer{}
+	svc, err := NewService(db, testSecret(), WithMailer(mailer), WithDashboardBaseURL("https://app.mailx.dev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	owner, err := svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := svc.CreateOrganization(ctx, owner.Human.ID, "Acme Inc", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.InviteToOrganization(ctx, owner.Human.ID, tenant.ID, "invitee@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	firstRaw := extractInviteToken(t, mailer.calls[0].text)
+
+	mailer.failNext = true
+	if err := svc.InviteToOrganization(ctx, owner.Human.ID, tenant.ID, "invitee@example.com"); err == nil {
+		t.Fatal("expected the simulated send failure to surface as an error")
+	}
+
+	// The original invitation must still work: the failed resend's delivery
+	// failure must not have invalidated it.
+	if _, err := svc.AcceptOrgInvitation(ctx, firstRaw, "", "Invitee", "hunter22hunter"); err != nil {
+		t.Fatalf("expected the original invitation to still be valid after a failed resend: %v", err)
+	}
+}

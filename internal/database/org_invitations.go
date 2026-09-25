@@ -42,45 +42,46 @@ func (db *DB) IsTenantOwner(ctx context.Context, tenantID, humanID string) (bool
 	return role == "owner", nil
 }
 
-// CreateOrgInvitation inserts a new invitation row. Any other still-pending
-// (unaccepted, unexpired) invitation for the same (tenant, email) is
-// invalidated first - re-inviting an address resends, it doesn't stack a
-// second independently valid link (idx_org_invitations_tenant_email exists
-// for exactly this check; enforcing it here, not just indexing for it, was
-// a real gap - Greptile P2, PR #23).
+// CreateOrgInvitation inserts a new invitation row. It deliberately does
+// NOT invalidate any other pending invitation for the same address here -
+// see SupersedeOtherPendingOrgInvitations, called only after the new
+// invitation's email has actually been sent (Greptile P1, PR #23: an
+// earlier version invalidated the old link and committed the new one
+// before attempting delivery, so a failed send left the invitee with
+// NEITHER a working old link nor a delivered new one).
 func (db *DB) CreateOrgInvitation(ctx context.Context, tenantID, invitedBy, email, tokenHash string, expiresAt time.Time) (OrgInvitation, error) {
 	id, err := newID()
 	if err != nil {
 		return OrgInvitation{}, err
 	}
-	tx, err := db.pool.Begin(ctx)
-	if err != nil {
-		return OrgInvitation{}, fmt.Errorf("database: begin create org invitation: %w", normalizeErr(err))
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	normalized := normalizeEmail(email)
-	if _, err := tx.Exec(ctx,
-		`UPDATE org_invitations SET expires_at = now() WHERE tenant_id = $1 AND normalized_email = $2 AND accepted_at IS NULL AND expires_at > now()`,
-		tenantID, normalized,
-	); err != nil {
-		return OrgInvitation{}, fmt.Errorf("database: invalidate prior pending invitation: %w", normalizeErr(err))
-	}
-
 	var inv OrgInvitation
-	err = tx.QueryRow(ctx, `
+	err = db.pool.QueryRow(ctx, `
 		INSERT INTO org_invitations (id, tenant_id, invited_by, normalized_email, raw_email, token_hash, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, tenant_id, invited_by, normalized_email, raw_email, token_hash, expires_at, accepted_at, created_at`,
-		id, tenantID, invitedBy, normalized, email, tokenHash, expiresAt,
+		id, tenantID, invitedBy, normalizeEmail(email), email, tokenHash, expiresAt,
 	).Scan(&inv.ID, &inv.TenantID, &inv.InvitedBy, &inv.NormalizedEmail, &inv.RawEmail, &inv.TokenHash, &inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt)
 	if err != nil {
 		return OrgInvitation{}, normalizeErr(err)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return OrgInvitation{}, fmt.Errorf("database: commit create org invitation: %w", normalizeErr(err))
-	}
 	return inv, nil
+}
+
+// SupersedeOtherPendingOrgInvitations invalidates every OTHER still-pending
+// (unaccepted, unexpired) invitation for the same (tenant, email) besides
+// keepID - called only once the keepID invitation's email has been
+// confirmed sent, so re-inviting an address resends (one live link at a
+// time) without ever leaving a window where neither the old nor the new
+// link works (see CreateOrgInvitation's doc).
+func (db *DB) SupersedeOtherPendingOrgInvitations(ctx context.Context, tenantID, email, keepID string, now time.Time) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE org_invitations SET expires_at = $4 WHERE tenant_id = $1 AND normalized_email = $2 AND id != $3 AND accepted_at IS NULL AND expires_at > $4`,
+		tenantID, normalizeEmail(email), keepID, now,
+	)
+	if err != nil {
+		return fmt.Errorf("database: supersede prior pending invitations: %w", normalizeErr(err))
+	}
+	return nil
 }
 
 // GetOrgInvitationByHash loads an invitation row by its hash. Returns
