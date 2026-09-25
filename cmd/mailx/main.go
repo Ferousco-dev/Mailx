@@ -29,7 +29,7 @@ const usage = "usage: mailx [list | migrate | inspect <mailx-id> | " +
 	"create-tenant | create-api-key | rotate-api-key | revoke-api-key | list-api-keys | check-smtp-identity | " +
 	"create-sending-pool | list-sending-pools | enable-sending-pool | disable-sending-pool | " +
 	"create-sending-pool-member | list-sending-pool-members | enable-sending-pool-member | disable-sending-pool-member | " +
-	"assign-domain-pool]"
+	"assign-domain-pool | set-retention | show-retention | purge-expired | gdpr-export | gdpr-delete]"
 
 func run(args []string, output io.Writer) error {
 	if len(args) == 0 {
@@ -86,6 +86,16 @@ func run(args []string, output io.Writer) error {
 		return cmdSetSendingPoolMemberEnabled(args[1:], output, false)
 	case "assign-domain-pool":
 		return cmdAssignDomainPool(args[1:], output)
+	case "set-retention":
+		return cmdSetRetention(args[1:], output)
+	case "show-retention":
+		return cmdShowRetention(args[1:], output)
+	case "purge-expired":
+		return cmdPurgeExpired(args[1:], output)
+	case "gdpr-export":
+		return cmdGDPRExport(args[1:], output)
+	case "gdpr-delete":
+		return cmdGDPRDelete(args[1:], output)
 	}
 	return fmt.Errorf("unknown command %q; %s", args[0], usage)
 }

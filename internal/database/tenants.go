@@ -14,6 +14,10 @@ type Tenant struct {
 	ID        string
 	Name      string
 	CreatedAt time.Time
+	// RetentionDays is nil when the tenant has not configured a retention
+	// window - see internal/database/retention.go's DefaultRetentionDays
+	// for what applies in that case.
+	RetentionDays *int
 }
 
 // CreateTenant inserts a new tenant and returns its generated ID.
@@ -40,8 +44,8 @@ func (db *DB) CreateTenant(ctx context.Context, name string) (Tenant, error) {
 func (db *DB) GetTenant(ctx context.Context, id string) (Tenant, error) {
 	var t Tenant
 	err := db.pool.QueryRow(ctx,
-		`SELECT id, name, created_at FROM tenants WHERE id = $1`, id,
-	).Scan(&t.ID, &t.Name, &t.CreatedAt)
+		`SELECT id, name, created_at, retention_days FROM tenants WHERE id = $1`, id,
+	).Scan(&t.ID, &t.Name, &t.CreatedAt, &t.RetentionDays)
 	if err != nil {
 		return Tenant{}, normalizeErr(err)
 	}

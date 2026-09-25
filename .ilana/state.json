@@ -18,7 +18,7 @@
     "DEF": 27,
     "CR": 24,
     "RSK": 40,
-    "DEC": 206,
+    "DEC": 208,
     "MET": 72,
     "ETH": 1
   },
@@ -38,6 +38,6 @@
     "ilana_current_through": "v0.47 (partial)",
     "current_milestone": "v0.47 Human Accounts & Organizations",
     "current_milestone_status": "v0.47 phase 1 complete (human auth + org membership); billing/plans, password reset, OAuth, MFA deferred to a later phase",
-    "next_milestone": "v0.47 phase 2 (billing/plans) or v0.48 (TBD)"
+    "next_milestone": "v0.47 phase 2 (billing/plans, dashboard backend) or v0.48 (TBD)"
   }
 }

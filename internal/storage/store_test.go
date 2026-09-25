@@ -805,3 +805,35 @@ func TestFileStoreSaveStillReportsExistsForCompleteRecord(t *testing.T) {
 		t.Fatalf("complete record must not be repaired/overwritten: %+v %v", loaded, err)
 	}
 }
+
+func TestFileStoreDeleteRemovesMessageDirectory(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strings.Repeat("e", 32)
+	record := testRecord(id, "raw content")
+	if err := store.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(store.MessagesDir(), id)); !os.IsNotExist(err) {
+		t.Fatalf("expected message directory gone, stat error = %v", err)
+	}
+	if _, err := store.Load(id); err == nil {
+		t.Fatal("expected Load to fail after Delete")
+	}
+}
+
+func TestFileStoreDeleteMissingIsNotAnError(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strings.Repeat("f", 32)
+	if err := store.Delete(id); err != nil {
+		t.Fatalf("deleting an already-absent message must not error, got %v", err)
+	}
+}
