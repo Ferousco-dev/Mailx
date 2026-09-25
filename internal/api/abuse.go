@@ -422,3 +422,41 @@ func (h *emailHandler) releaseClaim(tenantID string, c *database.IdempotencyComp
 		h.abuse.log().Warn("idempotency_claim_release_failed")
 	}
 }
+
+// mfaVerifyIPLimitMiddleware protects /v1/auth/mfa/verify and
+// /v1/auth/mfa/confirm with their own tight per-IP bucket
+// (Policy.MFAVerifyIPRate): a 6-digit code is brute-forceable, so neither the
+// login bucket nor the general tenant buckets are tight enough.
+func mfaVerifyIPLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if a == nil || a.Limiter == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := authClientIP(r, a.TrustedProxyCIDRs)
+			p := a.Policy
+			dec, err := a.Limiter.Allow(r.Context(),
+				ratelimit.Bucket{Key: "auth:mfa:ip:" + ip, Rate: p.MFAVerifyIPRate, Burst: p.MFAVerifyIPBurst, Cost: 1},
+			)
+			switch {
+			case err != nil:
+				a.Metrics.AbuseDecision("mfa_verify", "unavailable")
+				a.log().Error("rate_limiter_unavailable", "route_class", "mfa_verify")
+				e := newError(ErrTemporarilyUnavailable, "rate_limiter_unavailable", "request limiting is temporarily unavailable; retry later")
+				e.RetryAfter = unavailableRetryAfter
+				writeError(w, r, e)
+			case dec.Impossible:
+				a.Metrics.AbuseDecision("mfa_verify", "impossible")
+				writeError(w, r, newError(ErrInternal, "internal_error", "request limit is misconfigured"))
+			case !dec.Allowed:
+				a.Metrics.AbuseDecision("mfa_verify", "limited")
+				e := newError(ErrRateLimited, "mfa_rate_limited", "too many MFA attempts from this address; retry after the interval in Retry-After")
+				e.RetryAfter = ratelimit.RetryAfterSeconds(dec.RetryAfter)
+				writeError(w, r, e)
+			default:
+				a.Metrics.AbuseDecision("mfa_verify", "allowed")
+				next.ServeHTTP(w, r)
+			}
+		})
+	}
+}

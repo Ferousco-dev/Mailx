@@ -1,0 +1,12 @@
+DROP TABLE oauth_states;
+DROP TABLE human_oauth_identities;
+DROP TABLE mfa_challenges;
+DROP TABLE mfa_backup_codes;
+ALTER TABLE humans
+    DROP CONSTRAINT humans_mfa_enabled_has_secret,
+    DROP COLUMN mfa_last_used_step,
+    DROP COLUMN mfa_pending_secret_nonce,
+    DROP COLUMN mfa_pending_secret_ciphertext,
+    DROP COLUMN mfa_secret_nonce,
+    DROP COLUMN mfa_secret_ciphertext,
+    DROP COLUMN mfa_enabled;

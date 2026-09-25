@@ -111,3 +111,10 @@ explicitly deferred to a later phase — v0.47 as a whole is NOT complete.
 - 10 human-JWT routes in `internal/api/dashboard_handler.go`, DB layer `internal/database/dashboard.go`, OpenAPI documented; no migration.
 - Tests: `internal/database/dashboard_test.go` (rules, concurrent mutual-removal race, invite list/revoke idempotency, profile/org update), `internal/api/dashboard_handler_test.go` (every endpoint: happy path, non-member 404, non-owner 403, validation).
 - Deferred: leave org / transfer ownership / role changes, email change, org slug column. Plan auto-renewal and OAuth/MFA are separate parallel work, not part of 3a.
+
+## v0.47 phase 3b — OAuth (Google/GitHub) + TOTP MFA — COMPLETE (pending independent security review)
+
+- Migration 000032 (`oauth_states`, `human_oauth_identities`, `mfa_challenges`, `mfa_backup_codes`, `humans.mfa_*`); round-trip down/up validated on a disposable database.
+- `internal/humanauth`: `oauth.go` (StartOAuth/CompleteOAuth), `totp.go`, `mfa.go` (Enroll/Confirm/Disable/VerifyMFA); Login returns `*MFARequiredError` for MFA accounts. Routes and env vars: architecture.md "OAuth sign-in & TOTP MFA". DEC-231..234 (renumbered from the agent's own DEC-228..231 - collided with phase 3a's DEC-228..230, built concurrently from the same base commit), RSK-046/047.
+- Tests: RFC 6238 vectors; full MFA flow on real Postgres (enroll, confirm, MFA-gated login, challenge not an access token, single-use, replay blocked, burned after 5 wrong codes, backup code once, expiry, disable needs password); OAuth against an httptest TLS fake Google (new account, link-not-duplicate, missing/unknown/reused/expired state, provider errors, unverified email, not configured, non-https rejected, MFA not bypassed); API test for the MFA IP bucket (429) and 404 unconfigured provider. Full `go test -race ./...` clean on Postgres+Redis; Docker boot smoke with nothing configured and with Google+GitHub+MFA configured.
+- Not built: GitHub-provider fake test (only Google is exercised end-to-end), backup-code regeneration endpoint, per-account MFA lockout, browser-bound OAuth state (RSK-046).
