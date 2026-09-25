@@ -332,6 +332,32 @@ func TestApplyPlanPaymentAndReplay(t *testing.T) {
 	}
 }
 
+func TestApplyPlanPaymentReferenceCannotBeReusedForAnotherTenant(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	first := newTestTenant(t, db)
+	second := newTestTenant(t, db)
+	end := time.Now().UTC().Add(30 * 24 * time.Hour).Truncate(time.Second)
+	if err := db.ApplyPlanPayment(ctx, Payment{Reference: "shared-ref", TenantID: first.ID, Plan: billing.PlanPlus, Amount: 600, Currency: "USD"}, end); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ApplyPlanPayment(ctx, Payment{Reference: "shared-ref", TenantID: second.ID, Plan: billing.PlanPro, Amount: 2400, Currency: "USD"}, end.Add(30*24*time.Hour)); !errors.Is(err, ErrPaymentAlreadyApplied) {
+		t.Fatalf("reused payment reference: want ErrPaymentAlreadyApplied, got %v", err)
+	}
+	firstPlan, err := db.GetTenantPlan(ctx, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPlan, err := db.GetTenantPlan(ctx, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstPlan.Plan != billing.PlanPlus || firstPlan.CurrentPeriodEnd == nil || !firstPlan.CurrentPeriodEnd.Equal(end) ||
+		secondPlan.Plan != billing.PlanFree || secondPlan.CurrentPeriodEnd != nil {
+		t.Fatalf("replayed reference changed plan state: first=%+v second=%+v", firstPlan, secondPlan)
+	}
+}
+
 func TestDowngradeLapsedPlans(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
