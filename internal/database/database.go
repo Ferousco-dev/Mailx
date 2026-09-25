@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -70,6 +71,10 @@ func (c Config) normalized() (Config, error) {
 
 type DB struct {
 	pool *pgxpool.Pool
+	// planEnforcement is the single switch for billing-plan limits
+	// (DEC-221). Off by default: a self-hosted deployment with no
+	// MAILX_PAYSTACK_SECRET_KEY keeps its pre-billing unlimited behavior.
+	planEnforcement atomic.Bool
 }
 
 // Open builds a bounded connection pool and verifies connectivity.

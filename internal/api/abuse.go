@@ -346,6 +346,14 @@ func routeClass(r *http.Request) string {
 // so a refusal by an earlier check never spends recipient tokens. It returns nil to
 // proceed. On any refusal the caller must release the idempotency claim.
 func (h *emailHandler) admitSend(ctx context.Context, tenantID string, deliverable int) *apiError {
+	// Plan daily volume (DEC-222) first: it is independent of abuse
+	// controls and inert unless plan enforcement is enabled (DEC-221).
+	if err := h.db.CheckDailySendLimit(ctx, tenantID, 1); err != nil {
+		if aerr := planLimitAPIError(err, true); aerr != nil {
+			return aerr
+		}
+		return newError(ErrInternal, "internal_error", "failed to check the plan's daily limit")
+	}
 	a := h.abuse
 	if a == nil {
 		return nil

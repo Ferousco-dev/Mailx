@@ -167,6 +167,52 @@ const openAPISpec = `{
         }
       }
     },
+    "/billing/checkout": {
+      "post": {
+        "summary": "Start a Paystack checkout for a paid plan",
+        "description": "MailX Cloud only: absent (404) unless the deployment configures MAILX_PAYSTACK_SECRET_KEY. Requires a human access token (HumanAuth) belonging to an OWNER of tenant_id (403 not_org_owner otherwise). Calls Paystack Initialize Transaction for the plan's USD price and returns the hosted authorization_url to redirect to. The plan becomes active only when Paystack's verified charge.success webhook arrives, for 30 days. Plans do NOT auto-renew yet: the owner must check out again each cycle, or the org drops to free when the period ends.",
+        "security": [{"HumanAuth": []}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["tenant_id", "plan"], "properties": {"tenant_id": {"type": "string"}, "plan": {"type": "string", "enum": ["plus", "pro"]}}}}}},
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"authorization_url": {"type": "string"}, "reference": {"type": "string"}}}}}},
+          "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "403": {"description": "Caller is not an owner of this organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "422": {"description": "Missing tenant_id or plan is not plus/pro", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "503": {"description": "Paystack could not start the checkout", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/billing/subscription": {
+      "get": {
+        "summary": "Get an organization's plan",
+        "description": "MailX Cloud only (see /billing/checkout). Requires a human access token (HumanAuth) of any member of tenant_id; a non-member gets 404, the same as a nonexistent organization.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [
+          {"name": "tenant_id", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}
+        ],
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"tenant_id": {"type": "string"}, "plan": {"type": "string", "enum": ["free", "plus", "pro"]}, "status": {"type": "string", "enum": ["active", "lapsed"]}, "current_period_end": {"type": "string", "format": "date-time", "nullable": true}}}}}},
+          "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/billing/webhook": {
+      "post": {
+        "summary": "Paystack webhook receiver",
+        "description": "MailX Cloud only (see /billing/checkout). Called by Paystack, not by clients. Public, but authenticated by the x-paystack-signature header: hex HMAC-SHA512 of the raw body keyed with the Paystack secret key; anything that does not verify is 401 and changes nothing. A verified charge.success whose metadata names a tenant and a paid plan, with status success, currency USD and an amount at least the plan price, sets that plan active for 30 days. Each Paystack transaction reference is applied at most once, so replays change nothing. Other event types and unusable payloads are acknowledged with 200 and ignored.",
+        "security": [],
+        "parameters": [
+          {"name": "x-paystack-signature", "in": "header", "required": true, "schema": {"type": "string"}}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object"}}}},
+        "responses": {
+          "200": {"description": "Acknowledged (status: applied, already_applied or ignored)", "content": {"application/json": {"schema": {"type": "object", "properties": {"status": {"type": "string"}}}}}},
+          "400": {"description": "Signed body is not valid JSON", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "401": {"description": "Signature missing or invalid", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
     "/emails": {
       "post": {
         "summary": "Send an email",

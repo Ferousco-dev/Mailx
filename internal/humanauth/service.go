@@ -455,6 +455,11 @@ func (s *Service) InviteToOrganization(ctx context.Context, inviterHumanID, tena
 	if !isOwner {
 		return ErrNotOrgOwner
 	}
+	// Early UX check only; the authoritative member cap is enforced under a
+	// row lock at accept time (DEC-223). Wraps database.ErrPlanLimit.
+	if err := s.db.CheckMemberLimit(ctx, tenantID); err != nil {
+		return fmt.Errorf("humanauth: %w", err)
+	}
 	tenant, err := s.db.GetTenant(ctx, tenantID)
 	if err != nil {
 		return fmt.Errorf("humanauth: get tenant: %w", err)

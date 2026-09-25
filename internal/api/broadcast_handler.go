@@ -108,6 +108,14 @@ func (h *broadcastHandler) handleCreate(w http.ResponseWriter, r *http.Request) 
 	}
 
 	tenantID := tenantFromContext(r.Context())
+	if err := h.db.CheckFeature(r.Context(), tenantID, "broadcasts"); err != nil {
+		if aerr := planLimitAPIError(err, false); aerr != nil {
+			writeError(w, r, aerr)
+			return
+		}
+		writeError(w, r, newError(ErrInternal, "internal_error", "failed to check plan limits"))
+		return
+	}
 
 	// Ownership: both resources must belong to THIS tenant, validated
 	// authoritatively here (not merely because auth passed) — see

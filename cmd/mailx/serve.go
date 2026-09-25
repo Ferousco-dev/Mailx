@@ -129,12 +129,20 @@ func runFull() error {
 	if err != nil {
 		return err
 	}
+	billingCfg, err := buildBillingConfig(db)
+	if err != nil {
+		return err
+	}
+	if billingCfg == nil {
+		o.log.Info("billing_disabled", "hint", "MAILX_PAYSTACK_SECRET_KEY not set: billing routes off, plan limits not enforced")
+	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
 		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, BIMI: bimiSvc, MessageIDDomain: ident.Name(), Abuse: abuse.apiControls(o),
 		TrackingSecret: trackingSecret(), TrackingBaseURL: os.Getenv("MAILX_TRACKING_BASE_URL"),
 		Feedback:  fbCfg,
 		HumanAuth: humanAuthSvc,
+		Billing:   billingCfg,
 		Ready:     ready.Check,
 		Logger:    o.log, Metrics: o.metrics,
 	})
@@ -164,6 +172,9 @@ func runFull() error {
 		o.logged("api", apiServer.Run),
 		o.logged("idempotency-cleanup", func(ctx context.Context) error { return runIdempotencyCleanup(ctx, db, o) }),
 		o.logged("retention-purge", func(ctx context.Context) error { return runRetentionPurge(ctx, db, store, o) }),
+	}
+	if billingCfg != nil {
+		components = append(components, o.logged("plan-lapse", func(ctx context.Context) error { return runPlanLapse(ctx, db, o) }))
 	}
 	if addr := observabilityAddr(); addr != "" {
 		op := observability.NewServer(addr, observability.OperatorMux(o.metrics, ready))

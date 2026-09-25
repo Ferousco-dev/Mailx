@@ -28,7 +28,12 @@ func connectForAdmin(ctx context.Context) (*database.DB, error) {
 	if dsn == "" {
 		return nil, fmt.Errorf("DATABASE_URL is not set")
 	}
-	return database.Open(ctx, database.Config{DSN: dsn})
+	db, err := database.Open(ctx, database.Config{DSN: dsn})
+	if err != nil {
+		return nil, err
+	}
+	enablePlanEnforcementFromEnv(db)
+	return db, nil
 }
 
 func cmdCreateTenant(args []string, output io.Writer) error {

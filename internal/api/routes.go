@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -28,6 +29,8 @@ type routeServices struct {
 	feedback  *feedbackHandler   // nil disables the ingestion route
 	track     *trackHandler      // nil disables /track routes
 	humanAuth *humanauth.Service // nil disables /v1/auth/* and /v1/orgs
+	billing   *BillingConfig     // nil disables /v1/billing/*
+	log       *slog.Logger
 }
 
 // newMux registers every /v1 route plus health checks. Handlers stay
@@ -65,6 +68,7 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		bimiHandler.service = extras[0].bimi
 	}
 	domains := newDomainHandler(domainService)
+	domains.db = h.db
 	webhooks := &webhookHandler{service: webhookService, db: h.db}
 
 	v1 := http.NewServeMux()
@@ -194,6 +198,21 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		// (orgInviteAcceptIPLimitMiddleware) since this route is public and
 		// the no-account-yet path runs a full bcrypt hash per call.
 		mux.Handle("POST /v1/orgs/invites/accept", chain(http.HandlerFunc(ha.handleAcceptInvite), orgInviteAcceptIPLimitMiddleware(abuse)))
+	}
+	if len(extras) > 0 && extras[0].billing != nil {
+		lg := extras[0].log
+		if lg == nil {
+			lg = observability.Discard()
+		}
+		bh := &billingHandler{db: h.db, cfg: extras[0].billing, now: func() time.Time { return time.Now().UTC() }, log: lg}
+		// Public: Paystack calls it directly. Authenticated solely by its
+		// HMAC-SHA512 signature inside the handler (DEC-225).
+		mux.HandleFunc("POST /v1/billing/webhook", bh.handleWebhook)
+		if extras[0].humanAuth != nil {
+			billingAuthenticated := humanAuthMiddleware(extras[0].humanAuth)
+			mux.Handle("POST /v1/billing/checkout", billingAuthenticated(http.HandlerFunc(bh.handleCheckout)))
+			mux.Handle("GET /v1/billing/subscription", billingAuthenticated(http.HandlerFunc(bh.handleSubscription)))
+		}
 	}
 	if len(extras) > 0 && extras[0].feedback != nil {
 		// Deliberately NOT under /v1 and NOT authenticateMiddleware: this is the

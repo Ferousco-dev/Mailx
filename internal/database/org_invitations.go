@@ -147,6 +147,9 @@ func (db *DB) AcceptOrgInvitationForExistingHuman(ctx context.Context, invitatio
 	if tag.RowsAffected() == 0 {
 		return ErrOrgInvitationConsumed
 	}
+	if err := db.lockMemberCap(ctx, tx, tenantID, humanID); err != nil {
+		return err // rollback leaves the invitation unconsumed
+	}
 
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO tenant_members (tenant_id, human_id, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING`,
@@ -183,6 +186,10 @@ func (db *DB) AcceptOrgInvitationWithSignup(ctx context.Context, invitationID, t
 	}
 	if tag.RowsAffected() == 0 {
 		return Human{}, ErrOrgInvitationConsumed
+	}
+	// Empty humanID: the new account cannot already be a member.
+	if err := db.lockMemberCap(ctx, tx, tenantID, ""); err != nil {
+		return Human{}, err
 	}
 
 	humanID, err := newID()

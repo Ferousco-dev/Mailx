@@ -17,8 +17,8 @@
     "TC": 0,
     "DEF": 27,
     "CR": 24,
-    "RSK": 43,
-    "DEC": 220,
+    "RSK": 45,
+    "DEC": 225,
     "MET": 72,
     "ETH": 1
   },
@@ -34,10 +34,10 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.46",
-    "ilana_current_through": "v0.47 (partial)",
+    "last_completed_milestone": "v0.47 phase 2 (billing & plans MVP)",
+    "ilana_current_through": "v0.47 phase 2",
     "current_milestone": "v0.47 Human Accounts & Organizations",
-    "current_milestone_status": "v0.47 phase 1 complete (human auth + org membership) plus password reset and organization invitations (both 5-min/5-hour single-use tokens, own-pipeline delivery, dedicated rate limits); billing/plans, OAuth, MFA still deferred",
-    "next_milestone": "v0.47 phase 2 (billing/plans, dashboard backend) or v0.48 (TBD)"
+    "current_milestone_status": "v0.47 phase 1 (human auth, orgs, password reset, invitations) and phase 2 (Free/Plus/Pro plans + Paystack one-off checkout, enforcement gated on MAILX_PAYSTACK_SECRET_KEY) complete; auto-renewal (RSK-044), OAuth, MFA deferred",
+    "next_milestone": "v0.47 phase 3 (plan auto-renewal, dashboard backend) or v0.48 (TBD)"
   }
 }
