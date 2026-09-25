@@ -13,6 +13,7 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/dkim"
 	"github.com/Ferousco-dev/mailx/internal/dmarc"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
+	"github.com/Ferousco-dev/mailx/internal/humanauth"
 	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/spf"
 	"github.com/Ferousco-dev/mailx/internal/storage"
@@ -67,6 +68,10 @@ type Config struct {
 	// Feedback configures the outbound feedback ingestion route (v0.32). Nil
 	// disables /internal/feedback entirely.
 	Feedback *FeedbackConfig
+	// HumanAuth enables /v1/auth/* and /v1/orgs (v0.47 phase 1 human
+	// accounts/organizations). Nil disables those routes entirely; existing
+	// API-key-authenticated /v1 routes are unaffected either way.
+	HumanAuth *humanauth.Service
 	// Logger and Metrics are optional; nil disables the corresponding
 	// observation without changing request handling.
 	Logger  *slog.Logger
@@ -143,7 +148,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if len(cfg.TrackingSecret) > 0 {
 		trackH = &trackHandler{db: cfg.DB, secret: cfg.TrackingSecret}
 	}
-	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, bimi: cfg.BIMI, metrics: cfg.Metrics, feedback: fbHandler, track: trackH})
+	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, bimi: cfg.BIMI, metrics: cfg.Metrics, feedback: fbHandler, track: trackH, humanAuth: cfg.HumanAuth})
 	log := cfg.Logger
 	if log == nil {
 		log = observability.Discard()

@@ -349,7 +349,7 @@ func (m *Metrics) AbuseDecision(control, outcome string) {
 }
 
 var (
-	broadcastPhases   = []string{"snapshot", "materialize", "complete"}
+	broadcastPhases   = []string{"snapshot", "materialize", "complete", "erasure_cleanup"}
 	broadcastOutcomes = []string{"ok", "suppressed", "backpressure", "error", "domain_unauthorized"}
 )
 

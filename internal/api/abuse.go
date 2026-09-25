@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
@@ -35,6 +37,14 @@ type AbuseControls struct {
 	Policy  ratelimit.Policy
 	Metrics *observability.Metrics
 	Log     *slog.Logger
+	// TrustedProxyCIDRs, when non-empty, lets authIPLimitMiddleware key on
+	// the real client IP (from X-Forwarded-For) instead of the connection
+	// peer when that peer is one of these trusted proxies — see
+	// authIPLimitMiddleware's doc for why trusting X-Forwarded-For
+	// unconditionally would be spoofable. Empty (the default) means no
+	// proxy is trusted and RemoteAddr is always used, which is also
+	// correct for a direct/self-hosted deployment with no reverse proxy.
+	TrustedProxyCIDRs []*net.IPNet
 }
 
 // unavailableRetryAfter is what a client is told when the limiter or a capacity
@@ -98,6 +108,142 @@ func requestLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
 			}
 		})
 	}
+}
+
+// authIPLimitMiddleware protects the unauthenticated human-auth surface
+// (POST /v1/auth/signup|login|refresh) from password-guessing/account-
+// enumeration/signup-flooding — these requests are registered OUTSIDE the
+// /v1/ authenticated chain (see routes.go's comment on why) and so never
+// pass through requestLimitMiddleware, which is keyed by tenant/API key
+// that don't exist yet at this point. The only identity available
+// pre-auth is the client's IP.
+//
+// Uses RemoteAddr by default (see authClientIP) - a self-hosted deployment
+// with no reverse proxy in front of MailX gets a real, unspoofable client
+// IP this way. A deployment that DOES sit behind a reverse proxy must set
+// AbuseControls.TrustedProxyCIDRs (MAILX_TRUSTED_PROXY_CIDRS) for this to
+// key on the real client instead of the proxy's own IP for every caller —
+// without that, every client behind the proxy shares one bucket and can
+// starve each other's login/refresh attempts. Trusting X-Forwarded-For
+// unconditionally instead (with no allowlist) would let any caller spoof a
+// different IP per request and bypass this entirely, so it is only
+// consulted when the immediate peer is a configured trusted proxy.
+func authIPLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if a == nil || a.Limiter == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := authClientIP(r, a.TrustedProxyCIDRs)
+			p := a.Policy
+			dec, err := a.Limiter.Allow(r.Context(),
+				ratelimit.Bucket{Key: "auth:ip:" + ip, Rate: p.AuthIPRate, Burst: p.AuthIPBurst, Cost: 1},
+			)
+			switch {
+			case err != nil:
+				a.Metrics.AbuseDecision("auth", "unavailable")
+				a.log().Error("rate_limiter_unavailable", "route_class", "auth")
+				e := newError(ErrTemporarilyUnavailable, "rate_limiter_unavailable", "request limiting is temporarily unavailable; retry later")
+				e.RetryAfter = unavailableRetryAfter
+				writeError(w, r, e)
+			case dec.Impossible:
+				a.Metrics.AbuseDecision("auth", "impossible")
+				writeError(w, r, newError(ErrInternal, "internal_error", "request limit is misconfigured"))
+			case !dec.Allowed:
+				a.Metrics.AbuseDecision("auth", "limited")
+				e := newError(ErrRateLimited, "auth_rate_limited", "too many authentication attempts from this address; retry after the interval in Retry-After")
+				e.RetryAfter = ratelimit.RetryAfterSeconds(dec.RetryAfter)
+				writeError(w, r, e)
+			default:
+				a.Metrics.AbuseDecision("auth", "allowed")
+				next.ServeHTTP(w, r)
+			}
+		})
+	}
+}
+
+// passwordResetIPLimitMiddleware protects POST /v1/auth/forgot-password
+// and /v1/auth/reset-password with their OWN, much tighter bucket than
+// authIPLimitMiddleware — see Policy.PasswordResetIPRate's doc for why a
+// shared bucket with login would be too permissive here (forgot-password
+// sends real email on every call; a shared budget sized for login-guessing
+// resistance would let a caller email-bomb a victim far more cheaply than
+// intended).
+func passwordResetIPLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if a == nil || a.Limiter == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := authClientIP(r, a.TrustedProxyCIDRs)
+			p := a.Policy
+			dec, err := a.Limiter.Allow(r.Context(),
+				ratelimit.Bucket{Key: "auth:reset:ip:" + ip, Rate: p.PasswordResetIPRate, Burst: p.PasswordResetIPBurst, Cost: 1},
+			)
+			switch {
+			case err != nil:
+				a.Metrics.AbuseDecision("password_reset", "unavailable")
+				a.log().Error("rate_limiter_unavailable", "route_class", "password_reset")
+				e := newError(ErrTemporarilyUnavailable, "rate_limiter_unavailable", "request limiting is temporarily unavailable; retry later")
+				e.RetryAfter = unavailableRetryAfter
+				writeError(w, r, e)
+			case dec.Impossible:
+				a.Metrics.AbuseDecision("password_reset", "impossible")
+				writeError(w, r, newError(ErrInternal, "internal_error", "request limit is misconfigured"))
+			case !dec.Allowed:
+				a.Metrics.AbuseDecision("password_reset", "limited")
+				e := newError(ErrRateLimited, "password_reset_rate_limited", "too many password reset attempts from this address; retry after the interval in Retry-After")
+				e.RetryAfter = ratelimit.RetryAfterSeconds(dec.RetryAfter)
+				writeError(w, r, e)
+			default:
+				a.Metrics.AbuseDecision("password_reset", "allowed")
+				next.ServeHTTP(w, r)
+			}
+		})
+	}
+}
+
+// authClientIP returns the IP to key the auth rate limiter on: the
+// connection peer (RemoteAddr), UNLESS that peer is a configured trusted
+// proxy, in which case the rightmost entry of X-Forwarded-For is used
+// instead - the entry the trusted proxy itself appended, describing
+// whoever it received the request from. Only the rightmost entry is ever
+// trusted, even with a multi-hop header: this deployment only vouches for
+// its own immediately-adjacent proxy, not for arbitrary earlier hops a
+// client could have forged into the header before it ever reached that
+// proxy.
+func authClientIP(r *http.Request, trusted []*net.IPNet) string {
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peer = r.RemoteAddr // no port present (e.g. unix socket, some test harnesses)
+	}
+	if len(trusted) == 0 {
+		return peer
+	}
+	peerIP := net.ParseIP(peer)
+	if peerIP == nil {
+		return peer
+	}
+	isTrusted := false
+	for _, cidr := range trusted {
+		if cidr.Contains(peerIP) {
+			isTrusted = true
+			break
+		}
+	}
+	if !isTrusted {
+		return peer
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return peer
+	}
+	parts := strings.Split(xff, ",")
+	client := strings.TrimSpace(parts[len(parts)-1])
+	if client == "" {
+		return peer
+	}
+	return client
 }
 
 func routeClass(r *http.Request) string {

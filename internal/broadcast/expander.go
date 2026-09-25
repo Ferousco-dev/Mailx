@@ -30,6 +30,12 @@ const (
 	defaultBroadcastBatch   = 5   // broadcasts touched per tick
 	defaultSnapshotBatch    = 200 // audience_members rows scanned per broadcast per tick
 	defaultMaterializeBatch = 25  // recipients rendered/signed/persisted per broadcast per tick
+	// erasedCleanupRetryDelay separates the 3 immediate retries of an
+	// erased-recipient's disk cleanup (see materializeOne) - short, since
+	// this is meant to ride out a momentary filesystem error within one
+	// tick, not to wait for a longer outage (a longer outage needs the
+	// Error-level log/metric this path already emits, not a longer sleep).
+	erasedCleanupRetryDelay = 50 * time.Millisecond
 )
 
 // errDeterministic marks a materializeOne failure as one that will fail the
@@ -353,9 +359,47 @@ func (e *Expander) materializeOne(ctx context.Context, b database.Broadcast, fro
 	_, err = e.db.InsertMessage(ctx, database.NewMessage{
 		ID: r.ID, TenantID: b.TenantID, MailFrom: built.From, FromHeader: b.FromAddress,
 		Subject: rendered.Subject, MessageIDHeader: messageID,
-		Recipients:   []database.RecipientInput{{Address: built.Envelope[0], HeaderKind: &role}},
-		SenderDomain: fromDomain,
+		Recipients:                  []database.RecipientInput{{Address: built.Envelope[0], HeaderKind: &role}},
+		SenderDomain:                fromDomain,
+		RequireBroadcastRecipientID: r.ID,
 	})
+	if errors.Is(err, database.ErrRecipientErased) {
+		// The recipient was erased (GDPR gdpr-delete) between being claimed
+		// above and this insert — the file just saved above is now for a
+		// message that will never exist in the DB; clean it up rather than
+		// leaving it orphaned on disk. Treat this exactly like ErrConflict
+		// below: a terminal, non-retryable outcome for this recipient (the
+		// broadcast_recipients row is gone, so nothing will ever call this
+		// function again for r.ID - there is no other retry path).
+		//
+		// A few immediate retries handle the common transient case (a
+		// momentary FS error); a failure that survives all of them is
+		// logged at Error (not Warn) and counted so an operator can alert
+		// on it, since it means raw mail for an erased subject is left on
+		// disk with no durable record to reconcile it later - see RSK-043.
+		var delErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if delErr = e.store.Delete(r.ID); delErr == nil {
+				break
+			}
+			time.Sleep(erasedCleanupRetryDelay)
+		}
+		if delErr != nil {
+			e.log.Error("erased_recipient_disk_cleanup_failed", "recipient_id", r.ID, "error", delErr.Error())
+			e.metrics.BroadcastExpansionBatch("erasure_cleanup", "error")
+			// Surface the failure instead of masking it as success: the
+			// broadcast_recipients row is already gone, so nothing else will
+			// ever retry this cleanup, and returning nil here would also
+			// make the caller call finishMaterialized on a row that no
+			// longer exists (Greptile P1, PR #22). Deliberately NOT wrapped
+			// in errDeterministic - the caller's generic error path treats
+			// it as transient (log + metric only, no RecordBroadcastRecipientFailure
+			// against a row that's already gone).
+			return fmt.Errorf("erased recipient disk cleanup: %w", delErr)
+		}
+		e.metrics.BroadcastExpansionBatch("erasure_cleanup", "ok")
+		return nil
+	}
 	if err != nil && !errors.Is(err, database.ErrConflict) { // ErrConflict here = already inserted by a prior crashed attempt: idempotent success
 		return fmt.Errorf("insert message: %w", err)
 	}

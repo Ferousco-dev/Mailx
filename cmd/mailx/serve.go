@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,7 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/delivery"
 	"github.com/Ferousco-dev/mailx/internal/dispatch"
 	"github.com/Ferousco-dev/mailx/internal/dns"
+	"github.com/Ferousco-dev/mailx/internal/humanauth"
 	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/queue"
 	"github.com/Ferousco-dev/mailx/internal/retry"
@@ -117,13 +119,24 @@ func runFull() error {
 	if err != nil {
 		return err
 	}
+	humanAuthOpts := []humanauth.Option{humanauth.WithDashboardBaseURL(dashboardBaseURL())}
+	if mailer := buildSystemMailer(api.NewSubmissionAcceptor(db, store, dkimSvc, abuse.apiControls(o), ident.Name())); mailer != nil {
+		humanAuthOpts = append(humanAuthOpts, humanauth.WithMailer(mailer))
+	} else {
+		o.log.Warn("system_mailer_disabled", "hint", "MAILX_SYSTEM_TENANT_ID/MAILX_SYSTEM_FROM_ADDRESS not set: password reset tokens will be created but no email will be sent")
+	}
+	humanAuthSvc, err := humanauth.NewService(db, jwtSecret(), humanAuthOpts...)
+	if err != nil {
+		return err
+	}
 	apiServer, err := api.NewServer(api.Config{
 		Addr: httpAddr(), DB: db, Store: store, Auth: authSvc,
 		Webhooks: webhookRuntime.service, DKIM: dkimSvc, SPF: spfSvc, DMARC: dmarcSvc, BIMI: bimiSvc, MessageIDDomain: ident.Name(), Abuse: abuse.apiControls(o),
 		TrackingSecret: trackingSecret(), TrackingBaseURL: os.Getenv("MAILX_TRACKING_BASE_URL"),
-		Feedback: fbCfg,
-		Ready:    ready.Check,
-		Logger:   o.log, Metrics: o.metrics,
+		Feedback:  fbCfg,
+		HumanAuth: humanAuthSvc,
+		Ready:     ready.Check,
+		Logger:    o.log, Metrics: o.metrics,
 	})
 	if err != nil {
 		return err
@@ -150,6 +163,7 @@ func runFull() error {
 		o.logged("webhook-worker", webhookRuntime.workers.Run),
 		o.logged("api", apiServer.Run),
 		o.logged("idempotency-cleanup", func(ctx context.Context) error { return runIdempotencyCleanup(ctx, db, o) }),
+		o.logged("retention-purge", func(ctx context.Context) error { return runRetentionPurge(ctx, db, store, o) }),
 	}
 	if addr := observabilityAddr(); addr != "" {
 		op := observability.NewServer(addr, observability.OperatorMux(o.metrics, ready))
@@ -216,6 +230,44 @@ func runIdempotencyCleanup(ctx context.Context, db *database.DB, o obs) error {
 			}
 			if n > 0 {
 				o.log.Info("idempotency_cleanup", "removed", n)
+			}
+		}
+	}
+}
+
+// retentionPurgeInterval is hourly, not minutes like idempotency cleanup:
+// retention windows are measured in days, so an hourly cadence is already
+// far more granular than the feature needs, and a slower cadence keeps the
+// (larger, cross-table) purge query from competing with request traffic.
+const retentionPurgeInterval = time.Hour
+
+func runRetentionPurge(ctx context.Context, db *database.DB, store *storage.FileStore, o obs) error {
+	ticker := time.NewTicker(retentionPurgeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			// deleteDisk runs BEFORE each id's database row is deleted (see
+			// database.PurgeExpiredMessages' doc): an id whose disk cleanup
+			// fails here is simply skipped this cycle and retried, disk and
+			// DB together, on the next tick - never leaves an orphaned
+			// on-disk file with no DB row to find it by.
+			deleteDisk := func(id string) error {
+				if err := store.Delete(id); err != nil {
+					o.log.Warn("retention_purge_disk_cleanup_failed", "message_id", id, "error", err.Error())
+					return err
+				}
+				return nil
+			}
+			ids, err := db.PurgeExpiredMessages(ctx, deleteDisk)
+			if err != nil {
+				o.log.Warn("retention_purge_failed", "error", err.Error())
+				continue
+			}
+			if len(ids) > 0 {
+				o.log.Info("retention_purge", "purged", len(ids))
 			}
 		}
 	}
@@ -290,6 +342,23 @@ func apiKeyPepper() []byte {
 	}
 	slog.Warn("api_key_pepper_not_set", "detail", "API key verifiers are unkeyed SHA-256; fine for local development, set MAILX_API_KEY_PEPPER before handling real credentials")
 	return nil
+}
+
+// jwtSecret follows apiKeyPepper's convention: read from an env var,
+// warn-and-fall-back for local development. Unlike the pepper, a human
+// JWT cannot sign with an empty secret, so the fallback is a random
+// per-process secret (invalidates all sessions on restart) rather than
+// no keying at all.
+func jwtSecret() []byte {
+	if s := os.Getenv("MAILX_JWT_SECRET"); s != "" {
+		return []byte(s)
+	}
+	slog.Warn("jwt_secret_not_set", "detail", "MAILX_JWT_SECRET not set; using an ephemeral per-process secret, which invalidates all human sessions on restart. Set MAILX_JWT_SECRET before handling real accounts.")
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("jwt secret fallback: %v", err))
+	}
+	return b
 }
 
 func trackingSecret() []byte {

@@ -1,6 +1,9 @@
 package api
 
-import "context"
+import (
+	"context"
+	"net/http"
+)
 
 // ctxKey is a private type so context values here can never collide with
 // keys set by other packages (including future v0.19 auth middleware).
@@ -11,6 +14,7 @@ const (
 	requestIDKey
 	scopesKey
 	apiKeyIDKey
+	humanIDKey
 )
 
 // withTenant is the ONLY place a request's tenant identity is attached to
@@ -52,6 +56,21 @@ func withAuth(ctx context.Context, scopes []string, apiKeyRowID string) context.
 func scopesFromContext(ctx context.Context) []string {
 	scopes, _ := ctx.Value(scopesKey).([]string)
 	return scopes
+}
+
+// withHumanID attaches a human-session (JWT) identity to the context —
+// set only by humanAuthMiddleware, never by authenticateMiddleware (API
+// keys). The two identity kinds are read by disjoint sets of handlers.
+func withHumanID(r *http.Request, humanID string) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), humanIDKey, humanID))
+}
+
+func humanIDFromContext(ctx context.Context) (string, bool) {
+	id, ok := ctx.Value(humanIDKey).(string)
+	if !ok || id == "" {
+		return "", false
+	}
+	return id, true
 }
 
 func hasScope(ctx context.Context, scope string) bool {

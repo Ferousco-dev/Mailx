@@ -10,22 +10,24 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/dkim"
 	"github.com/Ferousco-dev/mailx/internal/dmarc"
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
+	"github.com/Ferousco-dev/mailx/internal/humanauth"
 	"github.com/Ferousco-dev/mailx/internal/observability"
 	"github.com/Ferousco-dev/mailx/internal/spf"
 	"github.com/Ferousco-dev/mailx/internal/webhook"
 )
 
 type routeServices struct {
-	domains  *maildomain.Service
-	webhooks *webhook.Service
-	dkim     *dkim.Service
-	spf      *spf.Service
-	dmarc    *dmarc.Service
-	bimi     *bimi.Service
-	metrics  *observability.Metrics
-	abuse    *AbuseControls
-	feedback *feedbackHandler // nil disables the ingestion route
-	track    *trackHandler    // nil disables /track routes
+	domains   *maildomain.Service
+	webhooks  *webhook.Service
+	dkim      *dkim.Service
+	spf       *spf.Service
+	dmarc     *dmarc.Service
+	bimi      *bimi.Service
+	metrics   *observability.Metrics
+	abuse     *AbuseControls
+	feedback  *feedbackHandler   // nil disables the ingestion route
+	track     *trackHandler      // nil disables /track routes
+	humanAuth *humanauth.Service // nil disables /v1/auth/* and /v1/orgs
 }
 
 // newMux registers every /v1 route plus health checks. Handlers stay
@@ -159,6 +161,30 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ready"})
 	})
 
+	if len(extras) > 0 && extras[0].humanAuth != nil {
+		// Human/browser session endpoints: a clearly separate path prefix
+		// (/v1/auth/*, /v1/orgs) and a clearly separate auth mechanism
+		// (JWT, not API key) from the tenant-facing v1 mux above. Registered
+		// directly on mux (not the "authenticated" chain) — ServeMux
+		// prefers the more specific "/v1/auth/" and "/v1/orgs" patterns
+		// over the "/v1/" catch-all, so these never pass through
+		// authenticateMiddleware/requireScope.
+		ha := &humanAuthHandler{svc: extras[0].humanAuth}
+		// IP-keyed rate limit: this surface is unauthenticated by
+		// definition (no tenant/API key exists yet), so it never passes
+		// through requestLimitMiddleware above — see authIPLimitMiddleware's
+		// doc for why that would otherwise leave password-guessing/
+		// signup-flooding completely unthrottled.
+		mux.Handle("POST /v1/auth/signup", chain(http.HandlerFunc(ha.handleSignup), authIPLimitMiddleware(abuse)))
+		mux.Handle("POST /v1/auth/login", chain(http.HandlerFunc(ha.handleLogin), authIPLimitMiddleware(abuse)))
+		mux.Handle("POST /v1/auth/refresh", chain(http.HandlerFunc(ha.handleRefresh), authIPLimitMiddleware(abuse)))
+		mux.HandleFunc("POST /v1/auth/logout", ha.handleLogout)
+		mux.Handle("POST /v1/auth/forgot-password", chain(http.HandlerFunc(ha.handleForgotPassword), passwordResetIPLimitMiddleware(abuse)))
+		mux.Handle("POST /v1/auth/reset-password", chain(http.HandlerFunc(ha.handleResetPassword), passwordResetIPLimitMiddleware(abuse)))
+		orgsAuthenticated := humanAuthMiddleware(extras[0].humanAuth)
+		mux.Handle("POST /v1/orgs", orgsAuthenticated(http.HandlerFunc(ha.handleCreateOrg)))
+		mux.Handle("GET /v1/orgs", orgsAuthenticated(http.HandlerFunc(ha.handleListOrgs)))
+	}
 	if len(extras) > 0 && extras[0].feedback != nil {
 		// Deliberately NOT under /v1 and NOT authenticateMiddleware: this is the
 		// operator-only feedback ingestion boundary (see feedback_handler.go),
