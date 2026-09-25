@@ -101,16 +101,22 @@ func cmdPurgeExpired(args []string, output io.Writer) error {
 		return err
 	}
 
-	ids, err := db.PurgeExpiredMessages(ctx)
+	var diskErrs int
+	// deleteDisk runs BEFORE each id's database row is deleted (see
+	// database.PurgeExpiredMessages' doc) - an id whose disk delete fails
+	// keeps its DB row this run and is retried, disk and DB together, on
+	// the next purge-expired invocation.
+	deleteDisk := func(id string) error {
+		if err := store.Delete(id); err != nil {
+			fmt.Fprintf(output, "warning: message %s failed to delete from disk, left in place for retry: %v\n", id, err)
+			diskErrs++
+			return err
+		}
+		return nil
+	}
+	ids, err := db.PurgeExpiredMessages(ctx, deleteDisk)
 	if err != nil {
 		return err
-	}
-	var diskErrs int
-	for _, id := range ids {
-		if err := store.Delete(id); err != nil {
-			fmt.Fprintf(output, "warning: message %s purged from database but its on-disk storage failed to delete: %v\n", id, err)
-			diskErrs++
-		}
 	}
 	fmt.Fprintf(output, "purged %d message(s)", len(ids))
 	if diskErrs > 0 {
@@ -149,6 +155,10 @@ func cmdGDPRExport(args []string, output io.Writer) error {
 		fmt.Fprintf(output, "contact_id: %s\n", data.Contact.ID)
 		fmt.Fprintf(output, "contact_name: %s\n", data.Contact.Name)
 		fmt.Fprintf(output, "contact_created_at: %s\n", data.Contact.CreatedAt.Format(time.RFC3339))
+		fmt.Fprintf(output, "contact_attributes: %d\n", len(data.Contact.Attributes))
+		for k, v := range data.Contact.Attributes {
+			fmt.Fprintf(output, "  - %s=%s\n", k, v)
+		}
 	}
 	fmt.Fprintf(output, "audience_memberships: %d\n", len(data.AudienceID))
 	for _, aid := range data.AudienceID {
@@ -156,7 +166,7 @@ func cmdGDPRExport(args []string, output io.Writer) error {
 	}
 	fmt.Fprintf(output, "recipient_records: %d\n", len(data.Recipients))
 	for _, r := range data.Recipients {
-		fmt.Fprintf(output, "  - message_id=%s status=%s created_at=%s\n", r.MessageID, r.Status, r.CreatedAt.Format(time.RFC3339))
+		fmt.Fprintf(output, "  - message_id=%s address=%s status=%s created_at=%s\n", r.MessageID, r.Address, r.Status, r.CreatedAt.Format(time.RFC3339))
 	}
 	return nil
 }
@@ -189,5 +199,6 @@ func cmdGDPRDelete(args []string, output io.Writer) error {
 	}
 	fmt.Fprintf(output, "contact_deleted: %v\n", result.ContactDeleted)
 	fmt.Fprintf(output, "recipient_records_deleted: %d\n", result.RecipientsDeleted)
+	fmt.Fprintf(output, "broadcast_recipient_records_deleted: %d\n", result.BroadcastRecipientsDeleted)
 	return nil
 }

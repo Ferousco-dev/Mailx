@@ -76,6 +76,21 @@ func backdateMessage(t *testing.T, db *DB, messageID string, at time.Time) {
 	}
 }
 
+// markMessageTerminal sets a message's status directly to a terminal value
+// (InsertMessage always starts a message at 'queued', which
+// PurgeExpiredMessages must never purge - see its non-terminal-status
+// exclusion).
+func markMessageTerminal(t *testing.T, db *DB, messageID, status string) {
+	t.Helper()
+	if _, err := db.pool.Exec(context.Background(), `UPDATE messages SET status = $1 WHERE id = $2`, status, messageID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// noopDeleteDisk is the deleteDisk callback for tests that don't exercise
+// on-disk cleanup themselves - every candidate id "succeeds".
+func noopDeleteDisk(string) error { return nil }
+
 func TestPurgeExpiredMessagesRespectsPerTenantRetention(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
@@ -100,8 +115,10 @@ func TestPurgeExpiredMessagesRespectsPerTenantRetention(t *testing.T) {
 	tenDaysAgo := time.Now().UTC().Add(-10 * 24 * time.Hour)
 	backdateMessage(t, db, strictMsg.ID, tenDaysAgo)  // 10 days old, past the tenant's 1-day window
 	backdateMessage(t, db, lenientMsg.ID, tenDaysAgo) // 10 days old, well within the 90-day default
+	markMessageTerminal(t, db, strictMsg.ID, "delivered")
+	markMessageTerminal(t, db, lenientMsg.ID, "delivered")
 
-	purged, err := db.PurgeExpiredMessages(ctx)
+	purged, err := db.PurgeExpiredMessages(ctx, noopDeleteDisk)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,8 +149,9 @@ func TestPurgeExpiredMessagesCascadesRelatedRows(t *testing.T) {
 	}
 	insertEvent(t, db, tn.ID, msg.ID, EventQueued, time.Now().UTC())
 	backdateMessage(t, db, msg.ID, time.Now().UTC().Add(-48*time.Hour))
+	markMessageTerminal(t, db, msg.ID, "delivered")
 
-	if _, err := db.PurgeExpiredMessages(ctx); err != nil {
+	if _, err := db.PurgeExpiredMessages(ctx, noopDeleteDisk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -166,6 +184,7 @@ func TestPurgeExpiredMessagesDetachesBroadcastRecipients(t *testing.T) {
 		t.Fatal(err)
 	}
 	backdateMessage(t, db, msg.ID, time.Now().UTC().Add(-48*time.Hour))
+	markMessageTerminal(t, db, msg.ID, "delivered")
 
 	aud, err := db.CreateAudience(ctx, NewAudience{TenantID: tn.ID, Name: "purge-test"})
 	if err != nil {
@@ -193,7 +212,7 @@ func TestPurgeExpiredMessagesDetachesBroadcastRecipients(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := db.PurgeExpiredMessages(ctx); err != nil {
+	if _, err := db.PurgeExpiredMessages(ctx, noopDeleteDisk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -203,5 +222,89 @@ func TestPurgeExpiredMessagesDetachesBroadcastRecipients(t *testing.T) {
 	}
 	if messageID != nil {
 		t.Fatalf("expected broadcast_recipients.message_id nulled out, got %v", *messageID)
+	}
+}
+
+// TestPurgeExpiredMessagesExcludesNonTerminalStatus proves the Greptile-
+// flagged bug fix: a message still 'queued' (e.g. accepted far in advance
+// for a scheduled send, or simply not yet picked up) must never be purged
+// just because its created_at is old - only a terminal status makes it
+// eligible.
+func TestPurgeExpiredMessagesExcludesNonTerminalStatus(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+
+	one := 1
+	if err := db.SetTenantRetention(ctx, tn.ID, &one); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := db.InsertMessage(ctx, sampleNewMessage(t, tn.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Old enough to be past the 1-day window, but still 'queued' (a
+	// scheduled send far in the future, or simply pending) - InsertMessage
+	// already leaves it at 'queued'.
+	backdateMessage(t, db, msg.ID, time.Now().UTC().Add(-30*24*time.Hour))
+
+	purged, err := db.PurgeExpiredMessages(ctx, noopDeleteDisk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(purged) != 0 {
+		t.Fatalf("expected a queued message to survive purge, got purged=%v", purged)
+	}
+	if _, err := db.GetMessage(ctx, tn.ID, msg.ID); err != nil {
+		t.Fatalf("expected queued message to still exist: %v", err)
+	}
+}
+
+// TestPurgeExpiredMessagesKeepsDBRowWhenDiskDeleteFails proves the other
+// Greptile-flagged bug fix: if the disk-cleanup callback fails for an id,
+// that id's database row must NOT be deleted - it must survive to be
+// retried (disk and DB together) on a later purge, never leaving an
+// orphaned on-disk file with no DB row pointing at it.
+func TestPurgeExpiredMessagesKeepsDBRowWhenDiskDeleteFails(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+
+	one := 1
+	if err := db.SetTenantRetention(ctx, tn.ID, &one); err != nil {
+		t.Fatal(err)
+	}
+	failMsg, err := db.InsertMessage(ctx, sampleNewMessage(t, tn.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	okMsg, err := db.InsertMessage(ctx, sampleNewMessage(t, tn.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	backdateMessage(t, db, failMsg.ID, old)
+	backdateMessage(t, db, okMsg.ID, old)
+	markMessageTerminal(t, db, failMsg.ID, "delivered")
+	markMessageTerminal(t, db, okMsg.ID, "delivered")
+
+	deleteDisk := func(id string) error {
+		if id == failMsg.ID {
+			return errors.New("simulated disk failure")
+		}
+		return nil
+	}
+	purged, err := db.PurgeExpiredMessages(ctx, deleteDisk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(purged) != 1 || purged[0] != okMsg.ID {
+		t.Fatalf("expected only %s purged, got %v", okMsg.ID, purged)
+	}
+	if _, err := db.GetMessage(ctx, tn.ID, failMsg.ID); err != nil {
+		t.Fatalf("expected the disk-delete-failed message's DB row to survive: %v", err)
+	}
+	if _, err := db.GetMessage(ctx, tn.ID, okMsg.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expected the successfully disk-deleted message's DB row to be gone: %v", err)
 	}
 }

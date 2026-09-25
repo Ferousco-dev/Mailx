@@ -175,6 +175,81 @@ func TestDeleteSubjectDataRemovesContactAndRecipientsNotMessage(t *testing.T) {
 	}
 }
 
+// TestDeleteSubjectDataRemovesMatchingBroadcastRecipientSnapshot proves the
+// Greptile-flagged bug fix: broadcast_recipients keeps its OWN snapshot of
+// a contact (email/name/attributes at broadcast-creation time), not
+// reachable via the contacts FK - so erasure must independently find and
+// remove matching broadcast_recipients rows, not just the contacts/
+// recipients rows.
+func TestDeleteSubjectDataRemovesMatchingBroadcastRecipientSnapshot(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	tn := newTestTenant(t, db)
+
+	aud, err := db.CreateAudience(ctx, NewAudience{TenantID: tn.ID, Name: "gdpr-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := db.CreateTemplate(ctx, NewTemplate{TenantID: tn.ID, Name: "gdpr-tmpl", Subject: "hi", HTML: "<p>hi</p>"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := db.CreateBroadcast(ctx, NewBroadcast{TenantID: tn.ID, Name: "gdpr-broadcast", AudienceID: aud.ID, TemplateID: tmpl.ID, FromAddress: "a@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	matchID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately NO contact_id / no matching contacts row - proves this
+	// snapshot is found and removed independently of the contacts FK path.
+	dummyContactID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx,
+		`INSERT INTO broadcast_recipients (id, broadcast_id, tenant_id, contact_id, email, status) VALUES ($1,$2,$3,$4,$5,'pending')`,
+		matchID, b.ID, tn.ID, dummyContactID, "erase@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	otherID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dummyContactID2, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.pool.Exec(ctx,
+		`INSERT INTO broadcast_recipients (id, broadcast_id, tenant_id, contact_id, email, status) VALUES ($1,$2,$3,$4,$5,'pending')`,
+		otherID, b.ID, tn.ID, dummyContactID2, "keep@example.com"); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := db.DeleteSubjectData(ctx, tn.ID, "erase@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.BroadcastRecipientsDeleted != 1 {
+		t.Fatalf("expected 1 broadcast_recipients row deleted, got %+v", result)
+	}
+	var count int
+	if err := db.pool.QueryRow(ctx, `SELECT count(*) FROM broadcast_recipients WHERE id = $1`, matchID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("expected the matching broadcast_recipients snapshot to be deleted")
+	}
+	if err := db.pool.QueryRow(ctx, `SELECT count(*) FROM broadcast_recipients WHERE id = $1`, otherID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("expected the OTHER broadcast_recipients row to survive")
+	}
+}
+
 func TestDeleteSubjectDataNoMatchIsNotAnError(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()

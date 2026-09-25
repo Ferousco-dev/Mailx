@@ -5,15 +5,20 @@
 // tenant.
 //
 // Scope, deliberately narrow: deletes the contacts row (which cascades to
-// audience_members - see migration 000018) and every recipients row for
-// that address. It does NOT delete the parent messages/events/
-// delivery_attempts - those are the tenant's own operational/delivery
-// records naming multiple parties (a message can have other recipients),
-// not solely "this person's data" in the way a contact record is, and
-// remain subject to the ordinary retention purge (see retention.go)
-// instead. It also does NOT touch suppressions, for the same legitimate-
-// interest reason suppressions already survive a message purge: removing
-// a suppression on erasure would let MailX re-email someone who
+// audience_members - see migration 000018), every recipients row for that
+// address, and every broadcast_recipients row for that address (see
+// DEC-209: broadcast_recipients keeps its OWN independent snapshot of a
+// contact - email/name/attributes captured at broadcast-creation time -
+// that is not reachable through the contacts FK at all, so leaving it
+// alone would let a pending/materialized snapshot still get sent to an
+// address erasure just reported as deleted). It does NOT delete the parent
+// messages/events/delivery_attempts - those are the tenant's own
+// operational/delivery records naming multiple parties (a message can have
+// other recipients), not solely "this person's data" in the way a contact
+// record is, and remain subject to the ordinary retention purge (see
+// retention.go) instead. It also does NOT touch suppressions, for the same
+// legitimate-interest reason suppressions already survive a message purge:
+// removing a suppression on erasure would let MailX re-email someone who
 // complained or hard-bounced.
 package database
 
@@ -95,8 +100,9 @@ func (db *DB) ExportSubjectData(ctx context.Context, tenantID, email string) (GD
 
 // GDPRDeleteResult reports what erasure actually removed.
 type GDPRDeleteResult struct {
-	ContactDeleted    bool
-	RecipientsDeleted int
+	ContactDeleted             bool
+	RecipientsDeleted          int
+	BroadcastRecipientsDeleted int
 }
 
 // DeleteSubjectData erases what ExportSubjectData would have reported -
@@ -108,6 +114,10 @@ func (db *DB) DeleteSubjectData(ctx context.Context, tenantID, email string) (GD
 	}
 
 	recipients, err := db.findRecipientsByAddress(ctx, tenantID, key)
+	if err != nil {
+		return GDPRDeleteResult{}, err
+	}
+	broadcastRecipientIDs, err := db.findBroadcastRecipientIDsByAddress(ctx, tenantID, key)
 	if err != nil {
 		return GDPRDeleteResult{}, err
 	}
@@ -124,6 +134,21 @@ func (db *DB) DeleteSubjectData(ctx context.Context, tenantID, email string) (GD
 			return GDPRDeleteResult{}, fmt.Errorf("database: delete recipient row: %w", normalizeErr(err))
 		}
 		out.RecipientsDeleted++
+	}
+
+	// broadcast_recipients keeps its own independent snapshot of a
+	// contact (email/name/attributes), NOT reachable via the contacts FK -
+	// see the package doc / DEC-209. Deleted outright (not scrubbed), same
+	// hard-delete policy already chosen for contacts/recipients above; this
+	// does reduce a broadcast's own historical sent-count analytics for an
+	// already-sent row, accepted as the simpler, more clearly-compliant
+	// tradeoff over keeping a scrubbed row around for counting purposes.
+	if len(broadcastRecipientIDs) > 0 {
+		tag, err := tx.Exec(ctx, `DELETE FROM broadcast_recipients WHERE id = ANY($1)`, broadcastRecipientIDs)
+		if err != nil {
+			return GDPRDeleteResult{}, fmt.Errorf("database: delete broadcast_recipients row: %w", normalizeErr(err))
+		}
+		out.BroadcastRecipientsDeleted = int(tag.RowsAffected())
 	}
 
 	tag, err := tx.Exec(ctx, `DELETE FROM contacts WHERE tenant_id = $1 AND normalized_email = $2`, tenantID, key)
@@ -150,6 +175,13 @@ func (db *DB) getContactByNormalizedEmail(ctx context.Context, tenantID, normali
 // messages for tenant scoping) and keeps only rows whose address matches
 // normalizedEmail once decoded the same way - see the package/type docs
 // for why an exact-string match is not sufficient here.
+//
+// Known limitation (RSK-041): this is a full scan of the tenant's
+// recipients, decoded row-by-row in Go - acceptable for this operator-only
+// CLI path today, but could exceed the CLI's fixed context deadline on a
+// tenant with a very large recipient history. A real fix needs an indexed
+// normalized-address column populated at INSERT time (messages.go);
+// deferred as a separate, larger change.
 func (db *DB) findRecipientsByAddress(ctx context.Context, tenantID, normalizedEmail string) ([]GDPRRecipientRecord, error) {
 	rows, err := db.pool.Query(ctx, `
 		SELECT r.message_id, r.address, r.status, r.created_at
@@ -170,6 +202,33 @@ func (db *DB) findRecipientsByAddress(ctx context.Context, tenantID, normalizedE
 		}
 		if key, ok := decodeRecipientAddress(r.Address); ok && key == normalizedEmail {
 			out = append(out, r)
+		}
+	}
+	return out, rows.Err()
+}
+
+// findBroadcastRecipientIDsByAddress scans this tenant's broadcast_recipients
+// (its email column is a plain address snapshot, not bracket/display-name
+// form like recipients.address, but still run through the same normalize
+// step for a correct case-insensitive match against key) and returns the
+// ids whose email matches.
+func (db *DB) findBroadcastRecipientIDsByAddress(ctx context.Context, tenantID, normalizedEmail string) ([]string, error) {
+	rows, err := db.pool.Query(ctx, `
+		SELECT id, email FROM broadcast_recipients WHERE tenant_id = $1`,
+		tenantID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("database: scan broadcast_recipients for gdpr match: %w", normalizeErr(err))
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id, email string
+		if err := rows.Scan(&id, &email); err != nil {
+			return nil, err
+		}
+		if key, err := contact.Normalize(email); err == nil && key == normalizedEmail {
+			out = append(out, id)
 		}
 	}
 	return out, rows.Err()

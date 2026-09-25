@@ -243,15 +243,22 @@ func runRetentionPurge(ctx context.Context, db *database.DB, store *storage.File
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			ids, err := db.PurgeExpiredMessages(ctx)
+			// deleteDisk runs BEFORE each id's database row is deleted (see
+			// database.PurgeExpiredMessages' doc): an id whose disk cleanup
+			// fails here is simply skipped this cycle and retried, disk and
+			// DB together, on the next tick - never leaves an orphaned
+			// on-disk file with no DB row to find it by.
+			deleteDisk := func(id string) error {
+				if err := store.Delete(id); err != nil {
+					o.log.Warn("retention_purge_disk_cleanup_failed", "message_id", id, "error", err.Error())
+					return err
+				}
+				return nil
+			}
+			ids, err := db.PurgeExpiredMessages(ctx, deleteDisk)
 			if err != nil {
 				o.log.Warn("retention_purge_failed", "error", err.Error())
 				continue
-			}
-			for _, id := range ids {
-				if err := store.Delete(id); err != nil {
-					o.log.Warn("retention_purge_disk_cleanup_failed", "message_id", id, "error", err.Error())
-				}
 			}
 			if len(ids) > 0 {
 				o.log.Info("retention_purge", "purged", len(ids))
