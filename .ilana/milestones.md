@@ -112,7 +112,7 @@ explicitly deferred to a later phase — v0.47 as a whole is NOT complete.
 - Tests: `internal/database/dashboard_test.go` (rules, concurrent mutual-removal race, invite list/revoke idempotency, profile/org update), `internal/api/dashboard_handler_test.go` (every endpoint: happy path, non-member 404, non-owner 403, validation).
 - Deferred: leave org / transfer ownership / role changes, email change, org slug column. Plan auto-renewal and OAuth/MFA are separate parallel work, not part of 3a.
 
-## v0.47 phase 3b — OAuth (Google/GitHub) + TOTP MFA — COMPLETE (pending independent security review)
+## v0.47 phase 3b — OAuth (Google/GitHub) + TOTP MFA — COMPLETE (independently security-reviewed)
 
 - Migration 000032 (`oauth_states`, `human_oauth_identities`, `mfa_challenges`, `mfa_backup_codes`, `humans.mfa_*`); round-trip down/up validated on a disposable database.
 - `internal/humanauth`: `oauth.go` (StartOAuth/CompleteOAuth), `totp.go`, `mfa.go` (Enroll/Confirm/Disable/VerifyMFA); Login returns `*MFARequiredError` for MFA accounts. Routes and env vars: architecture.md "OAuth sign-in & TOTP MFA". DEC-231..234 (renumbered from the agent's own DEC-228..231 - collided with phase 3a's DEC-228..230, built concurrently from the same base commit), RSK-046/047.
