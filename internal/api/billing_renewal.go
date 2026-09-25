@@ -15,7 +15,7 @@ import (
 )
 
 // Renewer runs one hourly pass of plan reminders and opt-in auto-renewal
-// charges (v0.47 phase 3c, DEC-228..231). Order per pass: reminders, then
+// charges (v0.47 phase 3c, DEC-235..238). Order per pass: reminders, then
 // reconcile unknown-outcome charges, then new charges. Lapsing stays in
 // database.DowngradeLapsedPlans (called by cmd/mailx after RunOnce).
 //

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// Auto-renewal policy (DEC-230). Timeline for a period ending at E:
+// Auto-renewal policy (DEC-237). Timeline for a period ending at E:
 // reminder at E-72h; charge attempts no earlier than E-48h, at most
 // RenewalMaxAttempts, spaced >= RenewalRetrySpacing (so E-48h, E-36h, E-24h
 // on an hourly ticker), all before E. No charge is ever made unless an
@@ -29,7 +29,7 @@ const (
 	RenewalReconcileAfter = time.Hour // a pending attempt older than this is verified with Paystack
 )
 
-// ChargeOutcome classifies a server-initiated charge (DEC-228).
+// ChargeOutcome classifies a server-initiated charge (DEC-238).
 type ChargeOutcome int
 
 const (

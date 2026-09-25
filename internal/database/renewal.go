@@ -18,7 +18,7 @@ type RenewalSettings struct {
 // SetAutoRenew sets tenants.auto_renew. When the value actually changes, the
 // current period's reminder marker is cleared so the owner gets a fresh
 // reminder that matches the new setting (a "charge is coming" notice is a
-// precondition for any charge, DEC-230). ErrNotFound if the tenant is absent.
+// precondition for any charge, DEC-237). ErrNotFound if the tenant is absent.
 func (db *DB) SetAutoRenew(ctx context.Context, tenantID string, on bool) (RenewalSettings, error) {
 	var s RenewalSettings
 	err := db.pool.QueryRow(ctx, `
@@ -183,7 +183,7 @@ type RenewalClaim struct {
 // ClaimRenewalAttempt decides, under SELECT ... FOR UPDATE on the tenant row
 // (the lockMemberCap pattern), whether a charge attempt is due and, if so,
 // records it as 'pending' before returning. It returns (nil, nil) when no
-// charge may be made now. Conditions (all required, DEC-230):
+// charge may be made now. Conditions (all required, DEC-237):
 //   - paid plan, status active, auto_renew on, card on file;
 //   - now < period end <= now + RenewalChargeWindow;
 //   - an auto-renew reminder for THIS period end was sent >= RenewalMinNotice ago;

@@ -63,7 +63,7 @@ func enablePlanEnforcementFromEnv(db *database.DB) {
 const planLapseInterval = time.Hour
 
 // runPlanLapse runs the hourly billing pass: renewer (reminders before every
-// period end; opt-in auto-renewal charges, DEC-228..231) then lapse of any
+// period end; opt-in auto-renewal charges, DEC-235..238) then lapse of any
 // paid tenant whose period has ended (retention pinned, DEC-227). renewer may
 // be nil (no system mailer): then nothing is reminded or charged.
 func runPlanLapse(ctx context.Context, db *database.DB, renewer *api.Renewer, o obs) error {

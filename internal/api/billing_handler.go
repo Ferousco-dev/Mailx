@@ -24,7 +24,7 @@ type BillingConfig struct {
 	CallbackURL string
 	// AuthBox encrypts saved Paystack card authorizations at rest
 	// (MAILX_BILLING_MASTER_KEY). Nil disables auto-renewal entirely: no
-	// authorization is stored and auto_renew cannot be turned on (DEC-229).
+	// authorization is stored and auto_renew cannot be turned on (DEC-236).
 	AuthBox *secretbox.Box
 }
 
@@ -236,7 +236,7 @@ func (h *billingHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 // saveAuthorization stores a reusable card authorization from a verified,
 // just-applied charge.success, encrypted and bound to the tenant id. It is
 // only a capability: no charge is ever made unless the owner has turned
-// auto_renew on (DEC-229). Failures are logged, never surfaced to Paystack
+// auto_renew on (DEC-236). Failures are logged, never surfaced to Paystack
 // (the payment itself is already applied; a retry would only be a replay).
 // The authorization code itself is never logged.
 func (h *billingHandler) saveAuthorization(r *http.Request, ev billing.Event) {
@@ -262,7 +262,7 @@ type autoRenewRequest struct {
 
 // handleAutoRenew lets an org OWNER opt in to (or out of) automatic renewal.
 // It never charges and accepts no amount: renewal charges are made later by
-// the Renewer at the server-side plan price, only after a reminder (DEC-230).
+// the Renewer at the server-side plan price, only after a reminder (DEC-237).
 func (h *billingHandler) handleAutoRenew(w http.ResponseWriter, r *http.Request) {
 	humanID, ok := humanIDFromContext(r.Context())
 	if !ok {

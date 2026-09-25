@@ -166,7 +166,7 @@ type Event struct {
 		} `json:"customer"`
 		// Authorization is the card token Paystack returns on a successful
 		// charge. AuthorizationCode is SENSITIVE (it can be charged again):
-		// never log it; store it only encrypted (DEC-229).
+		// never log it; store it only encrypted (DEC-236).
 		Authorization struct {
 			AuthorizationCode string `json:"authorization_code"`
 			Reusable          bool   `json:"reusable"`
