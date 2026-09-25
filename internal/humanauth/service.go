@@ -156,12 +156,25 @@ func (s *Service) Login(ctx context.Context, email, password string) (Session, e
 	if err := bcrypt.CompareHashAndPassword([]byte(h.PasswordHash), []byte(password)); err != nil {
 		return Session{}, ErrInvalidCredentials
 	}
+	// Deliberately NOT mintSession here: recording the login and issuing
+	// its refresh token must succeed or fail TOGETHER (see
+	// TouchLoginAndCreateRefreshToken's doc) - a plain mintSession call
+	// would let a refresh-token-insert failure leave the login recorded
+	// as successful for an attempt that returned no session.
+	access, err := s.issueAccessToken(h)
+	if err != nil {
+		return Session{}, err
+	}
+	raw, err := generateRawToken()
+	if err != nil {
+		return Session{}, err
+	}
 	loginAt := s.now()
-	if err := s.db.TouchHumanLogin(ctx, h.ID, loginAt); err != nil {
+	if _, err := s.db.TouchLoginAndCreateRefreshToken(ctx, h.ID, loginAt, hashRawToken(raw), loginAt.Add(RefreshTokenTTL)); err != nil {
 		return Session{}, fmt.Errorf("humanauth: record login: %w", err)
 	}
 	h.LastLoginAt = &loginAt // reflect the just-recorded touch, avoiding a re-fetch
-	return s.mintSession(ctx, h)
+	return Session{Human: h, AccessToken: access, RefreshToken: raw}, nil
 }
 
 // Refresh validates and rotates a refresh token: the old token is

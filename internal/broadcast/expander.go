@@ -30,6 +30,12 @@ const (
 	defaultBroadcastBatch   = 5   // broadcasts touched per tick
 	defaultSnapshotBatch    = 200 // audience_members rows scanned per broadcast per tick
 	defaultMaterializeBatch = 25  // recipients rendered/signed/persisted per broadcast per tick
+	// erasedCleanupRetryDelay separates the 3 immediate retries of an
+	// erased-recipient's disk cleanup (see materializeOne) - short, since
+	// this is meant to ride out a momentary filesystem error within one
+	// tick, not to wait for a longer outage (a longer outage needs the
+	// Error-level log/metric this path already emits, not a longer sleep).
+	erasedCleanupRetryDelay = 50 * time.Millisecond
 )
 
 // errDeterministic marks a materializeOne failure as one that will fail the
@@ -362,10 +368,25 @@ func (e *Expander) materializeOne(ctx context.Context, b database.Broadcast, fro
 		// above and this insert — the file just saved above is now for a
 		// message that will never exist in the DB; clean it up rather than
 		// leaving it orphaned on disk. Treat this exactly like ErrConflict
-		// below: a terminal, non-retryable outcome for this recipient, not
-		// a failure.
-		if delErr := e.store.Delete(r.ID); delErr != nil {
-			e.log.Warn("erased_recipient_disk_cleanup_failed", "recipient_id", r.ID, "error", delErr.Error())
+		// below: a terminal, non-retryable outcome for this recipient (the
+		// broadcast_recipients row is gone, so nothing will ever call this
+		// function again for r.ID - there is no other retry path).
+		//
+		// A few immediate retries handle the common transient case (a
+		// momentary FS error); a failure that survives all of them is
+		// logged at Error (not Warn) and counted so an operator can alert
+		// on it, since it means raw mail for an erased subject is left on
+		// disk with no durable record to reconcile it later - see RSK-043.
+		var delErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if delErr = e.store.Delete(r.ID); delErr == nil {
+				break
+			}
+			time.Sleep(erasedCleanupRetryDelay)
+		}
+		if delErr != nil {
+			e.log.Error("erased_recipient_disk_cleanup_failed", "recipient_id", r.ID, "error", delErr.Error())
+			e.metrics.BroadcastExpansionBatch("erasure_cleanup", "error")
 		}
 		return nil
 	}

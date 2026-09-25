@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
@@ -36,6 +37,14 @@ type AbuseControls struct {
 	Policy  ratelimit.Policy
 	Metrics *observability.Metrics
 	Log     *slog.Logger
+	// TrustedProxyCIDRs, when non-empty, lets authIPLimitMiddleware key on
+	// the real client IP (from X-Forwarded-For) instead of the connection
+	// peer when that peer is one of these trusted proxies — see
+	// authIPLimitMiddleware's doc for why trusting X-Forwarded-For
+	// unconditionally would be spoofable. Empty (the default) means no
+	// proxy is trusted and RemoteAddr is always used, which is also
+	// correct for a direct/self-hosted deployment with no reverse proxy.
+	TrustedProxyCIDRs []*net.IPNet
 }
 
 // unavailableRetryAfter is what a client is told when the limiter or a capacity
@@ -109,21 +118,23 @@ func requestLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
 // that don't exist yet at this point. The only identity available
 // pre-auth is the client's IP.
 //
-// Deliberately RemoteAddr only, not X-Forwarded-For: trusting a
-// client-supplied header without a configured trusted-proxy allowlist
-// would let an attacker spoof a different IP per request and bypass this
-// entirely. A reverse-proxy deployment wanting real client IPs here needs
-// that trust boundary established first — a separate, later change.
+// Uses RemoteAddr by default (see authClientIP) - a self-hosted deployment
+// with no reverse proxy in front of MailX gets a real, unspoofable client
+// IP this way. A deployment that DOES sit behind a reverse proxy must set
+// AbuseControls.TrustedProxyCIDRs (MAILX_TRUSTED_PROXY_CIDRS) for this to
+// key on the real client instead of the proxy's own IP for every caller —
+// without that, every client behind the proxy shares one bucket and can
+// starve each other's login/refresh attempts. Trusting X-Forwarded-For
+// unconditionally instead (with no allowlist) would let any caller spoof a
+// different IP per request and bypass this entirely, so it is only
+// consulted when the immediate peer is a configured trusted proxy.
 func authIPLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		if a == nil || a.Limiter == nil {
 			return next
 		}
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip, _, err := net.SplitHostPort(r.RemoteAddr)
-			if err != nil {
-				ip = r.RemoteAddr // no port present (e.g. unix socket, some test harnesses)
-			}
+			ip := authClientIP(r, a.TrustedProxyCIDRs)
 			p := a.Policy
 			dec, err := a.Limiter.Allow(r.Context(),
 				ratelimit.Bucket{Key: "auth:ip:" + ip, Rate: p.AuthIPRate, Burst: p.AuthIPBurst, Cost: 1},
@@ -149,6 +160,49 @@ func authIPLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
 			}
 		})
 	}
+}
+
+// authClientIP returns the IP to key the auth rate limiter on: the
+// connection peer (RemoteAddr), UNLESS that peer is a configured trusted
+// proxy, in which case the rightmost entry of X-Forwarded-For is used
+// instead - the entry the trusted proxy itself appended, describing
+// whoever it received the request from. Only the rightmost entry is ever
+// trusted, even with a multi-hop header: this deployment only vouches for
+// its own immediately-adjacent proxy, not for arbitrary earlier hops a
+// client could have forged into the header before it ever reached that
+// proxy.
+func authClientIP(r *http.Request, trusted []*net.IPNet) string {
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		peer = r.RemoteAddr // no port present (e.g. unix socket, some test harnesses)
+	}
+	if len(trusted) == 0 {
+		return peer
+	}
+	peerIP := net.ParseIP(peer)
+	if peerIP == nil {
+		return peer
+	}
+	isTrusted := false
+	for _, cidr := range trusted {
+		if cidr.Contains(peerIP) {
+			isTrusted = true
+			break
+		}
+	}
+	if !isTrusted {
+		return peer
+	}
+	xff := r.Header.Get("X-Forwarded-For")
+	if xff == "" {
+		return peer
+	}
+	parts := strings.Split(xff, ",")
+	client := strings.TrimSpace(parts[len(parts)-1])
+	if client == "" {
+		return peer
+	}
+	return client
 }
 
 func routeClass(r *http.Request) string {

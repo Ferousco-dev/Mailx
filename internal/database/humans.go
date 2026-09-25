@@ -91,14 +91,64 @@ func (db *DB) GetHuman(ctx context.Context, id string) (Human, error) {
 }
 
 // TouchHumanLogin records a successful login: sets last_login_at and bumps
-// updated_at. Called once per Login (not SignUp — signing up mints a
-// session directly but is not itself a "login" for this column's purpose).
+// updated_at, but ONLY if at is strictly newer than the currently stored
+// last_login_at (or there isn't one yet) - two logins for the same account
+// completing out of wall-clock order (a slower request finishing after a
+// faster, later one) must not walk the stored timestamp backwards. Prefer
+// TouchLoginAndCreateRefreshToken for an actual Login flow - this
+// standalone form exists for callers that only need the timestamp, not a
+// session.
 func (db *DB) TouchHumanLogin(ctx context.Context, humanID string, at time.Time) error {
-	_, err := db.pool.Exec(ctx, `UPDATE humans SET last_login_at = $2, updated_at = $2 WHERE id = $1`, humanID, at)
+	_, err := db.pool.Exec(ctx,
+		`UPDATE humans SET last_login_at = $2, updated_at = $2 WHERE id = $1 AND (last_login_at IS NULL OR last_login_at < $2)`,
+		humanID, at)
 	if err != nil {
 		return normalizeErr(err)
 	}
 	return nil
+}
+
+// TouchLoginAndCreateRefreshToken records a login AND issues its refresh
+// token in one transaction: either both happen or neither does. Splitting
+// these into two separate statements (as an earlier version did) meant a
+// refresh-token insert failure after a successful login-timestamp update
+// left the account permanently recording a "successful" login for an
+// attempt that actually failed and returned no session to the caller.
+// tokenHash/expiresAt are precomputed by the caller (internal/humanauth
+// owns token generation, not this package). See TouchHumanLogin's doc for
+// the monotonic-timestamp guard, applied identically here.
+func (db *DB) TouchLoginAndCreateRefreshToken(ctx context.Context, humanID string, loginAt time.Time, tokenHash string, expiresAt time.Time) (RefreshToken, error) {
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return RefreshToken{}, fmt.Errorf("database: begin login: %w", normalizeErr(err))
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE humans SET last_login_at = $2, updated_at = $2 WHERE id = $1 AND (last_login_at IS NULL OR last_login_at < $2)`,
+		humanID, loginAt); err != nil {
+		return RefreshToken{}, fmt.Errorf("database: touch human login: %w", normalizeErr(err))
+	}
+
+	id, err := newID()
+	if err != nil {
+		return RefreshToken{}, err
+	}
+	var t RefreshToken
+	err = tx.QueryRow(ctx, `
+		INSERT INTO refresh_tokens (id, human_id, token_hash, expires_at)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, human_id, token_hash, expires_at, created_at, revoked_at`,
+		id, humanID, tokenHash, expiresAt,
+	).Scan(&t.ID, &t.HumanID, &t.TokenHash, &t.ExpiresAt, &t.CreatedAt, &t.RevokedAt)
+	if err != nil {
+		return RefreshToken{}, fmt.Errorf("database: create refresh token: %w", normalizeErr(err))
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return RefreshToken{}, fmt.Errorf("database: commit login: %w", normalizeErr(err))
+	}
+	return t, nil
 }
 
 // CreateRefreshToken inserts a new refresh token row.

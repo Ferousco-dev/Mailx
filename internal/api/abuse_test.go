@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -579,5 +580,55 @@ func TestEvery503CarriesRetryAfter(t *testing.T) {
 			t.Fatalf("%s %s: %d (rig expected 503)", tc.method, tc.path, rec.Code)
 		}
 		retryAfter(t, rec)
+	}
+}
+
+func TestAuthClientIPNoTrustedProxiesUsesRemoteAddr(t *testing.T) {
+	r := httptest.NewRequest("POST", "/v1/auth/login", nil)
+	r.RemoteAddr = "203.0.113.5:54321"
+	r.Header.Set("X-Forwarded-For", "1.2.3.4") // must be ignored: no trusted proxy configured
+	if got := authClientIP(r, nil); got != "203.0.113.5" {
+		t.Fatalf("expected the peer address with no trusted proxies configured, got %q", got)
+	}
+}
+
+func TestAuthClientIPUntrustedPeerIgnoresXFF(t *testing.T) {
+	_, trusted, err := net.ParseCIDR("10.0.0.0/8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/v1/auth/login", nil)
+	r.RemoteAddr = "203.0.113.5:54321" // NOT within the trusted CIDR
+	r.Header.Set("X-Forwarded-For", "1.2.3.4")
+	if got := authClientIP(r, []*net.IPNet{trusted}); got != "203.0.113.5" {
+		t.Fatalf("expected the peer address for an untrusted peer, got %q", got)
+	}
+}
+
+func TestAuthClientIPTrustedPeerUsesLastXFFEntry(t *testing.T) {
+	_, trusted, err := net.ParseCIDR("10.0.0.0/8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/v1/auth/login", nil)
+	r.RemoteAddr = "10.1.2.3:54321" // WITHIN the trusted CIDR (our own reverse proxy)
+	// Multi-hop header: only the rightmost entry (appended by our trusted
+	// proxy) is ever trusted, never an earlier hop the original client
+	// could have forged.
+	r.Header.Set("X-Forwarded-For", "9.9.9.9, 198.51.100.7")
+	if got := authClientIP(r, []*net.IPNet{trusted}); got != "198.51.100.7" {
+		t.Fatalf("expected the rightmost X-Forwarded-For entry, got %q", got)
+	}
+}
+
+func TestAuthClientIPTrustedPeerNoXFFFallsBackToPeer(t *testing.T) {
+	_, trusted, err := net.ParseCIDR("10.0.0.0/8")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/v1/auth/login", nil)
+	r.RemoteAddr = "10.1.2.3:54321"
+	if got := authClientIP(r, []*net.IPNet{trusted}); got != "10.1.2.3" {
+		t.Fatalf("expected fallback to the peer address when X-Forwarded-For is absent, got %q", got)
 	}
 }

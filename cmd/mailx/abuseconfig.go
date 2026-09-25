@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -143,7 +144,35 @@ func (a *abuseRuntime) apiControls(o obs) *api.AbuseControls {
 	if a == nil || !a.Enabled {
 		return nil
 	}
-	return &api.AbuseControls{Limiter: a.Store, Policy: a.Policy, Metrics: o.metrics, Log: o.log}
+	return &api.AbuseControls{Limiter: a.Store, Policy: a.Policy, Metrics: o.metrics, Log: o.log, TrustedProxyCIDRs: trustedProxyCIDRs(o)}
+}
+
+// trustedProxyCIDRs parses MAILX_TRUSTED_PROXY_CIDRS (comma-separated
+// CIDRs, e.g. "10.0.0.0/8,172.16.0.0/12") — see AbuseControls.TrustedProxyCIDRs's
+// doc for what this enables. Empty/unset means no proxy is trusted (the
+// safe default for a direct, no-reverse-proxy deployment). An invalid
+// entry is logged and skipped rather than failing startup — a typo here
+// should degrade to "no trusted proxies" (RemoteAddr-keyed, safe), not
+// crash the server.
+func trustedProxyCIDRs(o obs) []*net.IPNet {
+	raw := os.Getenv("MAILX_TRUSTED_PROXY_CIDRS")
+	if raw == "" {
+		return nil
+	}
+	var out []*net.IPNet
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		_, cidr, err := net.ParseCIDR(part)
+		if err != nil {
+			o.log.Warn("invalid_trusted_proxy_cidr", "value", part, "error", err.Error())
+			continue
+		}
+		out = append(out, cidr)
+	}
+	return out
 }
 
 // workerOptions returns the worker's permit option, or nothing when disabled.

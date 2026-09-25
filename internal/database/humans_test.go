@@ -167,3 +167,73 @@ func TestListOrganizationsForHumanOnlyReturnsMemberships(t *testing.T) {
 		t.Fatalf("expected only Ada's org, got %+v", orgs)
 	}
 }
+
+// TestTouchHumanLoginIsMonotonic proves the fix for the race Greptile
+// flagged: an out-of-order call (an earlier wall-clock timestamp arriving
+// AFTER a later one was already recorded) must not move last_login_at
+// backwards.
+func TestTouchHumanLoginIsMonotonic(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	h, err := db.CreateHuman(ctx, "Ada", "ada-monotonic@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	later := time.Now().UTC()
+	earlier := later.Add(-time.Minute)
+
+	if err := db.TouchHumanLogin(ctx, h.ID, later); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.TouchHumanLogin(ctx, h.ID, earlier); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := db.GetHuman(ctx, h.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastLoginAt == nil || !got.LastLoginAt.Equal(later) {
+		t.Fatalf("expected last_login_at to stay at the later timestamp %v, got %v", later, got.LastLoginAt)
+	}
+}
+
+// TestTouchLoginAndCreateRefreshTokenIsAtomicAndMonotonic exercises the
+// combined method Login actually uses.
+func TestTouchLoginAndCreateRefreshTokenIsAtomicAndMonotonic(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+	h, err := db.CreateHuman(ctx, "Ada", "ada-atomic@example.com", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	first := time.Now().UTC()
+	tok, err := db.TouchLoginAndCreateRefreshToken(ctx, h.ID, first, "hash1", first.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tok.ID == "" {
+		t.Fatal("expected a created refresh token")
+	}
+	got, err := db.GetHuman(ctx, h.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LastLoginAt == nil || !got.LastLoginAt.Equal(first) {
+		t.Fatalf("expected last_login_at set to %v, got %v", first, got.LastLoginAt)
+	}
+
+	earlier := first.Add(-time.Minute)
+	if _, err := db.TouchLoginAndCreateRefreshToken(ctx, h.ID, earlier, "hash2", earlier.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = db.GetHuman(ctx, h.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.LastLoginAt.Equal(first) {
+		t.Fatalf("expected an out-of-order call to leave last_login_at at %v, got %v", first, got.LastLoginAt)
+	}
+}
