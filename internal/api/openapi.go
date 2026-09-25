@@ -2797,7 +2797,8 @@ const openAPISpec = `{
         "properties": {
           "id": {"type": "string"},
           "name": {"type": "string"},
-          "email": {"type": "string", "format": "email"}
+          "email": {"type": "string", "format": "email"},
+          "last_login_at": {"type": "string", "format": "date-time", "nullable": true, "description": "When this account last completed a successful POST /auth/login. Null if it has never logged in (a fresh signup mints a session directly without counting as a login)."}
         }
       },
       "Session": {

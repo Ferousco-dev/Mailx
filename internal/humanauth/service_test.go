@@ -84,6 +84,59 @@ func TestSignUpAndDuplicateEmail(t *testing.T) {
 	}
 }
 
+// TestLoginRecordsLastLoginButSignUpDoesNot proves TouchHumanLogin fires on
+// Login (not SignUp, which mints a session directly but isn't itself a
+// "login" for this field's purpose - see migration 000028's doc) and that
+// a second login advances the timestamp.
+func TestLoginRecordsLastLoginButSignUpDoesNot(t *testing.T) {
+	db := newTestDB(t)
+	svc, err := NewService(db, testSecret())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter"); err != nil {
+		t.Fatal(err)
+	}
+	h, err := db.GetHumanByEmail(ctx, "ada@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.LastLoginAt != nil {
+		t.Fatalf("expected no last_login_at right after signup, got %v", *h.LastLoginAt)
+	}
+
+	firstLoginSess, err := svc.Login(ctx, "ada@example.com", "hunter22hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstLoginSess.Human.LastLoginAt == nil {
+		t.Fatal("expected last_login_at to be set after a successful login")
+	}
+	firstLoginAt := *firstLoginSess.Human.LastLoginAt
+
+	time.Sleep(10 * time.Millisecond)
+	secondLoginSess, err := svc.Login(ctx, "ada@example.com", "hunter22hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !secondLoginSess.Human.LastLoginAt.After(firstLoginAt) {
+		t.Fatalf("expected a later login to advance last_login_at: first=%v second=%v", firstLoginAt, *secondLoginSess.Human.LastLoginAt)
+	}
+
+	// A failed login must never touch last_login_at.
+	if _, err := svc.Login(ctx, "ada@example.com", "wrong-password"); err == nil {
+		t.Fatal("expected wrong password to fail")
+	}
+	h, err = db.GetHumanByEmail(ctx, "ada@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.LastLoginAt.Equal(*secondLoginSess.Human.LastLoginAt) {
+		t.Fatalf("expected a failed login attempt to leave last_login_at unchanged, got %v", *h.LastLoginAt)
+	}
+}
+
 func TestLoginSuccessAndFailureModesIndistinguishable(t *testing.T) {
 	db := newTestDB(t)
 	svc, err := NewService(db, testSecret())

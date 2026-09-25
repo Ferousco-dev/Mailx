@@ -17,6 +17,7 @@ type Human struct {
 	Role         string
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	LastLoginAt  *time.Time
 }
 
 // RefreshToken is one issued refresh token row (see migration 000025).
@@ -66,10 +67,10 @@ func (db *DB) CreateHuman(ctx context.Context, name, email, passwordHash string)
 func (db *DB) GetHumanByEmail(ctx context.Context, email string) (Human, error) {
 	var h Human
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, name, email, password_hash, role, created_at, updated_at
+		SELECT id, name, email, password_hash, role, created_at, updated_at, last_login_at
 		FROM humans WHERE normalized_email = $1`,
 		normalizeEmail(email),
-	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt)
+	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt, &h.LastLoginAt)
 	if err != nil {
 		return Human{}, normalizeErr(err)
 	}
@@ -80,13 +81,24 @@ func (db *DB) GetHumanByEmail(ctx context.Context, email string) (Human, error) 
 func (db *DB) GetHuman(ctx context.Context, id string) (Human, error) {
 	var h Human
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, name, email, password_hash, role, created_at, updated_at
+		SELECT id, name, email, password_hash, role, created_at, updated_at, last_login_at
 		FROM humans WHERE id = $1`, id,
-	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt)
+	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt, &h.LastLoginAt)
 	if err != nil {
 		return Human{}, normalizeErr(err)
 	}
 	return h, nil
+}
+
+// TouchHumanLogin records a successful login: sets last_login_at and bumps
+// updated_at. Called once per Login (not SignUp — signing up mints a
+// session directly but is not itself a "login" for this column's purpose).
+func (db *DB) TouchHumanLogin(ctx context.Context, humanID string, at time.Time) error {
+	_, err := db.pool.Exec(ctx, `UPDATE humans SET last_login_at = $2, updated_at = $2 WHERE id = $1`, humanID, at)
+	if err != nil {
+		return normalizeErr(err)
+	}
+	return nil
 }
 
 // CreateRefreshToken inserts a new refresh token row.

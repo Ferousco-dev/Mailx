@@ -156,6 +156,11 @@ func (s *Service) Login(ctx context.Context, email, password string) (Session, e
 	if err := bcrypt.CompareHashAndPassword([]byte(h.PasswordHash), []byte(password)); err != nil {
 		return Session{}, ErrInvalidCredentials
 	}
+	loginAt := s.now()
+	if err := s.db.TouchHumanLogin(ctx, h.ID, loginAt); err != nil {
+		return Session{}, fmt.Errorf("humanauth: record login: %w", err)
+	}
+	h.LastLoginAt = &loginAt // reflect the just-recorded touch, avoiding a re-fetch
 	return s.mintSession(ctx, h)
 }
 

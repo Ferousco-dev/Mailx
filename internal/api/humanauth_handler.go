@@ -22,9 +22,10 @@ type humanAuthHandler struct {
 }
 
 type humanResource struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Email string `json:"email"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Email       string  `json:"email"`
+	LastLoginAt *string `json:"last_login_at"`
 }
 
 type sessionResponse struct {
@@ -34,8 +35,13 @@ type sessionResponse struct {
 }
 
 func sessionResponseFrom(s humanauth.Session) sessionResponse {
+	var lastLogin *string
+	if s.Human.LastLoginAt != nil {
+		formatted := s.Human.LastLoginAt.Format(time.RFC3339)
+		lastLogin = &formatted
+	}
 	return sessionResponse{
-		Human:        humanResource{ID: s.Human.ID, Name: s.Human.Name, Email: s.Human.Email},
+		Human:        humanResource{ID: s.Human.ID, Name: s.Human.Name, Email: s.Human.Email, LastLoginAt: lastLogin},
 		AccessToken:  s.AccessToken,
 		RefreshToken: s.RefreshToken,
 	}
