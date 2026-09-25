@@ -68,15 +68,22 @@ func (db *DB) CreateOrgInvitation(ctx context.Context, tenantID, invitedBy, emai
 }
 
 // SupersedeOtherPendingOrgInvitations invalidates every OTHER still-pending
-// (unaccepted, unexpired) invitation for the same (tenant, email) besides
-// keepID - called only once the keepID invitation's email has been
-// confirmed sent, so re-inviting an address resends (one live link at a
-// time) without ever leaving a window where neither the old nor the new
-// link works (see CreateOrgInvitation's doc).
-func (db *DB) SupersedeOtherPendingOrgInvitations(ctx context.Context, tenantID, email, keepID string, now time.Time) error {
+// (unaccepted, unexpired) invitation for the same (tenant, email) that was
+// created STRICTLY BEFORE keepCreatedAt - called only once the keeper
+// invitation's email has been confirmed sent (see CreateOrgInvitation's
+// doc). Ordering by creation time, not simply "id != keepID", matters for
+// correctness under concurrency: two invitations sent to the same address
+// at nearly the same instant would otherwise each try to supersede the
+// OTHER after both had already been sent, and whichever update ran last
+// would win - expiring the very link that had just been delivered, so
+// BOTH emailed links end up dead even though both requests reported
+// success (Greptile P1, PR #23). Superseding only strictly-older rows
+// makes this commutative: the newest invitation always survives no matter
+// which request's UPDATE happens to run last.
+func (db *DB) SupersedeOtherPendingOrgInvitations(ctx context.Context, tenantID, email, keepID string, keepCreatedAt, now time.Time) error {
 	_, err := db.pool.Exec(ctx,
-		`UPDATE org_invitations SET expires_at = $4 WHERE tenant_id = $1 AND normalized_email = $2 AND id != $3 AND accepted_at IS NULL AND expires_at > $4`,
-		tenantID, normalizeEmail(email), keepID, now,
+		`UPDATE org_invitations SET expires_at = $5 WHERE tenant_id = $1 AND normalized_email = $2 AND id != $3 AND created_at < $4 AND accepted_at IS NULL AND expires_at > $5`,
+		tenantID, normalizeEmail(email), keepID, keepCreatedAt, now,
 	)
 	if err != nil {
 		return fmt.Errorf("database: supersede prior pending invitations: %w", normalizeErr(err))

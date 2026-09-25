@@ -497,7 +497,7 @@ func (s *Service) InviteToOrganization(ctx context.Context, inviterHumanID, tena
 	// Only now that the new link is confirmed delivered is it safe to kill
 	// any other pending invitation to the same address - see
 	// SupersedeOtherPendingOrgInvitations's doc.
-	if err := s.db.SupersedeOtherPendingOrgInvitations(ctx, tenantID, email, inv.ID, s.now()); err != nil {
+	if err := s.db.SupersedeOtherPendingOrgInvitations(ctx, tenantID, email, inv.ID, inv.CreatedAt, s.now()); err != nil {
 		return fmt.Errorf("humanauth: supersede prior invitations: %w", err)
 	}
 	return nil

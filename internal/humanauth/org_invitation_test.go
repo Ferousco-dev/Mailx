@@ -378,3 +378,56 @@ func TestFailedResendDoesNotInvalidateTheWorkingLink(t *testing.T) {
 		t.Fatalf("expected the original invitation to still be valid after a failed resend: %v", err)
 	}
 }
+
+// TestConcurrentResendsNeverInvalidateBothLinks is a regression test for
+// Greptile's P1 finding (PR #23): two invitations to the same address sent
+// at nearly the same instant must not both end up superseding each other -
+// exactly one (the newest) must remain valid, never zero.
+func TestConcurrentResendsNeverInvalidateBothLinks(t *testing.T) {
+	db := newTestDB(t)
+	mailer := &fakeMailer{}
+	svc, err := NewService(db, testSecret(), WithMailer(mailer), WithDashboardBaseURL("https://app.mailx.dev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	owner, err := svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := svc.CreateOrganization(ctx, owner.Human.ID, "Acme Inc", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 5
+	done := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			done <- svc.InviteToOrganization(ctx, owner.Human.ID, tenant.ID, "invitee@example.com")
+		}()
+	}
+	for i := 0; i < n; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("InviteToOrganization failed: %v", err)
+		}
+	}
+
+	// Exactly one of the n emailed links must still work: the concurrent
+	// supersede updates must never leave zero valid links (nor, by
+	// construction, more than one - the dedup policy itself).
+	working := 0
+	for _, c := range mailer.calls {
+		raw := extractInviteToken(t, c.text)
+		inv, err := db.GetOrgInvitationByHash(ctx, hashRawToken(raw))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inv.AcceptedAt == nil && inv.ExpiresAt.After(time.Now()) {
+			working++
+		}
+	}
+	if working != 1 {
+		t.Fatalf("expected exactly 1 working invitation link out of %d sent, got %d", len(mailer.calls), working)
+	}
+}
