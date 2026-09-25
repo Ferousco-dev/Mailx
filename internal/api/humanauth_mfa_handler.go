@@ -79,6 +79,8 @@ func (h *humanAuthHandler) handleOAuthCallback(w http.ResponseWriter, r *http.Re
 		writeError(w, r, newError(ErrAuthentication, "invalid_oauth_state", "sign-in state is missing, expired, or already used; start again"))
 	case errors.Is(err, humanauth.ErrOAuthProvider):
 		writeError(w, r, newError(ErrAuthentication, "oauth_provider_error", "the sign-in provider did not complete authentication"))
+	case errors.Is(err, humanauth.ErrOAuthAccountRequiresPasswordLogin):
+		writeError(w, r, newError(ErrConflictType, "oauth_account_requires_password_login", "an account with this email already has a password; log in with it first to link this sign-in method"))
 	default:
 		writeError(w, r, newError(ErrInternal, "oauth_callback_failed", "could not complete sign-in"))
 	}

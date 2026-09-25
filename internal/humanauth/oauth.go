@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Ferousco-dev/mailx/internal/database"
 )
 
 // OAuth 2.0 Authorization Code sign-in with Google and GitHub, hand-rolled on
@@ -33,6 +35,13 @@ var (
 	// ErrOAuthProvider covers any provider-side failure (denied consent, bad
 	// code, unreachable endpoint, no verified email).
 	ErrOAuthProvider = errors.New("humanauth: oauth provider error")
+	// ErrOAuthAccountRequiresPasswordLogin means an account with this email
+	// already has a real password and cannot be auto-linked - see
+	// database.ErrOAuthAccountRequiresPasswordLogin's doc (CWE-287 fix,
+	// CodeRabbit, PR #26): silently linking here would let an attacker who
+	// pre-registered a victim's email with a password they control capture
+	// the victim's own subsequent OAuth login onto the attacker's account.
+	ErrOAuthAccountRequiresPasswordLogin = errors.New("humanauth: an account with this email already has a password; log in with it first to link this sign-in method")
 )
 
 // OAuthProvider is one configured provider. Endpoint URLs must be https.
@@ -193,6 +202,9 @@ func (s *Service) CompleteOAuth(ctx context.Context, provider, code, state strin
 		avatar = &u.AvatarURL
 	}
 	h, _, err := s.db.ResolveOAuthHuman(ctx, provider, u.ID, u.Email, name, avatar)
+	if errors.Is(err, database.ErrOAuthAccountRequiresPasswordLogin) {
+		return Session{}, ErrOAuthAccountRequiresPasswordLogin
+	}
 	if err != nil {
 		return Session{}, fmt.Errorf("humanauth: resolve oauth human: %w", err)
 	}

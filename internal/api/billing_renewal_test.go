@@ -67,6 +67,14 @@ func (f *fakeChargeServer) server(t *testing.T) *httptest.Server {
 			}
 		case strings.HasPrefix(r.URL.Path, "/transaction/verify/"):
 			ref := strings.TrimPrefix(r.URL.Path, "/transaction/verify/")
+			if f.mode == "verify401" {
+				// A rotated/misconfigured secret key, or any transient
+				// auth/proxy failure on the VERIFY call itself - this says
+				// nothing about whether the underlying charge went through.
+				w.WriteHeader(http.StatusUnauthorized)
+				_, _ = w.Write([]byte(`{"status":false,"message":"Invalid key"}`))
+				return
+			}
 			if !f.charged[ref] {
 				w.WriteHeader(http.StatusBadRequest)
 				_, _ = w.Write([]byte(`{"status":false,"message":"Transaction reference not found"}`))
@@ -415,6 +423,38 @@ func TestAutoRenewUnknownOutcomeIsReconciledNeverRecharged(t *testing.T) {
 	f.renewer.RunOnce(ctx, E.Add(-20*time.Hour))
 	if f.fc.count() != 1 || !f.periodEnd(t).Equal(E.Add(planPeriod)) {
 		t.Fatal("reconciled payment applied twice or re-charged")
+	}
+}
+
+// TestAutoRenewVerify401NeverDoubleCharges is a regression test for
+// CodeRabbit's finding (PR #26): a charge whose outcome was ambiguous (here,
+// a 502 from charge_authorization) must stay pending - never re-charged under
+// a fresh reference - when the LATER verify call itself fails with a
+// transient error (401 from a rotated key, here) rather than an authoritative
+// "Paystack has no record of this reference" response. Misclassifying that
+// verify failure as "definitely not charged" would let a fresh attempt fire
+// and double-charge the card if the original charge actually succeeded.
+func TestAutoRenewVerify401NeverDoubleCharges(t *testing.T) {
+	f := newRenewalFixture(t, true)
+	f.fc.mode = "error500" // ambiguous: charge_authorization "took the money" but answered 502
+	f.enable(t)
+	ctx := context.Background()
+	E := f.end
+	f.renewer.RunOnce(ctx, E.Add(-71*time.Hour))
+	f.renewer.RunOnce(ctx, E.Add(-47*time.Hour)) // fires the ambiguous charge, attempt stays pending
+	if f.fc.count() != 1 {
+		t.Fatalf("expected exactly one charge attempt, got %d", f.fc.count())
+	}
+	f.fc.mode = "verify401" // verify itself now fails with an auth error
+	f.renewer.RunOnce(ctx, E.Add(-35*time.Hour))
+	if f.fc.count() != 1 {
+		t.Fatalf("a failed verify call caused a second charge attempt: %d", f.fc.count())
+	}
+	// The period must NOT have been extended (the ambiguous charge was never
+	// applied) and must NOT be lapsed either - it stays pending for a human
+	// to resolve, exactly as the amount-mismatch case does.
+	if got := f.periodEnd(t); !got.Equal(E) {
+		t.Fatalf("period end changed to %v while the charge outcome was still unresolved", got)
 	}
 }
 

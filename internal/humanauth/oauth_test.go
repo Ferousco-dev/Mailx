@@ -89,15 +89,30 @@ func TestOAuthNewAccountLinkAndState(t *testing.T) {
 		t.Fatalf("repeat login: %v", err)
 	}
 
-	// Existing password account is LINKED (case-insensitive), not duplicated.
-	pw, err := svc.SignUp(ctx, "Alan", "alan@example.com", "password123")
-	if err != nil {
+	// An existing PASSWORD account is NEVER auto-linked (CodeRabbit CWE-287,
+	// PR #26): silently linking here would let an attacker who pre-registers
+	// a victim's email with a password they control capture the victim's own
+	// later OAuth login onto the attacker's account.
+	if _, err := svc.SignUp(ctx, "Alan", "alan@example.com", "password123"); err != nil {
 		t.Fatal(err)
 	}
 	fg.sub, fg.email = "g-456", "ALAN@example.com"
-	s3, err := svc.CompleteOAuth(ctx, "google", "good-code", startState(t, svc))
-	if err != nil || s3.Human.ID != pw.Human.ID {
-		t.Fatalf("link: %v got %s want %s", err, s3.Human.ID, pw.Human.ID)
+	if _, err := svc.CompleteOAuth(ctx, "google", "good-code", startState(t, svc)); !errors.Is(err, ErrOAuthAccountRequiresPasswordLogin) {
+		t.Fatalf("expected ErrOAuthAccountRequiresPasswordLogin, got %v", err)
+	}
+	// The password account must be entirely untouched by the refused attempt.
+	if _, err := svc.Login(ctx, "alan@example.com", "password123"); err != nil {
+		t.Fatalf("password account should be unaffected by the refused link: %v", err)
+	}
+
+	// An account that has NEVER had a real password (only ever reached via
+	// OAuth, still carrying unusablePasswordHash) IS safely auto-linkable by
+	// email - a different provider_user_id for the same OAuth-only account
+	// (e.g. Google issuing a new internal id) must still link, not refuse.
+	fg.sub, fg.email = "g-789", "Grace@Example.com"
+	s4, err := svc.CompleteOAuth(ctx, "google", "good-code", startState(t, svc))
+	if err != nil || s4.Human.ID != s1.Human.ID {
+		t.Fatalf("re-link of a password-less account: %v got %s want %s", err, s4.Human.ID, s1.Human.ID)
 	}
 
 	// State: missing, unknown, reused, wrong provider.
@@ -163,7 +178,10 @@ func TestOAuthRespectsMFA(t *testing.T) {
 	fg := newFakeGoogle(t)
 	WithOAuthProvider(fg.provider())(f.svc)
 	ctx := context.Background()
-	sess, err := f.svc.SignUp(ctx, "Grace", "grace@example.com", "password123")
+	// The account must be OAuth-created (no real password - see
+	// ErrOAuthAccountRequiresPasswordLogin) for a SECOND OAuth login on the
+	// SAME identity to reach the MFA check at all.
+	sess, err := f.svc.CompleteOAuth(ctx, "google", "good-code", startState(t, f.svc))
 	if err != nil {
 		t.Fatal(err)
 	}

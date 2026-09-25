@@ -134,6 +134,20 @@ func (p *Paystack) doTx(req *http.Request, op string) (ChargeResult, error) {
 		return ChargeResult{Outcome: ChargeUnknown}, fmt.Errorf("billing: paystack %s: HTTP %d", op, resp.StatusCode)
 	case decErr != nil:
 		return ChargeResult{Outcome: ChargeUnknown}, fmt.Errorf("billing: paystack %s: decode (HTTP %d): %w", op, resp.StatusCode, decErr)
+	// verify's 4xx does NOT mean "no transaction was charged" the way
+	// charge_authorization's does: reconcilePending only ever calls verify
+	// for an attempt whose outcome is ALREADY unknown, meaning the charge
+	// may well have gone through - a 401/403 from a rotated secret key, or
+	// any other non-"unknown reference" 4xx, says nothing about whether
+	// money moved. Only the specific "Paystack has no record of this
+	// reference" response (400/404 with status:false) actually proves no
+	// charge exists. Misclassifying any other verify 4xx as ChargeFailed
+	// would unblock ClaimRenewalAttempt for a fresh attempt/reference and
+	// double-charge the card (CodeRabbit, PR #26).
+	case op == "verify" && (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusNotFound) && !env.Status:
+		return ChargeResult{Outcome: ChargeFailed, Reason: env.Message}, nil
+	case op == "verify" && (resp.StatusCode >= 400 || !env.Status):
+		return ChargeResult{Outcome: ChargeUnknown}, fmt.Errorf("billing: paystack verify: HTTP %d: %s", resp.StatusCode, env.Message)
 	case resp.StatusCode >= 400 || !env.Status:
 		// Paystack rejected the request itself (bad/revoked authorization,
 		// unknown reference, validation error): no transaction was charged.

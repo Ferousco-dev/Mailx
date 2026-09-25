@@ -216,11 +216,24 @@ func (db *DB) ConsumeOAuthState(ctx context.Context, stateHash, provider string,
 // password login is possible until the human sets one via password reset.
 const unusablePasswordHash = "!oauth-no-password"
 
+// ErrOAuthAccountRequiresPasswordLogin means an existing account with the
+// OAuth email was created with a real (non-OAuth) password. Auto-linking to
+// it would let an attacker pre-register a victim's email with a password
+// they control, then have the victim's own provider-verified OAuth login
+// silently attach to the attacker's account - a real account-takeover path
+// (CodeRabbit, CWE-287, PR #26). Only an account that has NEVER had a real
+// password (unusablePasswordHash - meaning every existing link to it, if
+// any, is itself a provider-verified OAuth identity) is safe to auto-link.
+// A password-holding account must be linked deliberately: log in with the
+// password first, then link, or reset the password.
+var ErrOAuthAccountRequiresPasswordLogin = errors.New("database: an account with this email already has a password; log in with it to link this sign-in method")
+
 // ResolveOAuthHuman finds or creates the human for a provider identity, in one
 // transaction: (1) an existing identity link wins; (2) otherwise a human with
 // the same (case-insensitive, same normalization as CreateHuman) email is
-// LINKED, not duplicated; (3) otherwise a new human is created with an
-// unusable password. Callers must only pass a provider-verified email.
+// LINKED, not duplicated - but ONLY if that account has no real password (see
+// ErrOAuthAccountRequiresPasswordLogin); (3) otherwise a new human is created
+// with an unusable password. Callers must only pass a provider-verified email.
 func (db *DB) ResolveOAuthHuman(ctx context.Context, provider, providerUserID, email, name string, avatarURL *string) (Human, bool, error) {
 	tx, err := db.pool.Begin(ctx)
 	if err != nil {
@@ -234,7 +247,11 @@ func (db *DB) ResolveOAuthHuman(ctx context.Context, provider, providerUserID, e
 	switch {
 	case err == nil:
 	case errors.Is(err, pgx.ErrNoRows):
-		err = tx.QueryRow(ctx, `SELECT id FROM humans WHERE normalized_email = $1`, normalizeEmail(email)).Scan(&humanID)
+		var existingPasswordHash string
+		err = tx.QueryRow(ctx, `SELECT id, password_hash FROM humans WHERE normalized_email = $1`, normalizeEmail(email)).Scan(&humanID, &existingPasswordHash)
+		if err == nil && existingPasswordHash != unusablePasswordHash {
+			return Human{}, false, ErrOAuthAccountRequiresPasswordLogin
+		}
 		if errors.Is(err, pgx.ErrNoRows) {
 			id, idErr := newID()
 			if idErr != nil {
