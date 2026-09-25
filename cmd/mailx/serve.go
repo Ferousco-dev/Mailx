@@ -125,6 +125,11 @@ func runFull() error {
 	} else {
 		o.log.Warn("system_mailer_disabled", "hint", "MAILX_SYSTEM_TENANT_ID/MAILX_SYSTEM_FROM_ADDRESS not set: password reset tokens will be created but no email will be sent")
 	}
+	oauthMFAOpts, err := buildOAuthMFAOptions(o.log.Info)
+	if err != nil {
+		return err
+	}
+	humanAuthOpts = append(humanAuthOpts, oauthMFAOpts...)
 	humanAuthSvc, err := humanauth.NewService(db, jwtSecret(), humanAuthOpts...)
 	if err != nil {
 		return err

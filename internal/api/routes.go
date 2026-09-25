@@ -186,6 +186,7 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		mux.Handle("POST /v1/auth/forgot-password", chain(http.HandlerFunc(ha.handleForgotPassword), passwordResetIPLimitMiddleware(abuse)))
 		mux.Handle("POST /v1/auth/reset-password", chain(http.HandlerFunc(ha.handleResetPassword), passwordResetIPLimitMiddleware(abuse)))
 		orgsAuthenticated := humanAuthMiddleware(extras[0].humanAuth)
+		registerMFAAndOAuthRoutes(mux, ha, orgsAuthenticated, abuse)
 		mux.Handle("POST /v1/orgs", orgsAuthenticated(http.HandlerFunc(ha.handleCreateOrg)))
 		mux.Handle("GET /v1/orgs", orgsAuthenticated(http.HandlerFunc(ha.handleListOrgs)))
 		// Owner-only, JWT-authenticated, then its own tighter per-human

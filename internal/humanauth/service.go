@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/secretbox"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -110,6 +111,8 @@ type Service struct {
 	now              func() time.Time
 	mailer           Mailer
 	dashboardBaseURL string
+	mfaBox           *secretbox.Box
+	oauth            map[string]*OAuthProvider
 }
 
 // NewService constructs a Service. jwtSecret must be non-empty — callers
@@ -126,6 +129,11 @@ func NewService(db *database.DB, jwtSecret []byte, opts ...Option) (*Service, er
 	s := &Service{db: db, jwtSecret: jwtSecret, now: func() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }}
 	for _, opt := range opts {
 		opt(s)
+	}
+	for _, p := range s.oauth {
+		if err := p.validate(); err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -227,6 +235,17 @@ func (s *Service) Login(ctx context.Context, email, password string) (Session, e
 	if err := bcrypt.CompareHashAndPassword([]byte(h.PasswordHash), []byte(password)); err != nil {
 		return Session{}, ErrInvalidCredentials
 	}
+	if h.MFAEnabled {
+		// Correct first factor on an MFA account: no session, only a
+		// challenge usable solely by VerifyMFA (DEC-230).
+		return Session{}, s.newMFAChallenge(ctx, h)
+	}
+	return s.completeLogin(ctx, h)
+}
+
+// completeLogin mints the session for a fully authenticated human (password
+// login, MFA verify, OAuth callback).
+func (s *Service) completeLogin(ctx context.Context, h database.Human) (Session, error) {
 	// Deliberately NOT mintSession here: recording the login and issuing
 	// its refresh token must succeed or fail TOGETHER (see
 	// TouchLoginAndCreateRefreshToken's doc) - a plain mintSession call
