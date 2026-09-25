@@ -260,6 +260,98 @@ func (h *humanAuthHandler) handleListOrgs(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"data": out})
 }
 
+type inviteRequest struct {
+	Email string `json:"email"`
+}
+
+// handleCreateInvite sends an org invitation. Owner-only: the org ID comes
+// from the path, the inviter's identity from the JWT (never trust a
+// client-supplied "am I the owner" claim). humanauth.Service.InviteToOrganization
+// itself re-checks tenant_members before doing anything, so this handler's
+// job is only request parsing and error-shape translation.
+func (h *humanAuthHandler) handleCreateInvite(w http.ResponseWriter, r *http.Request) {
+	humanID, ok := humanIDFromContext(r.Context())
+	if !ok {
+		writeError(w, r, newError(ErrAuthentication, "invalid_access_token", "missing or invalid access token"))
+		return
+	}
+	tenantID := r.PathValue("id")
+	if !acceptsJSONContentType(r.Header.Get("Content-Type")) {
+		writeError(w, r, newError(ErrUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json"))
+		return
+	}
+	var req inviteRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil || req.Email == "" {
+		writeError(w, r, newError(ErrInvalidRequest, "invalid_json", "email is required"))
+		return
+	}
+	if err := h.svc.InviteToOrganization(r.Context(), humanID, tenantID, req.Email); err != nil {
+		if errors.Is(err, humanauth.ErrNotOrgOwner) {
+			writeError(w, r, newError(ErrForbidden, "not_org_owner", "only an organization owner can send invitations"))
+			return
+		}
+		slog.Default().Error("org_invite_failed", "error", err.Error())
+		writeError(w, r, newError(ErrValidation, "invalid_invitation", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "invitation sent"})
+}
+
+type acceptInviteRequest struct {
+	Token    string `json:"token"`
+	Name     string `json:"name"`     // only used when the caller has no existing session
+	Password string `json:"password"` // only used when the caller has no existing session
+}
+
+// handleAcceptInvite is the single combined accept endpoint (operator
+// decision): a caller with a valid human access token accepts under their
+// existing account (email must match the invite); a caller with no
+// Authorization header must supply name+password and is signed up and
+// joined atomically in one call, keyed by the invite token. This route is
+// intentionally NOT behind humanAuthMiddleware — that middleware would
+// reject every unauthenticated (no-account-yet) request before this
+// handler ever saw it — so the bearer token here is read directly and
+// treated as optional.
+func (h *humanAuthHandler) handleAcceptInvite(w http.ResponseWriter, r *http.Request) {
+	if !acceptsJSONContentType(r.Header.Get("Content-Type")) {
+		writeError(w, r, newError(ErrUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json"))
+		return
+	}
+	var req acceptInviteRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil || req.Token == "" {
+		writeError(w, r, newError(ErrInvalidRequest, "invalid_json", "token is required"))
+		return
+	}
+	var existingHumanID string
+	if token, ok := extractBearerHumanToken(r); ok {
+		claims, err := h.svc.VerifyAccessToken(token)
+		if err != nil {
+			writeError(w, r, newError(ErrAuthentication, "invalid_access_token", "access token is invalid or expired"))
+			return
+		}
+		existingHumanID = claims.HumanID
+	}
+	result, err := h.svc.AcceptOrgInvitation(r.Context(), req.Token, existingHumanID, req.Name, req.Password)
+	if err != nil {
+		switch {
+		case errors.Is(err, humanauth.ErrOrgInvitationInvalid):
+			writeError(w, r, newError(ErrValidation, "invalid_invitation_token", "this invitation is invalid or has expired"))
+		case errors.Is(err, humanauth.ErrOrgInvitationEmailMismatch):
+			writeError(w, r, newError(ErrForbidden, "invitation_email_mismatch", "this invitation was sent to a different email address"))
+		case errors.Is(err, humanauth.ErrEmailTaken):
+			writeError(w, r, newError(ErrConflictType, "email_taken", "an account with this email already exists; log in and try again"))
+		default:
+			writeError(w, r, newError(ErrValidation, "invalid_invitation", err.Error()))
+		}
+		return
+	}
+	resp := map[string]any{"organization": orgResourceFrom(result.Tenant)}
+	if result.Session != nil {
+		resp["session"] = sessionResponseFrom(*result.Session)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // extractBearerHumanToken parses "Bearer <token>" the same way
 // extractBearerToken does for API keys, kept separate so the two
 // credential formats never share validation code paths.

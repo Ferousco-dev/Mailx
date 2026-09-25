@@ -203,6 +203,47 @@ func passwordResetIPLimitMiddleware(a *AbuseControls) func(http.Handler) http.Ha
 	}
 }
 
+// orgInviteLimitMiddleware protects POST /v1/orgs/{id}/invites with its own
+// tighter bucket, keyed by the inviting human's ID rather than IP — unlike
+// the auth-surface middlewares above, this route is already authenticated
+// (behind humanAuthMiddleware, which must run first) so a stable, unspoofable
+// identity is available. See Policy.OrgInviteRate's doc for why a shared
+// bucket with ordinary API traffic would be too permissive here (this
+// triggers a real outbound email per call).
+func orgInviteLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if a == nil || a.Limiter == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			humanID, _ := humanIDFromContext(r.Context())
+			p := a.Policy
+			dec, err := a.Limiter.Allow(r.Context(),
+				ratelimit.Bucket{Key: "org:invite:human:" + humanID, Rate: p.OrgInviteRate, Burst: p.OrgInviteBurst, Cost: 1},
+			)
+			switch {
+			case err != nil:
+				a.Metrics.AbuseDecision("org_invite", "unavailable")
+				a.log().Error("rate_limiter_unavailable", "route_class", "org_invite")
+				e := newError(ErrTemporarilyUnavailable, "rate_limiter_unavailable", "request limiting is temporarily unavailable; retry later")
+				e.RetryAfter = unavailableRetryAfter
+				writeError(w, r, e)
+			case dec.Impossible:
+				a.Metrics.AbuseDecision("org_invite", "impossible")
+				writeError(w, r, newError(ErrInternal, "internal_error", "request limit is misconfigured"))
+			case !dec.Allowed:
+				a.Metrics.AbuseDecision("org_invite", "limited")
+				e := newError(ErrRateLimited, "org_invite_rate_limited", "too many invitations sent; retry after the interval in Retry-After")
+				e.RetryAfter = ratelimit.RetryAfterSeconds(dec.RetryAfter)
+				writeError(w, r, e)
+			default:
+				a.Metrics.AbuseDecision("org_invite", "allowed")
+				next.ServeHTTP(w, r)
+			}
+		})
+	}
+}
+
 // authClientIP returns the IP to key the auth rate limiter on: the
 // connection peer (RemoteAddr), UNLESS that peer is a configured trusted
 // proxy, in which case the rightmost entry of X-Forwarded-For is used

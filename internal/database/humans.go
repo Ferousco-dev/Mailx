@@ -19,6 +19,9 @@ type Human struct {
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 	LastLoginAt  *time.Time
+	// AvatarURL is nil until the human sets one; a plain URL, no upload
+	// pipeline (see migration 000030's doc). Used by org-invite emails.
+	AvatarURL *string
 }
 
 // RefreshToken is one issued refresh token row (see migration 000025).
@@ -68,10 +71,10 @@ func (db *DB) CreateHuman(ctx context.Context, name, email, passwordHash string)
 func (db *DB) GetHumanByEmail(ctx context.Context, email string) (Human, error) {
 	var h Human
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, name, email, password_hash, role, created_at, updated_at, last_login_at
+		SELECT id, name, email, password_hash, role, created_at, updated_at, last_login_at, avatar_url
 		FROM humans WHERE normalized_email = $1`,
 		normalizeEmail(email),
-	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt, &h.LastLoginAt)
+	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt, &h.LastLoginAt, &h.AvatarURL)
 	if err != nil {
 		return Human{}, normalizeErr(err)
 	}
@@ -82,9 +85,9 @@ func (db *DB) GetHumanByEmail(ctx context.Context, email string) (Human, error) 
 func (db *DB) GetHuman(ctx context.Context, id string) (Human, error) {
 	var h Human
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, name, email, password_hash, role, created_at, updated_at, last_login_at
+		SELECT id, name, email, password_hash, role, created_at, updated_at, last_login_at, avatar_url
 		FROM humans WHERE id = $1`, id,
-	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt, &h.LastLoginAt)
+	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt, &h.LastLoginAt, &h.AvatarURL)
 	if err != nil {
 		return Human{}, normalizeErr(err)
 	}

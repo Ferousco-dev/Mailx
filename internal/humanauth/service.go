@@ -31,6 +31,21 @@ var ErrRefreshTokenInvalid = errors.New("humanauth: refresh token invalid or exp
 // anti-enumeration posture as ErrInvalidCredentials.
 var ErrPasswordResetTokenInvalid = errors.New("humanauth: password reset token invalid or expired")
 
+// ErrOrgInvitationInvalid covers every way an org invitation token can fail
+// to accept - unknown, expired, already accepted, or lost a concurrent
+// consume-race - deliberately never distinguished to the caller, same
+// posture as ErrPasswordResetTokenInvalid.
+var ErrOrgInvitationInvalid = errors.New("humanauth: org invitation invalid or expired")
+
+// ErrOrgInvitationEmailMismatch is returned when an already-logged-in
+// human tries to accept an invitation addressed to a different email.
+var ErrOrgInvitationEmailMismatch = errors.New("humanauth: this invitation was sent to a different email address")
+
+// ErrNotOrgOwner is returned when a non-owner tries to send an org
+// invitation — sending is owner-only (operator decision; see DEC-205's
+// deferral of a full role matrix).
+var ErrNotOrgOwner = errors.New("humanauth: only an organization owner can send invitations")
+
 const (
 	// AccessTokenTTL is short-lived per the JWT model agreed with the
 	// operator: ~15 minutes.
@@ -40,6 +55,12 @@ const (
 	// PasswordResetTokenTTL is deliberately short - the operator's own
 	// stated requirement: unused within 5 minutes, it must not work.
 	PasswordResetTokenTTL = 5 * time.Minute
+	// OrgInvitationTTL is the operator's own stated requirement: unused
+	// within 5 hours, an invitation must not work (much longer than a
+	// password reset link since it's a lower-risk action shared over
+	// whatever channel the inviter chooses, not a same-session self-serve
+	// flow).
+	OrgInvitationTTL = 5 * time.Hour
 )
 
 // Mailer sends a system-originated email to a human account holder
@@ -412,4 +433,165 @@ func (s *Service) CreateOrganization(ctx context.Context, humanID, name, slug st
 // ListOrganizationsForHuman returns only the tenants the human belongs to.
 func (s *Service) ListOrganizationsForHuman(ctx context.Context, humanID string) ([]database.Tenant, error) {
 	return s.db.ListOrganizationsForHuman(ctx, humanID)
+}
+
+// InviteToOrganization issues a 5-hour org invitation and emails it.
+// Sending is owner-only (returns ErrNotOrgOwner otherwise) — inviting
+// someone needs only their email, no separate invite-code flow; the email
+// itself carries the accept link. Mirrors ForgotPassword's shape but,
+// unlike it, is NOT anti-enumeration: the caller is already an
+// authenticated org owner deliberately inviting a specific address, so
+// there is nothing to hide from them.
+func (s *Service) InviteToOrganization(ctx context.Context, inviterHumanID, tenantID, email string) error {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return fmt.Errorf("humanauth: invitee email is required")
+	}
+	isOwner, err := s.db.IsTenantOwner(ctx, tenantID, inviterHumanID)
+	if err != nil {
+		return fmt.Errorf("humanauth: check org owner: %w", err)
+	}
+	if !isOwner {
+		return ErrNotOrgOwner
+	}
+	tenant, err := s.db.GetTenant(ctx, tenantID)
+	if err != nil {
+		return fmt.Errorf("humanauth: get tenant: %w", err)
+	}
+	inviter, err := s.db.GetHuman(ctx, inviterHumanID)
+	if err != nil {
+		return fmt.Errorf("humanauth: get inviter: %w", err)
+	}
+	raw, err := generateRawToken()
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.CreateOrgInvitation(ctx, tenantID, inviterHumanID, email, hashRawToken(raw), s.now().Add(OrgInvitationTTL)); err != nil {
+		return fmt.Errorf("humanauth: create org invitation: %w", err)
+	}
+	if s.mailer == nil {
+		return fmt.Errorf("humanauth: org invitation created but no mailer is configured")
+	}
+	link := s.dashboardBaseURL + "/accept-invite?token=" + raw
+	subject := fmt.Sprintf("%s invites you to join the organization", tenant.Name)
+	text := fmt.Sprintf("%s (%s) has invited you to join %s on MailX.\n\n"+
+		"Accept the invitation within 5 hours:\n%s\n\n"+
+		"If you weren't expecting this, you can safely ignore this email.",
+		inviter.Name, inviter.Email, tenant.Name, link)
+	html := orgInvitationHTML(tenant, inviter, link)
+	if err := s.mailer.SendSystemEmail(ctx, email, subject, text, html); err != nil {
+		return fmt.Errorf("humanauth: send org invitation email: %w", err)
+	}
+	return nil
+}
+
+// orgInvitationHTML renders the invite email body: org logo + inviter
+// avatar when set (plain <img> tags against the URL-only fields — see
+// migration 000030's doc; no image processing/hosting here), org name,
+// and the accept link. Either image is omitted entirely when its URL is
+// unset, rather than showing a broken-image placeholder.
+func orgInvitationHTML(tenant database.Tenant, inviter database.Human, link string) string {
+	var b strings.Builder
+	b.WriteString("<div>")
+	if tenant.LogoURL != nil && *tenant.LogoURL != "" {
+		fmt.Fprintf(&b, `<img src="%s" alt="%s logo" height="48" style="display:block;margin-bottom:8px">`, *tenant.LogoURL, tenant.Name)
+	}
+	if inviter.AvatarURL != nil && *inviter.AvatarURL != "" {
+		fmt.Fprintf(&b, `<img src="%s" alt="%s" width="32" height="32" style="border-radius:50%%;display:block;margin-bottom:8px">`, *inviter.AvatarURL, inviter.Name)
+	}
+	fmt.Fprintf(&b, "<p><strong>%s</strong> invites you to join the organization.</p>", tenant.Name)
+	fmt.Fprintf(&b, `<p><a href="%s">Accept the invitation</a> within 5 hours.</p>`, link)
+	b.WriteString("<p>If you weren't expecting this, you can safely ignore this email.</p>")
+	b.WriteString("</div>")
+	return b.String()
+}
+
+// AcceptOrgInvitationResult is what AcceptOrgInvitation hands back: the
+// tenant joined, and a fresh session only when a new account was created
+// (an already-logged-in caller keeps using their existing session — see
+// AcceptOrgInvitation's doc).
+type AcceptOrgInvitationResult struct {
+	Tenant  database.Tenant
+	Session *Session // non-nil only when a new account was created by this call
+}
+
+// AcceptOrgInvitation accepts a pending invitation identified by rawToken.
+// Handles both cases the invitee can be in (operator decision: one
+// combined endpoint, not separate signup-then-join calls):
+//
+//   - existingHumanID != "": the caller already has a session. The
+//     invitation's email must match that account's own email
+//     (case-insensitive) — otherwise ErrOrgInvitationEmailMismatch, since
+//     accepting someone else's invitation under your own account would
+//     silently misattribute membership.
+//   - existingHumanID == "": the caller has no account yet. signupName and
+//     signupPassword create one, atomically joined to the org in the same
+//     transaction (database.AcceptOrgInvitationWithSignup) — the account's
+//     email is ALWAYS the invitation's own address, never client-supplied,
+//     so an invite token for one address can never mint an account under
+//     another.
+func (s *Service) AcceptOrgInvitation(ctx context.Context, rawToken, existingHumanID, signupName, signupPassword string) (AcceptOrgInvitationResult, error) {
+	inv, err := s.db.GetOrgInvitationByHash(ctx, hashRawToken(rawToken))
+	if err != nil {
+		if errors.Is(err, database.ErrNotFound) {
+			return AcceptOrgInvitationResult{}, ErrOrgInvitationInvalid
+		}
+		return AcceptOrgInvitationResult{}, fmt.Errorf("humanauth: get org invitation: %w", err)
+	}
+	now := s.now()
+	if inv.AcceptedAt != nil || !inv.ExpiresAt.After(now) {
+		return AcceptOrgInvitationResult{}, ErrOrgInvitationInvalid
+	}
+	tenant, err := s.db.GetTenant(ctx, inv.TenantID)
+	if err != nil {
+		return AcceptOrgInvitationResult{}, fmt.Errorf("humanauth: get tenant: %w", err)
+	}
+
+	if existingHumanID != "" {
+		h, err := s.db.GetHuman(ctx, existingHumanID)
+		if err != nil {
+			return AcceptOrgInvitationResult{}, fmt.Errorf("humanauth: get human: %w", err)
+		}
+		if normalizeEmailForCompare(h.Email) != inv.NormalizedEmail {
+			return AcceptOrgInvitationResult{}, ErrOrgInvitationEmailMismatch
+		}
+		if err := s.db.AcceptOrgInvitationForExistingHuman(ctx, inv.ID, inv.TenantID, existingHumanID, now); err != nil {
+			if errors.Is(err, database.ErrOrgInvitationConsumed) {
+				return AcceptOrgInvitationResult{}, ErrOrgInvitationInvalid
+			}
+			return AcceptOrgInvitationResult{}, fmt.Errorf("humanauth: accept org invitation: %w", err)
+		}
+		return AcceptOrgInvitationResult{Tenant: tenant}, nil
+	}
+
+	name := strings.TrimSpace(signupName)
+	if name == "" || len(signupPassword) < 8 {
+		return AcceptOrgInvitationResult{}, fmt.Errorf("humanauth: name and a password of at least 8 characters are required to accept this invitation")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(signupPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return AcceptOrgInvitationResult{}, fmt.Errorf("humanauth: hash password: %w", err)
+	}
+	h, err := s.db.AcceptOrgInvitationWithSignup(ctx, inv.ID, inv.TenantID, name, inv.RawEmail, string(hash), now)
+	if err != nil {
+		if errors.Is(err, database.ErrOrgInvitationConsumed) {
+			return AcceptOrgInvitationResult{}, ErrOrgInvitationInvalid
+		}
+		if errors.Is(err, database.ErrConflict) {
+			return AcceptOrgInvitationResult{}, ErrEmailTaken
+		}
+		return AcceptOrgInvitationResult{}, fmt.Errorf("humanauth: accept org invitation with signup: %w", err)
+	}
+	session, err := s.mintSession(ctx, h)
+	if err != nil {
+		return AcceptOrgInvitationResult{}, err
+	}
+	return AcceptOrgInvitationResult{Tenant: tenant, Session: &session}, nil
+}
+
+// normalizeEmailForCompare mirrors database's unexported normalizeEmail
+// (lowercase + trim) — duplicated here rather than exported across the
+// package boundary for one comparison.
+func normalizeEmailForCompare(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
 }
