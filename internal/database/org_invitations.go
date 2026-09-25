@@ -49,20 +49,65 @@ func (db *DB) IsTenantOwner(ctx context.Context, tenantID, humanID string) (bool
 // earlier version invalidated the old link and committed the new one
 // before attempting delivery, so a failed send left the invitee with
 // NEITHER a working old link nor a delivered new one).
+//
+// The insert is wrapped in a transaction holding
+// pg_advisory_xact_lock(hashtextextended(tenant_id||':'||email)) for its
+// duration. This is NOT about mutual exclusion for its own sake - it's
+// what makes SupersedeOtherPendingOrgInvitations' (created_at, id) tuple
+// comparison actually correct under concurrency. That comparison assumes
+// "smaller tuple" implies "already committed, therefore visible to a
+// later query" - true only if inserts for the same address are
+// serialized. Without this lock they are not: PostgreSQL's now() is
+// captured at a transaction's START, not its commit, so two concurrent
+// autocommit INSERTs can commit in a DIFFERENT order than their
+// created_at values suggest (e.g. under connection-pool queueing). A CI
+// run with 5 concurrent invites to one address caught this directly: a
+// row with a small created_at committed late enough that a
+// larger-created_at row's supersede call ran and completed BEFORE that
+// small row was visible to it - so nothing ever superseded it, and 2
+// links ended up alive instead of 1. Serializing inserts for the same
+// address via this lock restores the invariant SupersedeOtherPendingOrgInvitations
+// depends on: for one address, created_at ordering now matches true
+// commit ordering, because only one insert for that address can be
+// in flight at a time. The lock is released at commit (xact-scoped), well
+// before the slower SendSystemEmail network call that follows - it is
+// never held across that.
 func (db *DB) CreateOrgInvitation(ctx context.Context, tenantID, invitedBy, email, tokenHash string, expiresAt time.Time) (OrgInvitation, error) {
 	id, err := newID()
 	if err != nil {
 		return OrgInvitation{}, err
 	}
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return OrgInvitation{}, fmt.Errorf("database: begin create org invitation: %w", normalizeErr(err))
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	normalized := normalizeEmail(email)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, tenantID+":"+normalized); err != nil {
+		return OrgInvitation{}, fmt.Errorf("database: lock invitation address: %w", normalizeErr(err))
+	}
+
+	// created_at is set explicitly to clock_timestamp(), NOT left to the
+	// column's now() default: now()/transaction_timestamp() is fixed at
+	// this transaction's BEGIN, which happened before the advisory lock
+	// wait above - a transaction that waited on the lock would otherwise
+	// still get an EARLIER created_at than one that acquired the lock and
+	// committed first, undoing exactly the ordering guarantee the lock
+	// exists to provide. clock_timestamp() reflects the actual moment this
+	// statement runs, i.e. after the lock is held.
 	var inv OrgInvitation
-	err = db.pool.QueryRow(ctx, `
-		INSERT INTO org_invitations (id, tenant_id, invited_by, normalized_email, raw_email, token_hash, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+	err = tx.QueryRow(ctx, `
+		INSERT INTO org_invitations (id, tenant_id, invited_by, normalized_email, raw_email, token_hash, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp())
 		RETURNING id, tenant_id, invited_by, normalized_email, raw_email, token_hash, expires_at, accepted_at, created_at`,
-		id, tenantID, invitedBy, normalizeEmail(email), email, tokenHash, expiresAt,
+		id, tenantID, invitedBy, normalized, email, tokenHash, expiresAt,
 	).Scan(&inv.ID, &inv.TenantID, &inv.InvitedBy, &inv.NormalizedEmail, &inv.RawEmail, &inv.TokenHash, &inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt)
 	if err != nil {
 		return OrgInvitation{}, normalizeErr(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return OrgInvitation{}, fmt.Errorf("database: commit create org invitation: %w", normalizeErr(err))
 	}
 	return inv, nil
 }
@@ -147,6 +192,9 @@ func (db *DB) AcceptOrgInvitationForExistingHuman(ctx context.Context, invitatio
 	if tag.RowsAffected() == 0 {
 		return ErrOrgInvitationConsumed
 	}
+	if err := db.lockMemberCap(ctx, tx, tenantID, humanID); err != nil {
+		return err // rollback leaves the invitation unconsumed
+	}
 
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO tenant_members (tenant_id, human_id, role) VALUES ($1, $2, 'member') ON CONFLICT DO NOTHING`,
@@ -183,6 +231,10 @@ func (db *DB) AcceptOrgInvitationWithSignup(ctx context.Context, invitationID, t
 	}
 	if tag.RowsAffected() == 0 {
 		return Human{}, ErrOrgInvitationConsumed
+	}
+	// Empty humanID: the new account cannot already be a member.
+	if err := db.lockMemberCap(ctx, tx, tenantID, ""); err != nil {
+		return Human{}, err
 	}
 
 	humanID, err := newID()

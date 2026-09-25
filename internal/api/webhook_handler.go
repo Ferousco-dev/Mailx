@@ -72,6 +72,14 @@ func (h *webhookHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, r, newError(ErrInvalidRequest, "malformed_json", "request body is not valid JSON"))
 		return
 	}
+	if err := h.db.CheckFeature(r.Context(), tenantFromContext(r.Context()), "webhooks"); err != nil {
+		if aerr := planLimitAPIError(err, false); aerr != nil {
+			writeError(w, r, aerr)
+			return
+		}
+		writeError(w, r, newError(ErrInternal, "internal_error", "failed to check plan limits"))
+		return
+	}
 	created, err := h.service.Create(r.Context(), tenantFromContext(r.Context()), req.URL, req.Events)
 	if err != nil {
 		if errors.Is(err, webhook.ErrDNSUnavailable) {

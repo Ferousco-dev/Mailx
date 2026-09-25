@@ -20,10 +20,24 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/Ferousco-dev/mailx/internal/billing"
 )
 
-// DefaultRetentionDays applies to any tenant whose retention_days is NULL.
+// DefaultRetentionDays applies to any tenant whose retention_days is NULL
+// while plan enforcement is OFF (self-hosted). With enforcement on, a NULL
+// retention_days falls back to the tenant's plan RetentionDays instead
+// (DEC-224); an explicit retention_days always wins.
 const DefaultRetentionDays = 90
+
+// DefaultRetentionDaysFor is the effective default window for a tenant on
+// planID, honoring whether plan enforcement is enabled.
+func (db *DB) DefaultRetentionDaysFor(planID string) int {
+	if db.PlanEnforcementEnabled() {
+		return billing.PlanFor(planID).RetentionDays
+	}
+	return DefaultRetentionDays
+}
 
 // purgeBatchLimit bounds how many expired messages one PurgeExpiredMessages
 // call deletes: an unbounded backlog would otherwise collect an
@@ -147,12 +161,14 @@ func (db *DB) collectPurgeableIDs(ctx context.Context, deleteDisk func(id string
 			SELECT m.id, m.created_at
 			FROM messages m
 			JOIN tenants t ON t.id = m.tenant_id
-			WHERE m.created_at < now() - make_interval(days => COALESCE(t.retention_days, $1))
+			WHERE m.created_at < now() - make_interval(days => COALESCE(t.retention_days,
+			      CASE WHEN $5 THEN CASE t.plan WHEN 'free' THEN $6::int WHEN 'plus' THEN $7::int ELSE $8::int END ELSE $1 END))
 			  AND m.status NOT IN ('queued', 'processing', 'retrying')
 			  AND (m.created_at, m.id) > ($2, $3)
 			ORDER BY m.created_at, m.id
 			LIMIT $4`,
-			DefaultRetentionDays, afterCreatedAt, afterID, pageSize,
+			DefaultRetentionDays, afterCreatedAt, afterID, pageSize, db.PlanEnforcementEnabled(),
+			billing.PlanFor(billing.PlanFree).RetentionDays, billing.PlanFor(billing.PlanPlus).RetentionDays, billing.PlanFor(billing.PlanPro).RetentionDays,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("database: select expired messages: %w", normalizeErr(err))

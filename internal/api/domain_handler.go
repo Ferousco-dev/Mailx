@@ -14,7 +14,10 @@ import (
 	maildomain "github.com/Ferousco-dev/mailx/internal/domain"
 )
 
-type domainHandler struct{ service *maildomain.Service }
+type domainHandler struct {
+	service *maildomain.Service
+	db      *database.DB // for the plan domain cap; nil skips it
+}
 
 func newDomainHandler(service *maildomain.Service) *domainHandler {
 	return &domainHandler{service: service}
@@ -64,6 +67,16 @@ func (h *domainHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if err := dec.Decode(&req); err != nil {
 		writeError(w, r, newError(ErrInvalidRequest, "malformed_json", "request body is not valid JSON"))
 		return
+	}
+	if h.db != nil {
+		if err := h.db.CheckDomainLimit(r.Context(), tenantFromContext(r.Context())); err != nil {
+			if aerr := planLimitAPIError(err, false); aerr != nil {
+				writeError(w, r, aerr)
+				return
+			}
+			writeError(w, r, newError(ErrInternal, "internal_error", "failed to check plan limits"))
+			return
+		}
 	}
 	created, err := h.service.Create(r.Context(), tenantFromContext(r.Context()), req.Name)
 	switch {

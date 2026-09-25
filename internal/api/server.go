@@ -72,6 +72,9 @@ type Config struct {
 	// accounts/organizations). Nil disables those routes entirely; existing
 	// API-key-authenticated /v1 routes are unaffected either way.
 	HumanAuth *humanauth.Service
+	// Billing enables /v1/billing/* (v0.47 phase 2). Nil (self-hosted, no
+	// MAILX_PAYSTACK_SECRET_KEY) leaves those routes unregistered.
+	Billing *BillingConfig
 	// Logger and Metrics are optional; nil disables the corresponding
 	// observation without changing request handling.
 	Logger  *slog.Logger
@@ -148,7 +151,7 @@ func NewServer(cfg Config) (*Server, error) {
 	if len(cfg.TrackingSecret) > 0 {
 		trackH = &trackHandler{db: cfg.DB, secret: cfg.TrackingSecret}
 	}
-	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, bimi: cfg.BIMI, metrics: cfg.Metrics, feedback: fbHandler, track: trackH, humanAuth: cfg.HumanAuth})
+	mux := newMux(h, cfg.Auth, readiness, routeServices{abuse: cfg.Abuse, domains: domainService, webhooks: cfg.Webhooks, dkim: cfg.DKIM, spf: cfg.SPF, dmarc: cfg.DMARC, bimi: cfg.BIMI, metrics: cfg.Metrics, feedback: fbHandler, track: trackH, humanAuth: cfg.HumanAuth, billing: cfg.Billing, log: cfg.Logger})
 	log := cfg.Logger
 	if log == nil {
 		log = observability.Discard()

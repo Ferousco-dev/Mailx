@@ -299,6 +299,10 @@ func (h *humanAuthHandler) handleCreateInvite(w http.ResponseWriter, r *http.Req
 			writeError(w, r, newError(ErrForbidden, "not_org_owner", "only an organization owner can send invitations"))
 			return
 		}
+		if aerr := planLimitAPIError(err, false); aerr != nil {
+			writeError(w, r, aerr)
+			return
+		}
 		slog.Default().Error("org_invite_failed", "error", err.Error())
 		writeError(w, r, newError(ErrValidation, "invalid_invitation", err.Error()))
 		return
@@ -343,6 +347,8 @@ func (h *humanAuthHandler) handleAcceptInvite(w http.ResponseWriter, r *http.Req
 	result, err := h.svc.AcceptOrgInvitation(r.Context(), req.Token, existingHumanID, req.Name, req.Password)
 	if err != nil {
 		switch {
+		case errors.Is(err, database.ErrPlanLimit):
+			writeError(w, r, planLimitAPIError(err, false))
 		case errors.Is(err, humanauth.ErrOrgInvitationInvalid):
 			writeError(w, r, newError(ErrValidation, "invalid_invitation_token", "this invitation is invalid or has expired"))
 		case errors.Is(err, humanauth.ErrOrgInvitationEmailMismatch):

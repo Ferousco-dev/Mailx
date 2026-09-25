@@ -23,6 +23,37 @@ func extractInviteToken(t *testing.T, text string) string {
 	return raw
 }
 
+func TestMemberCapEnforcedAtInviteAndAccept(t *testing.T) {
+	db := newTestDB(t)
+	mailer := &fakeMailer{}
+	svc, err := NewService(db, testSecret(), WithMailer(mailer), WithDashboardBaseURL("https://app.mailx.dev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	owner, err := svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := svc.CreateOrganization(ctx, owner.Human.ID, "Acme Inc", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Enforcement off (self-hosted): a free org can still invite.
+	if err := svc.InviteToOrganization(ctx, owner.Human.ID, tenant.ID, "one@example.com"); err != nil {
+		t.Fatalf("self-hosted invite refused: %v", err)
+	}
+	db.EnablePlanEnforcement()
+	if err := svc.InviteToOrganization(ctx, owner.Human.ID, tenant.ID, "two@example.com"); !errors.Is(err, database.ErrPlanLimit) {
+		t.Fatalf("free org invite under enforcement: want ErrPlanLimit, got %v", err)
+	}
+	// An invite sent before enforcement cannot be accepted past the cap either.
+	raw := extractInviteToken(t, mailer.calls[0].text)
+	if _, err := svc.AcceptOrgInvitation(ctx, raw, "", "One", "hunter22hunter"); !errors.Is(err, database.ErrPlanLimit) {
+		t.Fatalf("accept over cap: want ErrPlanLimit, got %v", err)
+	}
+}
+
 func TestInviteOwnerOnly(t *testing.T) {
 	db := newTestDB(t)
 	mailer := &fakeMailer{}
