@@ -68,8 +68,8 @@ func (db *DB) CreateOrgInvitation(ctx context.Context, tenantID, invitedBy, emai
 }
 
 // SupersedeOtherPendingOrgInvitations invalidates every OTHER still-pending
-// (unaccepted, unexpired) invitation for the same (tenant, email) that was
-// created STRICTLY BEFORE keepCreatedAt - called only once the keeper
+// (unaccepted, unexpired) invitation for the same (tenant, email) that
+// ORDERS STRICTLY BEFORE the keeper - called only once the keeper
 // invitation's email has been confirmed sent (see CreateOrgInvitation's
 // doc). Ordering by creation time, not simply "id != keepID", matters for
 // correctness under concurrency: two invitations sent to the same address
@@ -79,10 +79,18 @@ func (db *DB) CreateOrgInvitation(ctx context.Context, tenantID, invitedBy, emai
 // BOTH emailed links end up dead even though both requests reported
 // success (Greptile P1, PR #23). Superseding only strictly-older rows
 // makes this commutative: the newest invitation always survives no matter
-// which request's UPDATE happens to run last.
+// which request's UPDATE happens to run last. created_at alone is not a
+// total order - two rows can share a timestamp (Postgres timestamptz is
+// microsecond-precision, and two concurrent inserts can land in the same
+// microsecond) - so id breaks the tie: id is a crypto-random newID(), so
+// for two invitations with equal created_at, both this call and its
+// concurrent sibling used to see itself as the older one and would leave
+// both alive; comparing "(created_at, id) < (keepCreatedAt, keepID)"
+// forces a single, consistent winner regardless of which row queries
+// first (Greptile P2, PR #23).
 func (db *DB) SupersedeOtherPendingOrgInvitations(ctx context.Context, tenantID, email, keepID string, keepCreatedAt, now time.Time) error {
 	_, err := db.pool.Exec(ctx,
-		`UPDATE org_invitations SET expires_at = $5 WHERE tenant_id = $1 AND normalized_email = $2 AND id != $3 AND created_at < $4 AND accepted_at IS NULL AND expires_at > $5`,
+		`UPDATE org_invitations SET expires_at = $5 WHERE tenant_id = $1 AND normalized_email = $2 AND (created_at, id) < ($4, $3) AND accepted_at IS NULL AND expires_at > $5`,
 		tenantID, normalizeEmail(email), keepID, keepCreatedAt, now,
 	)
 	if err != nil {
