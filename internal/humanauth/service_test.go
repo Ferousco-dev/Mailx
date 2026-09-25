@@ -454,3 +454,62 @@ func TestResetPasswordExpiredToken(t *testing.T) {
 		t.Fatalf("expected ErrPasswordResetTokenInvalid for expired token, got %v", err)
 	}
 }
+
+// TestResetPasswordDuringConcurrentRefreshEndsAllSessions is a regression
+// test for a real race (Greptile P1, PR #22): Refresh used to revoke the
+// old token and insert its replacement as two independent statements, so a
+// ResetPassword landing in the gap between them would revoke-all without
+// ever seeing the new token, leaving that one session alive after a reset
+// that was supposed to end every session. RotateRefreshToken now does both
+// in one transaction, closing the gap.
+func TestResetPasswordDuringConcurrentRefreshEndsAllSessions(t *testing.T) {
+	db := newTestDB(t)
+	mailer := &fakeMailer{}
+	svc, err := NewService(db, testSecret(), WithMailer(mailer), WithDashboardBaseURL("https://app.mailx.dev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	sess, err := svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.ForgotPassword(ctx, "ada@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	link := mailer.calls[0].text
+	idx := strings.Index(link, "token=")
+	rawToken := link[idx+len("token="):]
+	if end := strings.IndexAny(rawToken, "\n "); end != -1 {
+		rawToken = rawToken[:end]
+	}
+
+	// Simulate the two racing operations interleaved in whichever order the
+	// scheduler picks: refresh (rotate) and reset (revoke-all + password
+	// change) both fired concurrently against the same pre-reset session.
+	var refreshErr, resetErr error
+	var refreshed Session
+	done := make(chan struct{}, 2)
+	go func() {
+		refreshed, refreshErr = svc.Refresh(ctx, sess.RefreshToken)
+		done <- struct{}{}
+	}()
+	go func() {
+		resetErr = svc.ResetPassword(ctx, rawToken, "brandNewPassword1")
+		done <- struct{}{}
+	}()
+	<-done
+	<-done
+	if resetErr != nil {
+		t.Fatalf("reset should always succeed: %v", resetErr)
+	}
+
+	// Whether or not the refresh itself won its own race, no refresh token
+	// issued from that pre-reset session may still work afterward.
+	if refreshErr == nil {
+		if _, err := svc.Refresh(ctx, refreshed.RefreshToken); err == nil {
+			t.Fatal("expected the token minted by a racing refresh to be revoked by the password reset, but it still works")
+		}
+	}
+}

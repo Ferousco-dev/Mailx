@@ -252,19 +252,30 @@ func (s *Service) Refresh(ctx context.Context, rawRefreshToken string) (Session,
 		return Session{}, fmt.Errorf("humanauth: get human: %w", err)
 	}
 
-	revoked, err := s.db.RevokeRefreshToken(ctx, rec.ID, now)
+	access, err := s.issueAccessToken(h)
 	if err != nil {
-		return Session{}, fmt.Errorf("humanauth: revoke old refresh token: %w", err)
+		return Session{}, err
 	}
-	if !revoked {
-		// Lost a concurrent rotation race: another request already
-		// revoked this exact token between our read above and this
-		// UPDATE. Do NOT mint a session here — the winner of the race
-		// already got one, and minting a second would let one refresh
-		// token produce two valid sessions.
-		return Session{}, ErrRefreshTokenInvalid
+	raw, err := generateRawToken()
+	if err != nil {
+		return Session{}, err
 	}
-	return s.mintSession(ctx, h)
+	// Revoke-old and insert-new happen in ONE transaction (database.RotateRefreshToken)
+	// so a concurrent ResetPassword's "revoke every active token" can never land in the
+	// gap between them and miss the replacement - see that method's doc for why the two
+	// statements being independent was itself the bug (Greptile P1, PR #22).
+	if _, err := s.db.RotateRefreshToken(ctx, rec.ID, h.ID, hashRawToken(raw), now, now.Add(RefreshTokenTTL)); err != nil {
+		if errors.Is(err, database.ErrRefreshTokenRotationLost) {
+			// Lost a concurrent rotation race (another Refresh, a Logout, or
+			// a password reset already revoked this exact token). Do NOT
+			// mint a session here — minting one would let a single-use
+			// refresh token produce two valid sessions, or survive a reset
+			// that was supposed to end it.
+			return Session{}, ErrRefreshTokenInvalid
+		}
+		return Session{}, fmt.Errorf("humanauth: rotate refresh token: %w", err)
+	}
+	return Session{Human: h, AccessToken: access, RefreshToken: raw}, nil
 }
 
 // Logout revokes the given refresh token (idempotent).
@@ -309,6 +320,13 @@ func (s *Service) ForgotPassword(ctx context.Context, email string) error {
 		// there is no delivery path right now - the caller logs this,
 		// the requester still sees the same generic success response.
 		return fmt.Errorf("humanauth: password reset token created but no mailer is configured")
+	}
+	if s.dashboardBaseURL == "" {
+		// A mailer without a dashboard URL would send a relative
+		// "/reset-password?token=..." link the recipient has no host to
+		// resolve against, i.e. an unusable email (Greptile P1, PR #22).
+		// Treat this the same as no mailer at all rather than sending it.
+		return fmt.Errorf("humanauth: mailer is configured but dashboard base URL is not; refusing to send an unusable reset link")
 	}
 	link := s.dashboardBaseURL + "/reset-password?token=" + raw
 	text := "Someone requested a password reset for your MailX account.\n\n" +

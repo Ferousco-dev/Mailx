@@ -203,6 +203,57 @@ func (db *DB) RevokeRefreshToken(ctx context.Context, id string, now time.Time) 
 	return tag.RowsAffected() > 0, nil
 }
 
+// ErrRefreshTokenRotationLost signals that the old token was already
+// revoked by someone else (a concurrent Refresh, a Logout, or a
+// password-reset revoke-all) before this call's own revoke ran.
+var ErrRefreshTokenRotationLost = errors.New("database: refresh token already revoked")
+
+// RotateRefreshToken revokes oldID and inserts its replacement in a single
+// transaction. This must be one transaction, not two separate calls: if the
+// revoke and the insert were independent statements, a concurrent
+// ResetPassword's "revoke every active token" update could run in the gap
+// between them and never see the new token, since it didn't exist yet -
+// leaving a session alive after a reset that was supposed to end all of
+// them. Keeping both statements in one transaction removes that gap: either
+// this whole rotation lands before the reset's revoke-all (which then also
+// revokes the new token), or the reset's revoke-all lands first (which
+// revokes the old token, so this call's own revoke affects zero rows and
+// returns ErrRefreshTokenRotationLost instead of minting a session).
+func (db *DB) RotateRefreshToken(ctx context.Context, oldID, humanID, tokenHash string, now, expiresAt time.Time) (RefreshToken, error) {
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return RefreshToken{}, fmt.Errorf("database: begin rotate refresh token: %w", normalizeErr(err))
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL`, oldID, now)
+	if err != nil {
+		return RefreshToken{}, fmt.Errorf("database: revoke old refresh token: %w", normalizeErr(err))
+	}
+	if tag.RowsAffected() == 0 {
+		return RefreshToken{}, ErrRefreshTokenRotationLost
+	}
+
+	id, err := newID()
+	if err != nil {
+		return RefreshToken{}, err
+	}
+	var t RefreshToken
+	err = tx.QueryRow(ctx, `
+		INSERT INTO refresh_tokens (id, human_id, token_hash, expires_at)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, human_id, token_hash, expires_at, created_at, revoked_at`,
+		id, humanID, tokenHash, expiresAt,
+	).Scan(&t.ID, &t.HumanID, &t.TokenHash, &t.ExpiresAt, &t.CreatedAt, &t.RevokedAt)
+	if err != nil {
+		return RefreshToken{}, fmt.Errorf("database: insert rotated refresh token: %w", normalizeErr(err))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return RefreshToken{}, fmt.Errorf("database: commit rotate refresh token: %w", normalizeErr(err))
+	}
+	return t, nil
+}
+
 // RevokeAllRefreshTokensForHuman revokes every active refresh token for a
 // human — the session-wide compromise response to a detected reuse of an
 // already-rotated token.
