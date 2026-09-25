@@ -40,7 +40,7 @@ func TestRefreshTokenLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	tok, err := db.CreateRefreshToken(ctx, h.ID, "hash-of-raw", now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -83,7 +83,7 @@ func TestRevokeAllRefreshTokensForHuman(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := time.Now().UTC()
+	now := time.Now().UTC().Truncate(time.Microsecond)
 	if _, err := db.CreateRefreshToken(ctx, h.ID, "hash-a", now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +180,7 @@ func TestTouchHumanLoginIsMonotonic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	later := time.Now().UTC()
+	later := time.Now().UTC().Truncate(time.Microsecond)
 	earlier := later.Add(-time.Minute)
 
 	if err := db.TouchHumanLogin(ctx, h.ID, later); err != nil {
@@ -209,13 +209,16 @@ func TestTouchLoginAndCreateRefreshTokenIsAtomicAndMonotonic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	first := time.Now().UTC()
-	tok, err := db.TouchLoginAndCreateRefreshToken(ctx, h.ID, first, "hash1", first.Add(time.Hour))
+	first := time.Now().UTC().Truncate(time.Microsecond)
+	tok, actual, err := db.TouchLoginAndCreateRefreshToken(ctx, h.ID, first, "hash1", first.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if tok.ID == "" {
 		t.Fatal("expected a created refresh token")
+	}
+	if !actual.Equal(first) {
+		t.Fatalf("expected the returned actual last_login_at to be %v, got %v", first, actual)
 	}
 	got, err := db.GetHuman(ctx, h.ID)
 	if err != nil {
@@ -225,9 +228,18 @@ func TestTouchLoginAndCreateRefreshTokenIsAtomicAndMonotonic(t *testing.T) {
 		t.Fatalf("expected last_login_at set to %v, got %v", first, got.LastLoginAt)
 	}
 
+	// An out-of-order (earlier) call must lose the monotonic guard AND
+	// report the true stored value back, not its own earlier timestamp -
+	// otherwise a caller building a response from the return value alone
+	// would tell the client a last-login time older than what is actually
+	// stored (Greptile P2, PR #22).
 	earlier := first.Add(-time.Minute)
-	if _, err := db.TouchLoginAndCreateRefreshToken(ctx, h.ID, earlier, "hash2", earlier.Add(time.Hour)); err != nil {
+	_, actual2, err := db.TouchLoginAndCreateRefreshToken(ctx, h.ID, earlier, "hash2", earlier.Add(time.Hour))
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !actual2.Equal(first) {
+		t.Fatalf("expected the lost-race call to report the true stored value %v, got %v", first, actual2)
 	}
 	got, err = db.GetHuman(ctx, h.ID)
 	if err != nil {

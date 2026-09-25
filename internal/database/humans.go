@@ -118,22 +118,32 @@ func (db *DB) TouchHumanLogin(ctx context.Context, humanID string, at time.Time)
 // tokenHash/expiresAt are precomputed by the caller (internal/humanauth
 // owns token generation, not this package). See TouchHumanLogin's doc for
 // the monotonic-timestamp guard, applied identically here.
-func (db *DB) TouchLoginAndCreateRefreshToken(ctx context.Context, humanID string, loginAt time.Time, tokenHash string, expiresAt time.Time) (RefreshToken, error) {
+// It also returns the last_login_at ACTUALLY stored after the update - not
+// necessarily loginAt, since the monotonic guard may have kept an even
+// later value written by a concurrent login that reached the database
+// first. Callers must use this returned value in any response, never the
+// loginAt they passed in, or a client can be told a last-login time older
+// than what is actually stored (Greptile P2, PR #22).
+func (db *DB) TouchLoginAndCreateRefreshToken(ctx context.Context, humanID string, loginAt time.Time, tokenHash string, expiresAt time.Time) (RefreshToken, time.Time, error) {
 	tx, err := db.pool.Begin(ctx)
 	if err != nil {
-		return RefreshToken{}, fmt.Errorf("database: begin login: %w", normalizeErr(err))
+		return RefreshToken{}, time.Time{}, fmt.Errorf("database: begin login: %w", normalizeErr(err))
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx,
 		`UPDATE humans SET last_login_at = $2, updated_at = $2 WHERE id = $1 AND (last_login_at IS NULL OR last_login_at < $2)`,
 		humanID, loginAt); err != nil {
-		return RefreshToken{}, fmt.Errorf("database: touch human login: %w", normalizeErr(err))
+		return RefreshToken{}, time.Time{}, fmt.Errorf("database: touch human login: %w", normalizeErr(err))
+	}
+	var actualLastLoginAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT last_login_at FROM humans WHERE id = $1`, humanID).Scan(&actualLastLoginAt); err != nil {
+		return RefreshToken{}, time.Time{}, fmt.Errorf("database: read last_login_at: %w", normalizeErr(err))
 	}
 
 	id, err := newID()
 	if err != nil {
-		return RefreshToken{}, err
+		return RefreshToken{}, time.Time{}, err
 	}
 	var t RefreshToken
 	err = tx.QueryRow(ctx, `
@@ -143,13 +153,13 @@ func (db *DB) TouchLoginAndCreateRefreshToken(ctx context.Context, humanID strin
 		id, humanID, tokenHash, expiresAt,
 	).Scan(&t.ID, &t.HumanID, &t.TokenHash, &t.ExpiresAt, &t.CreatedAt, &t.RevokedAt)
 	if err != nil {
-		return RefreshToken{}, fmt.Errorf("database: create refresh token: %w", normalizeErr(err))
+		return RefreshToken{}, time.Time{}, fmt.Errorf("database: create refresh token: %w", normalizeErr(err))
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return RefreshToken{}, fmt.Errorf("database: commit login: %w", normalizeErr(err))
+		return RefreshToken{}, time.Time{}, fmt.Errorf("database: commit login: %w", normalizeErr(err))
 	}
-	return t, nil
+	return t, actualLastLoginAt, nil
 }
 
 // CreateRefreshToken inserts a new refresh token row.

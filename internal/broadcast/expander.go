@@ -387,7 +387,17 @@ func (e *Expander) materializeOne(ctx context.Context, b database.Broadcast, fro
 		if delErr != nil {
 			e.log.Error("erased_recipient_disk_cleanup_failed", "recipient_id", r.ID, "error", delErr.Error())
 			e.metrics.BroadcastExpansionBatch("erasure_cleanup", "error")
+			// Surface the failure instead of masking it as success: the
+			// broadcast_recipients row is already gone, so nothing else will
+			// ever retry this cleanup, and returning nil here would also
+			// make the caller call finishMaterialized on a row that no
+			// longer exists (Greptile P1, PR #22). Deliberately NOT wrapped
+			// in errDeterministic - the caller's generic error path treats
+			// it as transient (log + metric only, no RecordBroadcastRecipientFailure
+			// against a row that's already gone).
+			return fmt.Errorf("erased recipient disk cleanup: %w", delErr)
 		}
+		e.metrics.BroadcastExpansionBatch("erasure_cleanup", "ok")
 		return nil
 	}
 	if err != nil && !errors.Is(err, database.ErrConflict) { // ErrConflict here = already inserted by a prior crashed attempt: idempotent success

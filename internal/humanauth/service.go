@@ -97,7 +97,11 @@ func NewService(db *database.DB, jwtSecret []byte, opts ...Option) (*Service, er
 	if len(jwtSecret) == 0 {
 		return nil, fmt.Errorf("humanauth: jwt secret is empty")
 	}
-	s := &Service{db: db, jwtSecret: jwtSecret, now: func() time.Time { return time.Now().UTC() }}
+	// Truncated to microsecond precision to match PostgreSQL's timestamptz,
+	// which has no nanosecond component: a Go time.Time compared with
+	// .Equal() against one that round-tripped through the database would
+	// otherwise never match (this broke CI - see humans_test.go's helpers).
+	s := &Service{db: db, jwtSecret: jwtSecret, now: func() time.Time { return time.Now().UTC().Truncate(time.Microsecond) }}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -215,10 +219,15 @@ func (s *Service) Login(ctx context.Context, email, password string) (Session, e
 		return Session{}, err
 	}
 	loginAt := s.now()
-	if _, err := s.db.TouchLoginAndCreateRefreshToken(ctx, h.ID, loginAt, hashRawToken(raw), loginAt.Add(RefreshTokenTTL)); err != nil {
+	_, actualLastLoginAt, err := s.db.TouchLoginAndCreateRefreshToken(ctx, h.ID, loginAt, hashRawToken(raw), loginAt.Add(RefreshTokenTTL))
+	if err != nil {
 		return Session{}, fmt.Errorf("humanauth: record login: %w", err)
 	}
-	h.LastLoginAt = &loginAt // reflect the just-recorded touch, avoiding a re-fetch
+	// Use what the database actually stored, not loginAt: a concurrent
+	// login that reached the database first can win the monotonic guard,
+	// in which case echoing our own loginAt back would tell this caller a
+	// last-login time older than what is really stored (Greptile P2).
+	h.LastLoginAt = &actualLastLoginAt
 	return Session{Human: h, AccessToken: access, RefreshToken: raw}, nil
 }
 
