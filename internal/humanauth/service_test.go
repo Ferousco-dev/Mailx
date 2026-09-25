@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -315,5 +317,140 @@ func TestAccessTokenRoundTripsAndRejectsTamperedOrExpired(t *testing.T) {
 	}
 	if _, err := svc.VerifyAccessToken(expiredTok); err == nil {
 		t.Fatal("expected expired token to be rejected")
+	}
+}
+
+// fakeMailer records calls instead of sending; ForgotPassword's
+// anti-enumeration behavior only calls it when the account exists.
+type fakeMailer struct {
+	calls []struct{ to, subject, text, html string }
+}
+
+func (m *fakeMailer) SendSystemEmail(_ context.Context, to, subject, text, html string) error {
+	m.calls = append(m.calls, struct{ to, subject, text, html string }{to, subject, text, html})
+	return nil
+}
+
+func TestForgotPasswordOnlyEmailsKnownAccounts(t *testing.T) {
+	db := newTestDB(t)
+	mailer := &fakeMailer{}
+	svc, err := NewService(db, testSecret(), WithMailer(mailer), WithDashboardBaseURL("https://app.mailx.dev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.ForgotPassword(ctx, "unknown@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if len(mailer.calls) != 0 {
+		t.Fatalf("expected no email for an unknown account, got %d", len(mailer.calls))
+	}
+
+	if err := svc.ForgotPassword(ctx, "ada@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if len(mailer.calls) != 1 {
+		t.Fatalf("expected exactly one email for a known account, got %d", len(mailer.calls))
+	}
+	if mailer.calls[0].to != "ada@example.com" {
+		t.Fatalf("unexpected recipient: %q", mailer.calls[0].to)
+	}
+	if !strings.Contains(mailer.calls[0].text, "https://app.mailx.dev/reset-password?token=") {
+		t.Fatalf("expected reset link in email body, got %q", mailer.calls[0].text)
+	}
+}
+
+func TestResetPasswordFlow(t *testing.T) {
+	db := newTestDB(t)
+	mailer := &fakeMailer{}
+	svc, err := NewService(db, testSecret(), WithMailer(mailer), WithDashboardBaseURL("https://app.mailx.dev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter"); err != nil {
+		t.Fatal(err)
+	}
+	// SignUp mints a refresh token; log in again to have a second one, so we
+	// can prove ResetPassword revokes ALL of them.
+	if _, err := svc.Login(ctx, "ada@example.com", "hunter22hunter"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := svc.ForgotPassword(ctx, "ada@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if len(mailer.calls) != 1 {
+		t.Fatalf("expected one reset email, got %d", len(mailer.calls))
+	}
+	link := mailer.calls[0].text
+	idx := strings.Index(link, "token=")
+	if idx == -1 {
+		t.Fatalf("no token in email body: %q", link)
+	}
+	rawToken := link[idx+len("token="):]
+	if end := strings.IndexAny(rawToken, "\n "); end != -1 {
+		rawToken = rawToken[:end]
+	}
+
+	// Too-short new password is rejected without touching the token.
+	if err := svc.ResetPassword(ctx, rawToken, "short"); err == nil {
+		t.Fatal("expected short password to be rejected")
+	}
+
+	if err := svc.ResetPassword(ctx, rawToken, "brandNewPassword1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The old password no longer works; the new one does.
+	if _, err := svc.Login(ctx, "ada@example.com", "hunter22hunter"); err == nil {
+		t.Fatal("expected old password to be rejected after reset")
+	}
+	if _, err := svc.Login(ctx, "ada@example.com", "brandNewPassword1"); err != nil {
+		t.Fatalf("expected new password to work: %v", err)
+	}
+
+	// Reusing the same token must fail (single-use).
+	if err := svc.ResetPassword(ctx, rawToken, "anotherPassword2"); !errors.Is(err, ErrPasswordResetTokenInvalid) {
+		t.Fatalf("expected ErrPasswordResetTokenInvalid on reuse, got %v", err)
+	}
+
+	// Unknown token is rejected with the same generic error (anti-enumeration).
+	if err := svc.ResetPassword(ctx, "not-a-real-token", "somePassword3"); !errors.Is(err, ErrPasswordResetTokenInvalid) {
+		t.Fatalf("expected ErrPasswordResetTokenInvalid for unknown token, got %v", err)
+	}
+}
+
+func TestResetPasswordExpiredToken(t *testing.T) {
+	db := newTestDB(t)
+	mailer := &fakeMailer{}
+	start := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	current := start
+	svc, err := NewService(db, testSecret(), WithMailer(mailer), WithDashboardBaseURL("https://app.mailx.dev"),
+		WithNow(func() time.Time { return current }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter"); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ForgotPassword(ctx, "ada@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	link := mailer.calls[0].text
+	idx := strings.Index(link, "token=")
+	rawToken := link[idx+len("token="):]
+	if end := strings.IndexAny(rawToken, "\n "); end != -1 {
+		rawToken = rawToken[:end]
+	}
+
+	current = start.Add(PasswordResetTokenTTL + time.Second)
+	if err := svc.ResetPassword(ctx, rawToken, "brandNewPassword1"); !errors.Is(err, ErrPasswordResetTokenInvalid) {
+		t.Fatalf("expected ErrPasswordResetTokenInvalid for expired token, got %v", err)
 	}
 }

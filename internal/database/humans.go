@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -276,4 +277,92 @@ func (db *DB) ListOrganizationsForHuman(ctx context.Context, humanID string) ([]
 		return nil, normalizeErr(err)
 	}
 	return out, nil
+}
+
+// PasswordResetToken is one issued password-reset token row (migration
+// 000029). Deliberately a separate table from refresh_tokens - see that
+// migration's doc.
+type PasswordResetToken struct {
+	ID        string
+	HumanID   string
+	TokenHash string
+	ExpiresAt time.Time
+	UsedAt    *time.Time
+	CreatedAt time.Time
+}
+
+// CreatePasswordResetToken inserts a new password-reset token row.
+func (db *DB) CreatePasswordResetToken(ctx context.Context, humanID, tokenHash string, expiresAt time.Time) (PasswordResetToken, error) {
+	id, err := newID()
+	if err != nil {
+		return PasswordResetToken{}, err
+	}
+	var t PasswordResetToken
+	err = db.pool.QueryRow(ctx, `
+		INSERT INTO password_reset_tokens (id, human_id, token_hash, expires_at)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, human_id, token_hash, expires_at, used_at, created_at`,
+		id, humanID, tokenHash, expiresAt,
+	).Scan(&t.ID, &t.HumanID, &t.TokenHash, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	if err != nil {
+		return PasswordResetToken{}, normalizeErr(err)
+	}
+	return t, nil
+}
+
+// GetPasswordResetTokenByHash loads a password-reset token row by its
+// hash. Returns ErrNotFound if absent (regardless of used/expired -
+// callers check those fields themselves, same convention as
+// GetRefreshTokenByHash).
+func (db *DB) GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (PasswordResetToken, error) {
+	var t PasswordResetToken
+	err := db.pool.QueryRow(ctx, `
+		SELECT id, human_id, token_hash, expires_at, used_at, created_at
+		FROM password_reset_tokens WHERE token_hash = $1`, tokenHash,
+	).Scan(&t.ID, &t.HumanID, &t.TokenHash, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
+	if err != nil {
+		return PasswordResetToken{}, normalizeErr(err)
+	}
+	return t, nil
+}
+
+// ErrPasswordResetTokenConsumed means this exact token row was already
+// marked used by a concurrent call - see ResetPassword's doc.
+var ErrPasswordResetTokenConsumed = errors.New("database: password reset token already used")
+
+// ResetPassword atomically: (1) marks tokenID used, but ONLY if it is not
+// ALREADY used (RowsAffected-checked, same race-safety pattern as
+// RevokeRefreshToken - two concurrent reset-password calls with the SAME
+// valid token must not both succeed), (2) updates the human's password
+// hash, and (3) revokes every active refresh token for that human -
+// changing a password must end every other existing session, the same
+// security posture as detecting refresh-token reuse (DEC-208). All three
+// happen in one transaction: a partial application (password changed but
+// old sessions still valid, or vice versa) is never observable.
+func (db *DB) ResetPassword(ctx context.Context, tokenID, humanID, newPasswordHash string, now time.Time) error {
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("database: begin reset password: %w", normalizeErr(err))
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `UPDATE password_reset_tokens SET used_at = $2 WHERE id = $1 AND used_at IS NULL`, tokenID, now)
+	if err != nil {
+		return fmt.Errorf("database: consume password reset token: %w", normalizeErr(err))
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrPasswordResetTokenConsumed
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE humans SET password_hash = $2, updated_at = $3 WHERE id = $1`, humanID, newPasswordHash, now); err != nil {
+		return fmt.Errorf("database: update password: %w", normalizeErr(err))
+	}
+	if _, err := tx.Exec(ctx, `UPDATE refresh_tokens SET revoked_at = $2 WHERE human_id = $1 AND revoked_at IS NULL`, humanID, now); err != nil {
+		return fmt.Errorf("database: revoke sessions on password reset: %w", normalizeErr(err))
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("database: commit reset password: %w", normalizeErr(err))
+	}
+	return nil
 }

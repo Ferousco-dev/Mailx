@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -138,6 +139,69 @@ func (h *humanAuthHandler) handleLogout(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+type forgotPasswordRequest struct {
+	Email string `json:"email"`
+}
+
+// handleForgotPassword ALWAYS responds with the same generic message,
+// whatever humanauth.Service.ForgotPassword actually did internally
+// (found-and-emailed, not-found, or even a mailer/DB failure) — the
+// response must never let a caller distinguish "this email has an
+// account" from "it doesn't", the same anti-enumeration posture Login
+// already uses. A genuine internal error is logged, never surfaced.
+func (h *humanAuthHandler) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
+	if !acceptsJSONContentType(r.Header.Get("Content-Type")) {
+		writeError(w, r, newError(ErrUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json"))
+		return
+	}
+	var req forgotPasswordRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil || req.Email == "" {
+		writeError(w, r, newError(ErrInvalidRequest, "invalid_json", "email is required"))
+		return
+	}
+	if err := h.svc.ForgotPassword(r.Context(), req.Email); err != nil {
+		slog.Default().Error("forgot_password_failed", "error", err.Error())
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "if an account exists for that email, a password reset link has been sent"})
+}
+
+type resetPasswordRequest struct {
+	Token           string `json:"token"`
+	NewPassword     string `json:"new_password"`
+	ConfirmPassword string `json:"confirm_password"`
+}
+
+func (h *humanAuthHandler) handleResetPassword(w http.ResponseWriter, r *http.Request) {
+	if !acceptsJSONContentType(r.Header.Get("Content-Type")) {
+		writeError(w, r, newError(ErrUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json"))
+		return
+	}
+	var req resetPasswordRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		writeError(w, r, newError(ErrInvalidRequest, "invalid_json", "request body is not valid JSON"))
+		return
+	}
+	if req.Token == "" || req.NewPassword == "" {
+		writeError(w, r, newError(ErrValidation, "invalid_reset", "token and new_password are required"))
+		return
+	}
+	// A client-side mismatch check is the primary UX guard; this is
+	// defense in depth against a client bug, not the only check.
+	if req.ConfirmPassword != "" && req.ConfirmPassword != req.NewPassword {
+		writeError(w, r, newError(ErrValidation, "password_mismatch", "new_password and confirm_password do not match"))
+		return
+	}
+	if err := h.svc.ResetPassword(r.Context(), req.Token, req.NewPassword); err != nil {
+		if errors.Is(err, humanauth.ErrPasswordResetTokenInvalid) {
+			writeError(w, r, newError(ErrValidation, "invalid_reset_token", "this reset link is invalid or has expired"))
+			return
+		}
+		writeError(w, r, newError(ErrValidation, "invalid_reset", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "password updated; all other sessions have been signed out"})
 }
 
 type createOrgRequest struct {

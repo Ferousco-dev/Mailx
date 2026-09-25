@@ -162,6 +162,47 @@ func authIPLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
 	}
 }
 
+// passwordResetIPLimitMiddleware protects POST /v1/auth/forgot-password
+// and /v1/auth/reset-password with their OWN, much tighter bucket than
+// authIPLimitMiddleware — see Policy.PasswordResetIPRate's doc for why a
+// shared bucket with login would be too permissive here (forgot-password
+// sends real email on every call; a shared budget sized for login-guessing
+// resistance would let a caller email-bomb a victim far more cheaply than
+// intended).
+func passwordResetIPLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if a == nil || a.Limiter == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := authClientIP(r, a.TrustedProxyCIDRs)
+			p := a.Policy
+			dec, err := a.Limiter.Allow(r.Context(),
+				ratelimit.Bucket{Key: "auth:reset:ip:" + ip, Rate: p.PasswordResetIPRate, Burst: p.PasswordResetIPBurst, Cost: 1},
+			)
+			switch {
+			case err != nil:
+				a.Metrics.AbuseDecision("password_reset", "unavailable")
+				a.log().Error("rate_limiter_unavailable", "route_class", "password_reset")
+				e := newError(ErrTemporarilyUnavailable, "rate_limiter_unavailable", "request limiting is temporarily unavailable; retry later")
+				e.RetryAfter = unavailableRetryAfter
+				writeError(w, r, e)
+			case dec.Impossible:
+				a.Metrics.AbuseDecision("password_reset", "impossible")
+				writeError(w, r, newError(ErrInternal, "internal_error", "request limit is misconfigured"))
+			case !dec.Allowed:
+				a.Metrics.AbuseDecision("password_reset", "limited")
+				e := newError(ErrRateLimited, "password_reset_rate_limited", "too many password reset attempts from this address; retry after the interval in Retry-After")
+				e.RetryAfter = ratelimit.RetryAfterSeconds(dec.RetryAfter)
+				writeError(w, r, e)
+			default:
+				a.Metrics.AbuseDecision("password_reset", "allowed")
+				next.ServeHTTP(w, r)
+			}
+		})
+	}
+}
+
 // authClientIP returns the IP to key the auth rate limiter on: the
 // connection peer (RemoteAddr), UNLESS that peer is a configured trusted
 // proxy, in which case the rightmost entry of X-Forwarded-For is used

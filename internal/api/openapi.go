@@ -94,6 +94,29 @@ const openAPISpec = `{
         }
       }
     },
+    "/auth/forgot-password": {
+      "post": {
+        "summary": "Request a password reset email",
+        "description": "Public (no auth required). Always returns the same generic response whether or not the email is registered, to avoid account enumeration. Rate-limited per client IP, separately from and much tighter than login/signup, since it triggers a real outbound email send.",
+        "security": [],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ForgotPasswordRequest"}}}},
+        "responses": {
+          "200": {"description": "OK (generic; does not reveal whether the account exists)", "content": {"application/json": {"schema": {"type": "object", "properties": {"message": {"type": "string"}}}}}}
+        }
+      }
+    },
+    "/auth/reset-password": {
+      "post": {
+        "summary": "Reset a password using a reset token",
+        "description": "Public (no auth required). The token is single-use and expires 5 minutes after issuance. On success, all of the account's refresh tokens are revoked, signing out every other session.",
+        "security": [],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ResetPasswordRequest"}}}},
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"message": {"type": "string"}}}}}},
+          "422": {"description": "Invalid request, or the reset token is invalid/expired/used", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
     "/orgs": {
       "post": {
         "summary": "Create an organization",
@@ -2790,6 +2813,22 @@ const openAPISpec = `{
         "required": ["refresh_token"],
         "properties": {
           "refresh_token": {"type": "string"}
+        }
+      },
+      "ForgotPasswordRequest": {
+        "type": "object",
+        "required": ["email"],
+        "properties": {
+          "email": {"type": "string", "format": "email"}
+        }
+      },
+      "ResetPasswordRequest": {
+        "type": "object",
+        "required": ["token", "new_password"],
+        "properties": {
+          "token": {"type": "string"},
+          "new_password": {"type": "string", "format": "password", "minLength": 8},
+          "confirm_password": {"type": "string", "format": "password", "description": "Optional; if provided, must match new_password."}
         }
       },
       "Human": {

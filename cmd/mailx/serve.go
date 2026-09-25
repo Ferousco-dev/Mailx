@@ -119,7 +119,13 @@ func runFull() error {
 	if err != nil {
 		return err
 	}
-	humanAuthSvc, err := humanauth.NewService(db, jwtSecret())
+	humanAuthOpts := []humanauth.Option{humanauth.WithDashboardBaseURL(dashboardBaseURL())}
+	if mailer := buildSystemMailer(api.NewSubmissionAcceptor(db, store, dkimSvc, abuse.apiControls(o), ident.Name())); mailer != nil {
+		humanAuthOpts = append(humanAuthOpts, humanauth.WithMailer(mailer))
+	} else {
+		o.log.Warn("system_mailer_disabled", "hint", "MAILX_SYSTEM_TENANT_ID/MAILX_SYSTEM_FROM_ADDRESS not set: password reset tokens will be created but no email will be sent")
+	}
+	humanAuthSvc, err := humanauth.NewService(db, jwtSecret(), humanAuthOpts...)
 	if err != nil {
 		return err
 	}

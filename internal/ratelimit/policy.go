@@ -56,6 +56,16 @@ type Policy struct {
 	// surface, not ordinary API traffic.
 	AuthIPRate  float64
 	AuthIPBurst int
+	// PasswordResetIPRate/PasswordResetIPBurst bound POST
+	// /v1/auth/forgot-password and /v1/auth/reset-password per client IP,
+	// separately from and much tighter than AuthIPRate: forgot-password
+	// triggers a real outbound email send on every call (a shared burst
+	// with login would let a caller email-bomb a victim's inbox by
+	// spamming forgot-password far more cheaply than the login-guessing
+	// budget was sized for), and reset-password carries the account's most
+	// dangerous credential-change action.
+	PasswordResetIPRate  float64
+	PasswordResetIPBurst int
 }
 
 const (
@@ -78,6 +88,7 @@ func DefaultPolicy() Policy {
 		PermitTTL: 10 * time.Minute, RetryJitterPercent: 10,
 		MaxRecipientsPerMessage: 50,
 		AuthIPRate:              1, AuthIPBurst: 10,
+		PasswordResetIPRate: 1.0 / 60, PasswordResetIPBurst: 3,
 	}
 }
 
@@ -105,6 +116,7 @@ func (p Policy) Validate() error {
 		count("destination delivery concurrency", p.DestinationDeliveryConcurrency, maxConcurrency),
 		count("max recipients per message", p.MaxRecipientsPerMessage, 1000),
 		rate("auth IP rate", p.AuthIPRate), count("auth IP burst", p.AuthIPBurst, maxBurst),
+		rate("password reset IP rate", p.PasswordResetIPRate), count("password reset IP burst", p.PasswordResetIPBurst, maxBurst),
 	} {
 		if e != nil {
 			return e
