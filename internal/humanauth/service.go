@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"html"
 	"strings"
 	"time"
 
@@ -472,6 +473,12 @@ func (s *Service) InviteToOrganization(ctx context.Context, inviterHumanID, tena
 	if s.mailer == nil {
 		return fmt.Errorf("humanauth: org invitation created but no mailer is configured")
 	}
+	if s.dashboardBaseURL == "" {
+		// A mailer without a dashboard URL would send a relative
+		// "/accept-invite?token=..." link the recipient has no host to
+		// resolve against - same fix as ForgotPassword's (Greptile P1, PR #23).
+		return fmt.Errorf("humanauth: mailer is configured but dashboard base URL is not; refusing to send an unusable invitation link")
+	}
 	link := s.dashboardBaseURL + "/accept-invite?token=" + raw
 	subject := fmt.Sprintf("%s invites you to join the organization", tenant.Name)
 	text := fmt.Sprintf("%s (%s) has invited you to join %s on MailX.\n\n"+
@@ -491,16 +498,25 @@ func (s *Service) InviteToOrganization(ctx context.Context, inviterHumanID, tena
 // and the accept link. Either image is omitted entirely when its URL is
 // unset, rather than showing a broken-image placeholder.
 func orgInvitationHTML(tenant database.Tenant, inviter database.Human, link string) string {
+	// tenant.Name/inviter.Name/inviter.Email are owner/user-supplied and end
+	// up in an email MailX itself sends - html.EscapeString for both text
+	// nodes and attribute values (Go's html/template would double-escape
+	// the pre-built <img>/<a> markup here, so plain escaping of each
+	// interpolated value is used instead, same as the rest of this file's
+	// string-building style). Unescaped HTML here would let an org owner
+	// inject deceptive content/links into mail MailX sends on their behalf
+	// (Greptile P1/security, PR #23).
+	name := html.EscapeString(tenant.Name)
 	var b strings.Builder
 	b.WriteString("<div>")
 	if tenant.LogoURL != nil && *tenant.LogoURL != "" {
-		fmt.Fprintf(&b, `<img src="%s" alt="%s logo" height="48" style="display:block;margin-bottom:8px">`, *tenant.LogoURL, tenant.Name)
+		fmt.Fprintf(&b, `<img src="%s" alt="%s logo" height="48" style="display:block;margin-bottom:8px">`, html.EscapeString(*tenant.LogoURL), name)
 	}
 	if inviter.AvatarURL != nil && *inviter.AvatarURL != "" {
-		fmt.Fprintf(&b, `<img src="%s" alt="%s" width="32" height="32" style="border-radius:50%%;display:block;margin-bottom:8px">`, *inviter.AvatarURL, inviter.Name)
+		fmt.Fprintf(&b, `<img src="%s" alt="%s" width="32" height="32" style="border-radius:50%%;display:block;margin-bottom:8px">`, html.EscapeString(*inviter.AvatarURL), html.EscapeString(inviter.Name))
 	}
-	fmt.Fprintf(&b, "<p><strong>%s</strong> invites you to join the organization.</p>", tenant.Name)
-	fmt.Fprintf(&b, `<p><a href="%s">Accept the invitation</a> within 5 hours.</p>`, link)
+	fmt.Fprintf(&b, "<p><strong>%s</strong> invites you to join the organization.</p>", name)
+	fmt.Fprintf(&b, `<p><a href="%s">Accept the invitation</a> within 5 hours.</p>`, html.EscapeString(link))
 	b.WriteString("<p>If you weren't expecting this, you can safely ignore this email.</p>")
 	b.WriteString("</div>")
 	return b.String()

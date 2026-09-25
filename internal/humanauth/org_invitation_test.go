@@ -245,3 +245,98 @@ func TestAcceptInviteEmailAlreadyTaken(t *testing.T) {
 		t.Fatal("expected the invitation to remain unconsumed after a rolled-back signup conflict")
 	}
 }
+
+// TestInviteEmailHTMLIsEscaped is a regression test for Greptile's P1
+// finding (PR #23): an owner-supplied organization name (or inviter name)
+// containing HTML must not reach the invitation email unescaped, since an
+// org owner could otherwise inject deceptive content/links into mail MailX
+// sends on their behalf.
+func TestInviteEmailHTMLIsEscaped(t *testing.T) {
+	db := newTestDB(t)
+	mailer := &fakeMailer{}
+	svc, err := NewService(db, testSecret(), WithMailer(mailer), WithDashboardBaseURL("https://app.mailx.dev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	owner, err := svc.SignUp(ctx, `<img src=x onerror=alert(1)>`, "ada@example.com", "hunter22hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := svc.CreateOrganization(ctx, owner.Human.ID, `Acme <script>alert(1)</script>`, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.InviteToOrganization(ctx, owner.Human.ID, tenant.ID, "invitee@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	htmlBody := mailer.calls[0].html
+	if strings.Contains(htmlBody, "<script>") || strings.Contains(htmlBody, "onerror=") {
+		t.Fatalf("expected owner-supplied HTML to be escaped, got raw markup in email body: %q", htmlBody)
+	}
+}
+
+// TestInviteRefusesToSendWithoutDashboardURL is a regression test for
+// Greptile's P1 finding (PR #23): a mailer configured without a dashboard
+// base URL must not send an unusable relative accept-invite link.
+func TestInviteRefusesToSendWithoutDashboardURL(t *testing.T) {
+	db := newTestDB(t)
+	mailer := &fakeMailer{}
+	svc, err := NewService(db, testSecret(), WithMailer(mailer)) // no WithDashboardBaseURL
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	owner, err := svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := svc.CreateOrganization(ctx, owner.Human.ID, "Acme Inc", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.InviteToOrganization(ctx, owner.Human.ID, tenant.ID, "invitee@example.com"); err == nil {
+		t.Fatal("expected InviteToOrganization to refuse to send without a dashboard base URL")
+	}
+	if len(mailer.calls) != 0 {
+		t.Fatalf("expected no email sent, got %d", len(mailer.calls))
+	}
+}
+
+// TestReInvitingSameAddressInvalidatesThePriorLink is a regression test
+// for Greptile's P2 finding (PR #23): re-inviting the same address must
+// invalidate the previous still-pending invitation, not leave two
+// independently valid accept links outstanding.
+func TestReInvitingSameAddressInvalidatesThePriorLink(t *testing.T) {
+	db := newTestDB(t)
+	mailer := &fakeMailer{}
+	svc, err := NewService(db, testSecret(), WithMailer(mailer), WithDashboardBaseURL("https://app.mailx.dev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	owner, err := svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tenant, err := svc.CreateOrganization(ctx, owner.Human.ID, "Acme Inc", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.InviteToOrganization(ctx, owner.Human.ID, tenant.ID, "invitee@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	firstRaw := extractInviteToken(t, mailer.calls[0].text)
+
+	if err := svc.InviteToOrganization(ctx, owner.Human.ID, tenant.ID, "invitee@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	secondRaw := extractInviteToken(t, mailer.calls[1].text)
+
+	if _, err := svc.AcceptOrgInvitation(ctx, firstRaw, "", "Invitee", "hunter22hunter"); !errors.Is(err, ErrOrgInvitationInvalid) {
+		t.Fatalf("expected the first (superseded) invitation link to be invalid, got %v", err)
+	}
+	if _, err := svc.AcceptOrgInvitation(ctx, secondRaw, "", "Invitee", "hunter22hunter"); err != nil {
+		t.Fatalf("expected the second (current) invitation link to still work: %v", err)
+	}
+}

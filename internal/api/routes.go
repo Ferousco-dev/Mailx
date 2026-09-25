@@ -190,8 +190,10 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		mux.Handle("POST /v1/orgs/{id}/invites", orgsAuthenticated(chain(http.HandlerFunc(ha.handleCreateInvite), orgInviteLimitMiddleware(abuse))))
 		// Deliberately NOT behind orgsAuthenticated: the invitee may have no
 		// account yet, so a bearer token here is optional — see
-		// handleAcceptInvite's doc.
-		mux.HandleFunc("POST /v1/orgs/invites/accept", ha.handleAcceptInvite)
+		// handleAcceptInvite's doc. Still rate-limited by IP
+		// (orgInviteAcceptIPLimitMiddleware) since this route is public and
+		// the no-account-yet path runs a full bcrypt hash per call.
+		mux.Handle("POST /v1/orgs/invites/accept", chain(http.HandlerFunc(ha.handleAcceptInvite), orgInviteAcceptIPLimitMiddleware(abuse)))
 	}
 	if len(extras) > 0 && extras[0].feedback != nil {
 		// Deliberately NOT under /v1 and NOT authenticateMiddleware: this is the

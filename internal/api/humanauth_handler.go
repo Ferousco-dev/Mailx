@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	stdmail "net/mail"
 	"strings"
 	"time"
 
@@ -283,6 +284,14 @@ func (h *humanAuthHandler) handleCreateInvite(w http.ResponseWriter, r *http.Req
 	var req inviteRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil || req.Email == "" {
 		writeError(w, r, newError(ErrInvalidRequest, "invalid_json", "email is required"))
+		return
+	}
+	// Validate BEFORE it ever reaches the database: an address with, say,
+	// internal whitespace would otherwise trip the invitation table's own
+	// constraint and surface a raw PostgreSQL error to the caller instead
+	// of a useful validation response (Greptile P2, PR #23).
+	if _, err := stdmail.ParseAddress(req.Email); err != nil {
+		writeError(w, r, newError(ErrValidation, "invalid_email", "email is not a valid address"))
 		return
 	}
 	if err := h.svc.InviteToOrganization(r.Context(), humanID, tenantID, req.Email); err != nil {

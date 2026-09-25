@@ -42,21 +42,43 @@ func (db *DB) IsTenantOwner(ctx context.Context, tenantID, humanID string) (bool
 	return role == "owner", nil
 }
 
-// CreateOrgInvitation inserts a new invitation row.
+// CreateOrgInvitation inserts a new invitation row. Any other still-pending
+// (unaccepted, unexpired) invitation for the same (tenant, email) is
+// invalidated first - re-inviting an address resends, it doesn't stack a
+// second independently valid link (idx_org_invitations_tenant_email exists
+// for exactly this check; enforcing it here, not just indexing for it, was
+// a real gap - Greptile P2, PR #23).
 func (db *DB) CreateOrgInvitation(ctx context.Context, tenantID, invitedBy, email, tokenHash string, expiresAt time.Time) (OrgInvitation, error) {
 	id, err := newID()
 	if err != nil {
 		return OrgInvitation{}, err
 	}
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return OrgInvitation{}, fmt.Errorf("database: begin create org invitation: %w", normalizeErr(err))
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	normalized := normalizeEmail(email)
+	if _, err := tx.Exec(ctx,
+		`UPDATE org_invitations SET expires_at = now() WHERE tenant_id = $1 AND normalized_email = $2 AND accepted_at IS NULL AND expires_at > now()`,
+		tenantID, normalized,
+	); err != nil {
+		return OrgInvitation{}, fmt.Errorf("database: invalidate prior pending invitation: %w", normalizeErr(err))
+	}
+
 	var inv OrgInvitation
-	err = db.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO org_invitations (id, tenant_id, invited_by, normalized_email, raw_email, token_hash, expires_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		RETURNING id, tenant_id, invited_by, normalized_email, raw_email, token_hash, expires_at, accepted_at, created_at`,
-		id, tenantID, invitedBy, normalizeEmail(email), email, tokenHash, expiresAt,
+		id, tenantID, invitedBy, normalized, email, tokenHash, expiresAt,
 	).Scan(&inv.ID, &inv.TenantID, &inv.InvitedBy, &inv.NormalizedEmail, &inv.RawEmail, &inv.TokenHash, &inv.ExpiresAt, &inv.AcceptedAt, &inv.CreatedAt)
 	if err != nil {
 		return OrgInvitation{}, normalizeErr(err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return OrgInvitation{}, fmt.Errorf("database: commit create org invitation: %w", normalizeErr(err))
 	}
 	return inv, nil
 }
@@ -76,9 +98,16 @@ func (db *DB) GetOrgInvitationByHash(ctx context.Context, tokenHash string) (Org
 	return inv, nil
 }
 
-// ErrOrgInvitationConsumed means this exact invitation row was already
-// marked accepted by a concurrent call — same race-safety pattern as
-// ErrPasswordResetTokenConsumed.
+// ErrOrgInvitationConsumed covers both ways the accept UPDATE can affect
+// zero rows: the invitation was already accepted by a concurrent call, OR
+// it passed its expires_at between the service layer's own expiry check
+// and this statement actually running (a slow request, GC pause, or lock
+// wait can carry a borderline-valid request past the 5-hour deadline) -
+// the WHERE clause rechecks expiry here for exactly that reason, so
+// nothing can be granted membership after the window closes (Greptile P1,
+// PR #23). Same race-safety pattern as ErrPasswordResetTokenConsumed;
+// deliberately not distinguished from the "already accepted" case, since
+// the caller collapses both into the same generic ErrOrgInvitationInvalid.
 var ErrOrgInvitationConsumed = errors.New("database: org invitation already accepted")
 
 // AcceptOrgInvitationForExistingHuman atomically: (1) marks the invitation
@@ -95,7 +124,7 @@ func (db *DB) AcceptOrgInvitationForExistingHuman(ctx context.Context, invitatio
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	tag, err := tx.Exec(ctx, `UPDATE org_invitations SET accepted_at = $2 WHERE id = $1 AND accepted_at IS NULL`, invitationID, now)
+	tag, err := tx.Exec(ctx, `UPDATE org_invitations SET accepted_at = $2 WHERE id = $1 AND accepted_at IS NULL AND expires_at > $2`, invitationID, now)
 	if err != nil {
 		return fmt.Errorf("database: consume org invitation: %w", normalizeErr(err))
 	}
@@ -132,7 +161,7 @@ func (db *DB) AcceptOrgInvitationWithSignup(ctx context.Context, invitationID, t
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	tag, err := tx.Exec(ctx, `UPDATE org_invitations SET accepted_at = $2 WHERE id = $1 AND accepted_at IS NULL`, invitationID, now)
+	tag, err := tx.Exec(ctx, `UPDATE org_invitations SET accepted_at = $2 WHERE id = $1 AND accepted_at IS NULL AND expires_at > $2`, invitationID, now)
 	if err != nil {
 		return Human{}, fmt.Errorf("database: consume org invitation: %w", normalizeErr(err))
 	}
