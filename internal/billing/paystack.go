@@ -55,6 +55,25 @@ type Metadata struct {
 	Plan     string `json:"plan"`
 }
 
+// UnmarshalJSON tolerates metadata that isn't a JSON object (Paystack sends
+// non-object metadata, e.g. 0 or "", for transactions this checkout never
+// created - a payment page or another integration on the same account).
+// Such a transaction decodes to an empty Metadata rather than failing the
+// whole webhook parse: the handler already ignores an empty TenantID
+// (CodeRabbit, PR #24) - a signed event MailX cannot recognize must still
+// be acknowledged 200, not answered 400 (which makes Paystack retry
+// forever for an event that will never become recognizable).
+func (m *Metadata) UnmarshalJSON(b []byte) error {
+	type plain Metadata
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		*m = Metadata{}
+		return nil
+	}
+	*m = Metadata(p)
+	return nil
+}
+
 // InitializeResult is the part of Paystack's response the frontend needs.
 type InitializeResult struct {
 	AuthorizationURL string

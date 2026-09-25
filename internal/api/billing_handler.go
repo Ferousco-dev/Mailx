@@ -203,7 +203,7 @@ func (h *billingHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 	err = h.db.ApplyPlanPayment(r.Context(), database.Payment{
 		Reference: d.Reference, TenantID: d.Metadata.TenantID, Plan: plan.ID,
 		Amount: d.Amount, Currency: strings.ToUpper(d.Currency), CustomerCode: d.Customer.CustomerCode,
-	}, h.now().Add(planPeriod))
+	}, planPeriod)
 	switch {
 	case errors.Is(err, database.ErrPaymentAlreadyApplied):
 		h.log.Info("billing_webhook_replay", "reference", d.Reference)

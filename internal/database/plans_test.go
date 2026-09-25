@@ -305,29 +305,61 @@ func TestApplyPlanPaymentAndReplay(t *testing.T) {
 	db := newTestDB(t)
 	ctx := context.Background()
 	tn := newTestTenant(t, db)
-	end := time.Now().UTC().Add(30 * 24 * time.Hour).Truncate(time.Second)
+	const period = 30 * 24 * time.Hour
+	before := time.Now().UTC()
 	p := Payment{Reference: "ref-1", TenantID: tn.ID, Plan: "plus", Amount: 600, Currency: "USD", CustomerCode: "CUS_1"}
-	if err := db.ApplyPlanPayment(ctx, p, end); err != nil {
+	if err := db.ApplyPlanPayment(ctx, p, period); err != nil {
 		t.Fatal(err)
 	}
 	tp, _ := db.GetTenantPlan(ctx, tn.ID)
-	if tp.Plan != "plus" || tp.Status != "active" || tp.CurrentPeriodEnd == nil || !tp.CurrentPeriodEnd.Equal(end) || tp.PaystackCustomerCode == nil {
+	if tp.Plan != "plus" || tp.Status != "active" || tp.CurrentPeriodEnd == nil || tp.PaystackCustomerCode == nil {
 		t.Fatalf("unexpected plan after payment: %+v", tp)
 	}
-	// Replay with a later end must change nothing.
-	if err := db.ApplyPlanPayment(ctx, p, end.Add(60*24*time.Hour)); !errors.Is(err, ErrPaymentAlreadyApplied) {
+	firstEnd := *tp.CurrentPeriodEnd
+	if d := firstEnd.Sub(before.Add(period)); d < -5*time.Second || d > 5*time.Second {
+		t.Fatalf("expected period_end ~= now+%v, got %v (before=%v)", period, firstEnd, before)
+	}
+	// Replay must change nothing.
+	if err := db.ApplyPlanPayment(ctx, p, 60*24*time.Hour); !errors.Is(err, ErrPaymentAlreadyApplied) {
 		t.Fatalf("replay: want ErrPaymentAlreadyApplied, got %v", err)
 	}
 	tp, _ = db.GetTenantPlan(ctx, tn.ID)
-	if !tp.CurrentPeriodEnd.Equal(end) {
+	if !tp.CurrentPeriodEnd.Equal(firstEnd) {
 		t.Fatalf("replay extended the period to %v", tp.CurrentPeriodEnd)
 	}
-	p.Reference, p.TenantID = "ref-2", "no-such-tenant"
-	if err := db.ApplyPlanPayment(ctx, p, end); !errors.Is(err, ErrNotFound) {
+	// A genuine renewal of the SAME plan while still active EXTENDS from
+	// the existing period_end, not from now (CodeRabbit, PR #24) - an
+	// owner renewing early must not lose the remaining paid days.
+	p2 := Payment{Reference: "ref-2", TenantID: tn.ID, Plan: "plus", Amount: 600, Currency: "USD"}
+	if err := db.ApplyPlanPayment(ctx, p2, period); err != nil {
+		t.Fatal(err)
+	}
+	tp, _ = db.GetTenantPlan(ctx, tn.ID)
+	wantExtended := firstEnd.Add(period)
+	if d := tp.CurrentPeriodEnd.Sub(wantExtended); d < -5*time.Second || d > 5*time.Second {
+		t.Fatalf("expected renewal to extend from the prior period_end (~%v), got %v", wantExtended, tp.CurrentPeriodEnd)
+	}
+	// A PLAN CHANGE (not the same plan) starts a fresh period from now,
+	// rather than carrying over time priced under the old plan.
+	beforeUpgrade := time.Now().UTC()
+	p3 := Payment{Reference: "ref-3", TenantID: tn.ID, Plan: "pro", Amount: 2400, Currency: "USD"}
+	if err := db.ApplyPlanPayment(ctx, p3, period); err != nil {
+		t.Fatal(err)
+	}
+	tp, _ = db.GetTenantPlan(ctx, tn.ID)
+	if tp.Plan != "pro" {
+		t.Fatalf("expected plan changed to pro, got %v", tp.Plan)
+	}
+	if d := tp.CurrentPeriodEnd.Sub(beforeUpgrade.Add(period)); d < -5*time.Second || d > 5*time.Second {
+		t.Fatalf("expected an upgrade to start a fresh period from now, got %v", tp.CurrentPeriodEnd)
+	}
+
+	p.Reference, p.TenantID = "ref-unknown", "no-such-tenant"
+	if err := db.ApplyPlanPayment(ctx, p, period); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown tenant: want ErrNotFound, got %v", err)
 	}
 	p.TenantID, p.Plan = tn.ID, "free"
-	if err := db.ApplyPlanPayment(ctx, p, end); err == nil {
+	if err := db.ApplyPlanPayment(ctx, p, period); err == nil {
 		t.Fatal("free is not purchasable")
 	}
 }
@@ -338,10 +370,10 @@ func TestDowngradeLapsedPlans(t *testing.T) {
 	lapsed := newTestTenant(t, db)
 	current := newTestTenant(t, db)
 	now := time.Now().UTC()
-	if err := db.ApplyPlanPayment(ctx, Payment{Reference: "a", TenantID: lapsed.ID, Plan: "pro", Amount: 2400, Currency: "USD"}, now.Add(-time.Minute)); err != nil {
+	if err := db.ApplyPlanPayment(ctx, Payment{Reference: "a", TenantID: lapsed.ID, Plan: "pro", Amount: 2400, Currency: "USD"}, -time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.ApplyPlanPayment(ctx, Payment{Reference: "b", TenantID: current.ID, Plan: "plus", Amount: 600, Currency: "USD"}, now.Add(time.Hour)); err != nil {
+	if err := db.ApplyPlanPayment(ctx, Payment{Reference: "b", TenantID: current.ID, Plan: "plus", Amount: 600, Currency: "USD"}, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	n, err := db.DowngradeLapsedPlans(ctx, now)
@@ -351,6 +383,18 @@ func TestDowngradeLapsedPlans(t *testing.T) {
 	tp, _ := db.GetTenantPlan(ctx, lapsed.ID)
 	if tp.Plan != "free" || tp.Status != "lapsed" {
 		t.Fatalf("lapsed tenant: %+v", tp)
+	}
+	// The lapsed tenant's retention window must be pinned to its former
+	// plan's 90 days (pro), NOT silently shrunk to Free's 7 - a real
+	// data-loss bug the review caught (PR #24): without this, the next
+	// retention-purge run would hard-delete anything between 7 and 90
+	// days old for every tenant whose paid plan just lapsed.
+	lp, err := db.GetTenant(ctx, lapsed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lp.RetentionDays == nil || *lp.RetentionDays != 90 {
+		t.Fatalf("expected retention_days pinned to 90 (pro) on lapse, got %v", lp.RetentionDays)
 	}
 	tp, _ = db.GetTenantPlan(ctx, current.ID)
 	if tp.Plan != "plus" || tp.Status != "active" {

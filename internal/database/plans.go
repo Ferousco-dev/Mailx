@@ -207,9 +207,17 @@ type Payment struct {
 }
 
 // ApplyPlanPayment atomically records the payment reference (primary key:
-// a replay is ErrPaymentAlreadyApplied) and sets the tenant's plan active
-// until periodEnd. ErrNotFound if the tenant does not exist.
-func (db *DB) ApplyPlanPayment(ctx context.Context, p Payment, periodEnd time.Time) error {
+// a replay is ErrPaymentAlreadyApplied) and extends the tenant's plan by
+// period. ErrNotFound if the tenant does not exist.
+//
+// A renewal of the SAME plan while still active extends from the LATER of
+// now and the current plan_current_period_end, rather than overwriting it
+// from now - otherwise an owner renewing a few days early would simply
+// lose those remaining paid days (CodeRabbit, PR #24). A plan CHANGE
+// (upgrade/downgrade) or a renewal after the plan had already lapsed
+// starts a fresh period from now instead: carrying over remaining time
+// priced under a DIFFERENT plan has no well-defined meaning here.
+func (db *DB) ApplyPlanPayment(ctx context.Context, p Payment, period time.Duration) error {
 	if !billing.IsPaid(p.Plan) {
 		return fmt.Errorf("database: plan %q is not purchasable", p.Plan)
 	}
@@ -224,9 +232,13 @@ func (db *DB) ApplyPlanPayment(ctx context.Context, p Payment, periodEnd time.Ti
 		customer = &p.CustomerCode
 	}
 	tag, err := tx.Exec(ctx, `
-		UPDATE tenants SET plan = $2, plan_status = 'active', plan_current_period_end = $3,
+		UPDATE tenants SET plan = $2, plan_status = 'active',
+		       plan_current_period_end = GREATEST(now(),
+		           CASE WHEN plan = $2 AND plan_status = 'active' AND plan_current_period_end > now()
+		                THEN plan_current_period_end ELSE now() END
+		       ) + make_interval(secs => $3),
 		       paystack_customer_code = COALESCE($4, paystack_customer_code)
-		WHERE id = $1`, p.TenantID, p.Plan, periodEnd, customer)
+		WHERE id = $1`, p.TenantID, p.Plan, period.Seconds(), customer)
 	if err != nil {
 		return fmt.Errorf("database: apply plan: %w", normalizeErr(err))
 	}
@@ -252,9 +264,24 @@ func (db *DB) ApplyPlanPayment(ctx context.Context, p Payment, periodEnd time.Ti
 // DowngradeLapsedPlans moves every paid tenant whose period ended before now
 // back to free with status 'lapsed', returning how many changed. MVP: no
 // automatic renewal charge is attempted (RSK-044).
+//
+// Before clearing plan, it PINS retention_days explicitly to the lapsing
+// plan's own window (COALESCE: only when the tenant has no existing
+// explicit override, which always wins per this column's normal
+// convention). Without this, a tenant that had retention_days = NULL
+// (relying on their paid plan's 30/90-day default) would silently drop to
+// Free's 7-day default the instant they lapse, and the next
+// retention-purge run would irreversibly hard-delete anything between 7
+// days and their old window (data-loss finding, PR #24 review) - a
+// renewal running even one hour late would be enough to trigger it.
+// Pinning the window here means a lapse only ever changes billing state,
+// never retention behavior.
 func (db *DB) DowngradeLapsedPlans(ctx context.Context, now time.Time) (int64, error) {
 	tag, err := db.pool.Exec(ctx, `
-		UPDATE tenants SET plan = 'free', plan_status = 'lapsed'
+		UPDATE tenants SET
+		       retention_days = COALESCE(retention_days,
+		           CASE plan WHEN 'plus' THEN 30 WHEN 'pro' THEN 90 END),
+		       plan = 'free', plan_status = 'lapsed'
 		WHERE plan <> 'free' AND plan_current_period_end < $1`, now)
 	if err != nil {
 		return 0, fmt.Errorf("database: downgrade lapsed plans: %w", normalizeErr(err))

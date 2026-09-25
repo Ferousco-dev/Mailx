@@ -61,3 +61,35 @@ func TestVerifySignature(t *testing.T) {
 		t.Fatal("empty secret must be refused")
 	}
 }
+
+// TestParseEventToleratesNonObjectMetadata is a regression test for a
+// CodeRabbit finding (PR #24): Paystack sends non-object metadata (e.g. 0
+// or "") for a transaction MailX's checkout never created (a payment page
+// or another integration on the same account). That must decode to an
+// empty Metadata, not fail ParseEvent - handleWebhook must still be able
+// to acknowledge such an event 200 rather than answering 400 and making
+// Paystack retry an event that can never become recognizable.
+func TestParseEventToleratesNonObjectMetadata(t *testing.T) {
+	for name, body := range map[string]string{
+		"integer metadata": `{"event":"charge.success","data":{"metadata":0}}`,
+		"string metadata":  `{"event":"charge.success","data":{"metadata":""}}`,
+		"null metadata":    `{"event":"charge.success","data":{"metadata":null}}`,
+		"array metadata":   `{"event":"charge.success","data":{"metadata":[]}}`,
+	} {
+		ev, err := ParseEvent([]byte(body))
+		if err != nil {
+			t.Fatalf("%s: expected no error, got %v", name, err)
+		}
+		if ev.Data.Metadata != (Metadata{}) {
+			t.Fatalf("%s: expected empty Metadata, got %+v", name, ev.Data.Metadata)
+		}
+	}
+	// A genuine object still decodes normally.
+	ev, err := ParseEvent([]byte(`{"event":"charge.success","data":{"metadata":{"tenant_id":"t1","plan":"plus"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Data.Metadata != (Metadata{TenantID: "t1", Plan: "plus"}) {
+		t.Fatalf("expected real metadata to decode, got %+v", ev.Data.Metadata)
+	}
+}

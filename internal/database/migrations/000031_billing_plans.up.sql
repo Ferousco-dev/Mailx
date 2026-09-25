@@ -9,6 +9,19 @@ ALTER TABLE tenants
     ADD COLUMN plan_current_period_end TIMESTAMPTZ,
     ADD COLUMN paystack_customer_code TEXT;
 
+-- Pin every PRE-EXISTING tenant's effective retention window at today's
+-- flat default (90 days, DefaultRetentionDays) by making it explicit. A
+-- NULL retention_days now falls back to the tenant's PLAN's window when
+-- enforcement is on (Free = 7 days) instead of the flat 90 - without this
+-- backfill, an operator turning on MAILX_PAYSTACK_SECRET_KEY for the first
+-- time on an existing deployment would silently shrink every tenant's
+-- retention window from 90 to 7 days, and the next hourly retention-purge
+-- run would irreversibly hard-delete any terminal message between 7 and 90
+-- days old (data-loss finding, PR #24 review). A brand-new tenant created
+-- after billing is enabled has no messages yet, so the plan's own window
+-- applying to it from day one is correct, not a regression.
+UPDATE tenants SET retention_days = 90 WHERE retention_days IS NULL;
+
 -- The lapse ticker scans only paid tenants.
 CREATE INDEX idx_tenants_paid_period_end ON tenants (plan_current_period_end) WHERE plan <> 'free';
 

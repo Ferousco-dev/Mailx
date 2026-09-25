@@ -286,7 +286,7 @@ func TestPlanEnforcementAtAPI(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "daily_send_limit_reached") || rec.Header().Get("Retry-After") == "" {
 		t.Fatalf("over daily cap: %d %s", rec.Code, rec.Body)
 	}
-	if err := db.ApplyPlanPayment(ctx, database.Payment{Reference: "r", TenantID: tenantID, Plan: "plus", Amount: 600, Currency: "USD"}, timeNowPlusDay()); err != nil {
+	if err := db.ApplyPlanPayment(ctx, database.Payment{Reference: "r", TenantID: tenantID, Plan: "plus", Amount: 600, Currency: "USD"}, 24*time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	if c := send(); c != http.StatusAccepted {
@@ -313,8 +313,6 @@ func fillToday(ctx context.Context, db *database.DB, tenantID string, n int) err
 	}
 	return nil
 }
-
-func timeNowPlusDay() time.Time { return time.Now().UTC().Add(24 * time.Hour) }
 
 func TestBroadcastPlanGate(t *testing.T) {
 	a := newDKIMAPI(t)
