@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -322,11 +323,23 @@ func TestAccessTokenRoundTripsAndRejectsTamperedOrExpired(t *testing.T) {
 
 // fakeMailer records calls instead of sending; ForgotPassword's
 // anti-enumeration behavior only calls it when the account exists.
+// Guarded by mu since a concurrency regression test fires several
+// InviteToOrganization calls against one shared fakeMailer at once
+// (Greptile P1, PR #23: an unsynchronized slice append here raced under
+// -race and could silently drop a recorded call).
 type fakeMailer struct {
-	calls []struct{ to, subject, text, html string }
+	mu       sync.Mutex
+	calls    []struct{ to, subject, text, html string }
+	failNext bool // when true, the NEXT call fails (and is not recorded) then resets
 }
 
 func (m *fakeMailer) SendSystemEmail(_ context.Context, to, subject, text, html string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.failNext {
+		m.failNext = false
+		return fmt.Errorf("fakeMailer: simulated send failure")
+	}
 	m.calls = append(m.calls, struct{ to, subject, text, html string }{to, subject, text, html})
 	return nil
 }

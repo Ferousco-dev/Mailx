@@ -184,6 +184,16 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		orgsAuthenticated := humanAuthMiddleware(extras[0].humanAuth)
 		mux.Handle("POST /v1/orgs", orgsAuthenticated(http.HandlerFunc(ha.handleCreateOrg)))
 		mux.Handle("GET /v1/orgs", orgsAuthenticated(http.HandlerFunc(ha.handleListOrgs)))
+		// Owner-only, JWT-authenticated, then its own tighter per-human
+		// bucket (see orgInviteLimitMiddleware's doc) — chained in that
+		// order so the limiter always has a real human ID to key on.
+		mux.Handle("POST /v1/orgs/{id}/invites", orgsAuthenticated(chain(http.HandlerFunc(ha.handleCreateInvite), orgInviteLimitMiddleware(abuse))))
+		// Deliberately NOT behind orgsAuthenticated: the invitee may have no
+		// account yet, so a bearer token here is optional — see
+		// handleAcceptInvite's doc. Still rate-limited by IP
+		// (orgInviteAcceptIPLimitMiddleware) since this route is public and
+		// the no-account-yet path runs a full bcrypt hash per call.
+		mux.Handle("POST /v1/orgs/invites/accept", chain(http.HandlerFunc(ha.handleAcceptInvite), orgInviteAcceptIPLimitMiddleware(abuse)))
 	}
 	if len(extras) > 0 && extras[0].feedback != nil {
 		// Deliberately NOT under /v1 and NOT authenticateMiddleware: this is the

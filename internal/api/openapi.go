@@ -138,6 +138,35 @@ const openAPISpec = `{
         }
       }
     },
+    "/orgs/{id}/invites": {
+      "post": {
+        "summary": "Invite someone to join the organization by email",
+        "description": "Requires a human access token (HumanAuth) belonging to an OWNER of this organization (403 not_org_owner otherwise). No separate invite-code flow: only the invitee's email is needed. Sends an email (via MailX's own outbound pipeline) showing the org name, org logo and inviter avatar when set, and an accept link. The token is single-use and expires 5 hours after issuance. Rate-limited per inviting human, separately from and tighter than ordinary API traffic, since it triggers a real outbound email send.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [
+          {"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}
+        ],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/InviteRequest"}}}},
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"message": {"type": "string"}}}}}},
+          "403": {"description": "Caller is not an owner of this organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/orgs/invites/accept": {
+      "post": {
+        "summary": "Accept an organization invitation",
+        "description": "Accepts a pending invitation by token. If the request carries a valid human Authorization bearer token, the invite is accepted under that existing account (its email must match the invitation's, or 403 invitation_email_mismatch). Otherwise name and password are required and a new account is created (using the invitation's own email, never a client-supplied one) and joined to the organization in one atomic call. The token is single-use and expires 5 hours after issuance.",
+        "security": [],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AcceptInviteRequest"}}}},
+        "responses": {
+          "200": {"description": "OK. \"session\" is present only when this call created a new account.", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/AcceptInviteResponse"}}}},
+          "403": {"description": "Invitation is for a different email than the authenticated account", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "409": {"description": "An account with the invitation's email already exists (log in and retry)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "422": {"description": "Invalid request, or the invitation token is invalid/expired/accepted", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
     "/emails": {
       "post": {
         "summary": "Send an email",
@@ -2868,6 +2897,29 @@ const openAPISpec = `{
         "type": "object",
         "properties": {
           "data": {"type": "array", "items": {"$ref": "#/components/schemas/Organization"}}
+        }
+      },
+      "InviteRequest": {
+        "type": "object",
+        "required": ["email"],
+        "properties": {
+          "email": {"type": "string", "format": "email"}
+        }
+      },
+      "AcceptInviteRequest": {
+        "type": "object",
+        "required": ["token"],
+        "properties": {
+          "token": {"type": "string"},
+          "name": {"type": "string", "description": "Required only when accepting with no existing session (creates the account)."},
+          "password": {"type": "string", "format": "password", "minLength": 8, "description": "Required only when accepting with no existing session (creates the account)."}
+        }
+      },
+      "AcceptInviteResponse": {
+        "type": "object",
+        "properties": {
+          "organization": {"$ref": "#/components/schemas/Organization"},
+          "session": {"allOf": [{"$ref": "#/components/schemas/Session"}], "description": "Present only when accepting created a new account."}
         }
       },
       "SendEmailRequest": {

@@ -18,6 +18,9 @@ type Tenant struct {
 	// window - see internal/database/retention.go's DefaultRetentionDays
 	// for what applies in that case.
 	RetentionDays *int
+	// LogoURL is nil until the org sets one; a plain URL, no upload
+	// pipeline (see migration 000030's doc). Used by org-invite emails.
+	LogoURL *string
 }
 
 // CreateTenant inserts a new tenant and returns its generated ID.
@@ -44,8 +47,8 @@ func (db *DB) CreateTenant(ctx context.Context, name string) (Tenant, error) {
 func (db *DB) GetTenant(ctx context.Context, id string) (Tenant, error) {
 	var t Tenant
 	err := db.pool.QueryRow(ctx,
-		`SELECT id, name, created_at, retention_days FROM tenants WHERE id = $1`, id,
-	).Scan(&t.ID, &t.Name, &t.CreatedAt, &t.RetentionDays)
+		`SELECT id, name, created_at, retention_days, logo_url FROM tenants WHERE id = $1`, id,
+	).Scan(&t.ID, &t.Name, &t.CreatedAt, &t.RetentionDays, &t.LogoURL)
 	if err != nil {
 		return Tenant{}, normalizeErr(err)
 	}

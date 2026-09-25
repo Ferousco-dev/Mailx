@@ -66,6 +66,15 @@ type Policy struct {
 	// dangerous credential-change action.
 	PasswordResetIPRate  float64
 	PasswordResetIPBurst int
+	// OrgInviteRate/OrgInviteBurst bound POST /v1/orgs/{id}/invites per
+	// inviting human (not IP — unlike the auth-surface buckets above, this
+	// caller is already authenticated, so their human ID is a stronger,
+	// unspoofable key than an IP would be). Deliberately its own tighter
+	// bucket, not the general requestLimitMiddleware tenant/key buckets:
+	// this endpoint sends a real outbound email per call, the same
+	// email-bombing concern PasswordResetIPRate exists for.
+	OrgInviteRate  float64
+	OrgInviteBurst int
 }
 
 const (
@@ -89,6 +98,7 @@ func DefaultPolicy() Policy {
 		MaxRecipientsPerMessage: 50,
 		AuthIPRate:              1, AuthIPBurst: 10,
 		PasswordResetIPRate: 1.0 / 60, PasswordResetIPBurst: 3,
+		OrgInviteRate: 1.0 / 30, OrgInviteBurst: 10,
 	}
 }
 
@@ -117,6 +127,7 @@ func (p Policy) Validate() error {
 		count("max recipients per message", p.MaxRecipientsPerMessage, 1000),
 		rate("auth IP rate", p.AuthIPRate), count("auth IP burst", p.AuthIPBurst, maxBurst),
 		rate("password reset IP rate", p.PasswordResetIPRate), count("password reset IP burst", p.PasswordResetIPBurst, maxBurst),
+		rate("org invite rate", p.OrgInviteRate), count("org invite burst", p.OrgInviteBurst, maxBurst),
 	} {
 		if e != nil {
 			return e
