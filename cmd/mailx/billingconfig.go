@@ -8,6 +8,7 @@ import (
 	"github.com/Ferousco-dev/mailx/internal/api"
 	"github.com/Ferousco-dev/mailx/internal/billing"
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/secretbox"
 )
 
 // buildBillingConfig wires Paystack billing from MAILX_PAYSTACK_SECRET_KEY.
@@ -29,8 +30,24 @@ func buildBillingConfig(db *database.DB) (*api.BillingConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	cfg := &api.BillingConfig{Paystack: ps, CallbackURL: os.Getenv("MAILX_PAYSTACK_CALLBACK_URL")}
+	// MAILX_BILLING_MASTER_KEY (base64, 32 bytes; its own key, never shared
+	// with the DKIM/webhook keys) encrypts saved card authorizations. Unset:
+	// auto-renewal is unavailable (reminders still go out); set but invalid:
+	// startup fails rather than silently disabling a money path.
+	if enc := os.Getenv("MAILX_BILLING_MASTER_KEY"); enc != "" {
+		key, err := secretbox.DecodeKey(enc, "MAILX_BILLING_MASTER_KEY")
+		if err != nil {
+			return nil, err
+		}
+		box, err := secretbox.New(key)
+		if err != nil {
+			return nil, err
+		}
+		cfg.AuthBox = box
+	}
 	db.EnablePlanEnforcement()
-	return &api.BillingConfig{Paystack: ps, CallbackURL: os.Getenv("MAILX_PAYSTACK_CALLBACK_URL")}, nil
+	return cfg, nil
 }
 
 // enablePlanEnforcementFromEnv is the admin-CLI equivalent (no routes): it
@@ -41,13 +58,15 @@ func enablePlanEnforcementFromEnv(db *database.DB) {
 	}
 }
 
-// planLapseInterval is how often lapsed paid plans are downgraded.
+// planLapseInterval is how often the billing pass (reminders, auto-renewal
+// charges, then lapsing) runs.
 const planLapseInterval = time.Hour
 
-// runPlanLapse downgrades paid tenants whose period has ended. MVP LIMITATION
-// (RSK-044): Plus/Pro do NOT auto-renew. No recurring charge is attempted;
-// the owner must run checkout again each 30-day cycle or drop to Free.
-func runPlanLapse(ctx context.Context, db *database.DB, o obs) error {
+// runPlanLapse runs the hourly billing pass: renewer (reminders before every
+// period end; opt-in auto-renewal charges, DEC-235..238) then lapse of any
+// paid tenant whose period has ended (retention pinned, DEC-227). renewer may
+// be nil (no system mailer): then nothing is reminded or charged.
+func runPlanLapse(ctx context.Context, db *database.DB, renewer *api.Renewer, o obs) error {
 	ticker := time.NewTicker(planLapseInterval)
 	defer ticker.Stop()
 	for {
@@ -55,6 +74,9 @@ func runPlanLapse(ctx context.Context, db *database.DB, o obs) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
+			if renewer != nil {
+				renewer.RunOnce(ctx, time.Now().UTC())
+			}
 			n, err := db.DowngradeLapsedPlans(ctx, time.Now().UTC())
 			if err != nil {
 				o.log.Warn("plan_lapse_failed", "error", err.Error())

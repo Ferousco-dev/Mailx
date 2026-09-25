@@ -120,11 +120,17 @@ func runFull() error {
 		return err
 	}
 	humanAuthOpts := []humanauth.Option{humanauth.WithDashboardBaseURL(dashboardBaseURL())}
-	if mailer := buildSystemMailer(api.NewSubmissionAcceptor(db, store, dkimSvc, abuse.apiControls(o), ident.Name())); mailer != nil {
+	mailer := buildSystemMailer(api.NewSubmissionAcceptor(db, store, dkimSvc, abuse.apiControls(o), ident.Name()))
+	if mailer != nil {
 		humanAuthOpts = append(humanAuthOpts, humanauth.WithMailer(mailer))
 	} else {
 		o.log.Warn("system_mailer_disabled", "hint", "MAILX_SYSTEM_TENANT_ID/MAILX_SYSTEM_FROM_ADDRESS not set: password reset tokens will be created but no email will be sent")
 	}
+	oauthMFAOpts, err := buildOAuthMFAOptions(o.log.Info)
+	if err != nil {
+		return err
+	}
+	humanAuthOpts = append(humanAuthOpts, oauthMFAOpts...)
 	humanAuthSvc, err := humanauth.NewService(db, jwtSecret(), humanAuthOpts...)
 	if err != nil {
 		return err
@@ -174,7 +180,16 @@ func runFull() error {
 		o.logged("retention-purge", func(ctx context.Context) error { return runRetentionPurge(ctx, db, store, o) }),
 	}
 	if billingCfg != nil {
-		components = append(components, o.logged("plan-lapse", func(ctx context.Context) error { return runPlanLapse(ctx, db, o) }))
+		var renewer *api.Renewer
+		if mailer != nil { // never pass a typed-nil *systemMailer as humanauth.Mailer
+			renewer = api.NewRenewer(db, billingCfg, mailer, o.log)
+		} else {
+			o.log.Warn("billing_renewal_disabled", "hint", "no system mailer: plan reminders and auto-renewal charges are off (a charge always requires a prior reminder)")
+		}
+		if billingCfg.AuthBox == nil {
+			o.log.Warn("billing_auto_renew_unavailable", "hint", "MAILX_BILLING_MASTER_KEY not set: cards are not saved and auto-renewal cannot be enabled; reminders still sent")
+		}
+		components = append(components, o.logged("plan-lapse", func(ctx context.Context) error { return runPlanLapse(ctx, db, renewer, o) }))
 	}
 	if addr := observabilityAddr(); addr != "" {
 		op := observability.NewServer(addr, observability.OperatorMux(o.metrics, ready))

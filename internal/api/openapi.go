@@ -66,8 +66,88 @@ const openAPISpec = `{
         "security": [],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LoginRequest"}}}},
         "responses": {
-          "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}},
+          "200": {"description": "OK: either a Session, or (account has MFA enabled) an MFAChallenge to complete via /auth/mfa/verify", "content": {"application/json": {"schema": {"oneOf": [{"$ref": "#/components/schemas/Session"}, {"$ref": "#/components/schemas/MFAChallenge"}]}}}},
           "401": {"description": "Invalid credentials", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/auth/oauth/{provider}/start": {
+      "get": {
+        "summary": "Start Google/GitHub sign-in",
+        "description": "Public. provider is google or github. Returns the provider consent URL carrying a single-use, 10-minute state value. 404 oauth_provider_not_configured when that provider's MAILX_*_OAUTH_CLIENT_ID/SECRET are unset. IP rate-limited like login.",
+        "security": [],
+        "parameters": [{"name": "provider", "in": "path", "required": true, "schema": {"type": "string", "enum": ["google", "github"]}}],
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"authorization_url": {"type": "string"}}}}}},
+          "404": {"description": "Provider not configured", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/auth/oauth/{provider}/callback": {
+      "get": {
+        "summary": "Complete Google/GitHub sign-in",
+        "description": "Public; the provider redirects here (redirect_uri = MAILX_OAUTH_REDIRECT_BASE_URL + this path). Validates and consumes state, exchanges code, and requires a provider-verified email. Links to an existing account with the same (case-insensitive) email, otherwise creates one with no usable password. Returns a Session, or an MFAChallenge when the account has MFA enabled.",
+        "security": [],
+        "parameters": [
+          {"name": "provider", "in": "path", "required": true, "schema": {"type": "string", "enum": ["google", "github"]}},
+          {"name": "code", "in": "query", "schema": {"type": "string"}},
+          {"name": "state", "in": "query", "required": true, "schema": {"type": "string"}}
+        ],
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"oneOf": [{"$ref": "#/components/schemas/Session"}, {"$ref": "#/components/schemas/MFAChallenge"}]}}}},
+          "401": {"description": "invalid_oauth_state or oauth_provider_error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "404": {"description": "Provider not configured", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/auth/mfa/enroll": {
+      "post": {
+        "summary": "Start TOTP MFA enrollment",
+        "description": "Requires a human access token. Returns a new TOTP secret, an otpauth:// URI for client-side QR rendering, and 10 single-use backup codes, shown once. Not active until /auth/mfa/confirm. 404 mfa_not_configured without MAILX_MFA_MASTER_KEY; 409 mfa_already_enabled.",
+        "security": [{"HumanAuth": []}],
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"secret": {"type": "string"}, "otpauth_uri": {"type": "string"}, "backup_codes": {"type": "array", "items": {"type": "string"}}}}}}},
+          "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "409": {"description": "MFA already enabled", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/auth/mfa/confirm": {
+      "post": {
+        "summary": "Activate MFA with a code from the pending secret",
+        "description": "Requires a human access token and body {code}. Rate-limited by the dedicated MFA per-IP bucket.",
+        "security": [{"HumanAuth": []}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["code"], "properties": {"code": {"type": "string"}}}}}},
+        "responses": {
+          "200": {"description": "MFA enabled", "content": {"application/json": {"schema": {"type": "object", "properties": {"mfa_enabled": {"type": "boolean"}}}}}},
+          "409": {"description": "No pending enrollment", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "422": {"description": "Incorrect code", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "429": {"description": "Rate limited", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/auth/mfa/disable": {
+      "post": {
+        "summary": "Disable MFA (password re-confirmation required)",
+        "description": "Requires a human access token and body {password}. Removes the secret, backup codes, and pending challenges.",
+        "security": [{"HumanAuth": []}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["password"], "properties": {"password": {"type": "string"}}}}}},
+        "responses": {
+          "200": {"description": "MFA disabled", "content": {"application/json": {"schema": {"type": "object", "properties": {"mfa_enabled": {"type": "boolean"}}}}}},
+          "401": {"description": "Wrong password or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/auth/mfa/verify": {
+      "post": {
+        "summary": "Complete an MFA login",
+        "description": "Public. Body {mfa_token, code}: the token from an MFAChallenge plus a 6-digit TOTP code (±30s skew, each code accepted once) or a backup code (single-use). The challenge lives 5 minutes, is single-use, and is burned after 5 wrong codes; it is never accepted as an access token. Dedicated tight per-IP rate limit.",
+        "security": [],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["mfa_token", "code"], "properties": {"mfa_token": {"type": "string"}, "code": {"type": "string"}}}}}},
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Session"}}}},
+          "401": {"description": "invalid_mfa (challenge invalid/expired/used or code incorrect)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "429": {"description": "Rate limited", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
         }
       }
     },
@@ -275,9 +355,23 @@ const openAPISpec = `{
           {"name": "tenant_id", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}
         ],
         "responses": {
-          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"tenant_id": {"type": "string"}, "plan": {"type": "string", "enum": ["free", "plus", "pro"]}, "status": {"type": "string", "enum": ["active", "lapsed"]}, "current_period_end": {"type": "string", "format": "date-time", "nullable": true}}}}}},
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"tenant_id": {"type": "string"}, "plan": {"type": "string", "enum": ["free", "plus", "pro"]}, "status": {"type": "string", "enum": ["active", "lapsed"]}, "current_period_end": {"type": "string", "format": "date-time", "nullable": true}, "auto_renew": {"type": "boolean"}, "card_on_file": {"type": "boolean"}}}}}},
           "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
           "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/billing/auto-renew": {
+      "patch": {
+        "summary": "Turn automatic plan renewal on or off",
+        "description": "MailX Cloud only. Owner of tenant_id only (HumanAuth). Off by default. Never charges and takes no amount: when on, and a reusable card was saved from a previous successful checkout, MailX charges the server-side plan price itself shortly before the period ends, only after emailing owners a reminder at least 24 hours in advance. Owners are reminded before every period end whether or not auto-renew is on. 503 auto_renew_unavailable when the deployment has no MAILX_BILLING_MASTER_KEY.",
+        "security": [{"HumanAuth": []}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["tenant_id", "auto_renew"], "properties": {"tenant_id": {"type": "string"}, "auto_renew": {"type": "boolean"}}}}}},
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"tenant_id": {"type": "string"}, "auto_renew": {"type": "boolean"}, "card_on_file": {"type": "boolean"}}}}}},
+          "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "403": {"description": "Caller is not an owner of the organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "503": {"description": "Automatic renewal not available on this deployment", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
         }
       }
     },
@@ -2949,6 +3043,15 @@ const openAPISpec = `{
       }
     },
     "schemas": {
+      "MFAChallenge": {
+        "type": "object",
+        "required": ["mfa_required", "mfa_token", "expires_at"],
+        "properties": {
+          "mfa_required": {"type": "boolean", "enum": [true]},
+          "mfa_token": {"type": "string", "description": "Opaque, single-use; only valid for POST /auth/mfa/verify"},
+          "expires_at": {"type": "string", "format": "date-time"}
+        }
+      },
       "SignUpRequest": {
         "type": "object",
         "required": ["name", "email", "password"],

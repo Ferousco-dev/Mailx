@@ -94,6 +94,9 @@ func (h *humanAuthHandler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session, err := h.svc.Login(r.Context(), req.Email, req.Password)
+	if writeMFARequired(w, err) {
+		return
+	}
 	if err != nil {
 		// Login intentionally returns the SAME error for "no such email"
 		// and "wrong password" — see humanauth.Service.Login's doc.
