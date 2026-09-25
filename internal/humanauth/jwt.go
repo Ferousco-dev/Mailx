@@ -4,7 +4,7 @@
 // deliberately separate code path from internal/auth (API-key
 // authentication for machine/service callers) — the two authenticate
 // different kinds of caller and must never be conflated. See
-// .ilana/decisions.md DEC-205/DEC-206.
+// .ilana/decisions.md DEC-207/DEC-208.
 package humanauth
 
 import (
