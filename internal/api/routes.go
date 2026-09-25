@@ -198,6 +198,21 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		// (orgInviteAcceptIPLimitMiddleware) since this route is public and
 		// the no-account-yet path runs a full bcrypt hash per call.
 		mux.Handle("POST /v1/orgs/invites/accept", chain(http.HandlerFunc(ha.handleAcceptInvite), orgInviteAcceptIPLimitMiddleware(abuse)))
+
+		// Dashboard backend (v0.47 phase 3a, DEC-228..230): profile, org
+		// detail, members, pending invites, and org-scoped analytics that
+		// delegate to the same analyticsHandler the API-key routes use.
+		dh := &dashboardHandler{db: h.db, now: func() time.Time { return time.Now().UTC() }}
+		mux.Handle("GET /v1/me", orgsAuthenticated(http.HandlerFunc(dh.handleGetMe)))
+		mux.Handle("PATCH /v1/me", orgsAuthenticated(http.HandlerFunc(dh.handlePatchMe)))
+		mux.Handle("GET /v1/orgs/{id}", orgsAuthenticated(http.HandlerFunc(dh.handleGetOrg)))
+		mux.Handle("PATCH /v1/orgs/{id}", orgsAuthenticated(http.HandlerFunc(dh.handlePatchOrg)))
+		mux.Handle("GET /v1/orgs/{id}/members", orgsAuthenticated(http.HandlerFunc(dh.handleListMembers)))
+		mux.Handle("DELETE /v1/orgs/{id}/members/{humanId}", orgsAuthenticated(http.HandlerFunc(dh.handleRemoveMember)))
+		mux.Handle("GET /v1/orgs/{id}/invites", orgsAuthenticated(http.HandlerFunc(dh.handleListInvites)))
+		mux.Handle("DELETE /v1/orgs/{id}/invites/{inviteId}", orgsAuthenticated(http.HandlerFunc(dh.handleRevokeInvite)))
+		mux.Handle("GET /v1/orgs/{id}/analytics/overview", orgsAuthenticated(dh.orgAnalytics(analytics.handleOverview)))
+		mux.Handle("GET /v1/orgs/{id}/analytics/timeseries", orgsAuthenticated(dh.orgAnalytics(analytics.handleTimeseries)))
 	}
 	if len(extras) > 0 && extras[0].billing != nil {
 		lg := extras[0].log
