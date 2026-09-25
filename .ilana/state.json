@@ -17,8 +17,8 @@
     "TC": 0,
     "DEF": 27,
     "CR": 24,
-    "RSK": 47,
-    "DEC": 234,
+    "RSK": 48,
+    "DEC": 238,
     "MET": 72,
     "ETH": 1
   },
@@ -34,10 +34,10 @@
     "G8": 1
   },
   "mailx": {
-    "last_completed_milestone": "v0.47 phase 3b (OAuth Google/GitHub + TOTP MFA, independently security-reviewed)",
-    "ilana_current_through": "v0.47 phase 3b",
+    "last_completed_milestone": "v0.47 phase 3c (plan auto-renewal + reminders)",
+    "ilana_current_through": "v0.47 phase 3c",
     "current_milestone": "v0.47 Human Accounts & Organizations",
-    "current_milestone_status": "v0.47 phase 1 (human auth, orgs, password reset, invitations), phase 2 (billing), phase 3a (dashboard backend), and phase 3b (OAuth + TOTP MFA, DEC-231..234, independently security-reviewed) complete; plan auto-renewal (RSK-044) still running as a parallel agent; leave-org/transfer-ownership, email change, org slug, email verification deferred",
-    "next_milestone": "v0.47 phase 3c (plan auto-renewal) or v0.48 (TBD)"
+    "current_milestone_status": "v0.47 phase 1 (human auth, orgs, password reset, invitations), phase 2 (billing), phase 3a (dashboard backend), phase 3b (OAuth + TOTP MFA, DEC-231..234, independently security-reviewed) and phase 3c (opt-in plan auto-renewal + reminders, DEC-235..238, RSK-044 closed, residuals RSK-048; pending live Paystack test-mode verification) complete; leave-org/transfer-ownership, email change, org slug, email verification deferred",
+    "next_milestone": "v0.48 (TBD); live Paystack test-mode verification of auto-renewal before launch (RSK-048)"
   }
 }

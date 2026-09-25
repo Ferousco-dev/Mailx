@@ -262,8 +262,9 @@ func (db *DB) ApplyPlanPayment(ctx context.Context, p Payment, period time.Durat
 }
 
 // DowngradeLapsedPlans moves every paid tenant whose period ended before now
-// back to free with status 'lapsed', returning how many changed. MVP: no
-// automatic renewal charge is attempted (RSK-044).
+// back to free with status 'lapsed', returning how many changed. Opt-in
+// auto-renewal (api.Renewer) runs before this each pass; a tenant whose
+// renewal did not succeed by period end lapses here like any other.
 //
 // Before clearing plan, it PINS retention_days explicitly to the lapsing
 // plan's own window (COALESCE: only when the tenant has no existing

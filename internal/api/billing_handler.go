@@ -11,6 +11,7 @@ import (
 
 	"github.com/Ferousco-dev/mailx/internal/billing"
 	"github.com/Ferousco-dev/mailx/internal/database"
+	"github.com/Ferousco-dev/mailx/internal/secretbox"
 )
 
 // BillingConfig enables /v1/billing/* (v0.47 phase 2, Paystack). Nil — the
@@ -21,6 +22,10 @@ import (
 type BillingConfig struct {
 	Paystack    *billing.Paystack
 	CallbackURL string
+	// AuthBox encrypts saved Paystack card authorizations at rest
+	// (MAILX_BILLING_MASTER_KEY). Nil disables auto-renewal entirely: no
+	// authorization is stored and auto_renew cannot be turned on (DEC-236).
+	AuthBox *secretbox.Box
 }
 
 // planPeriod is how long one successful charge keeps a paid plan active.
@@ -123,6 +128,8 @@ type subscriptionResponse struct {
 	Plan             string  `json:"plan"`
 	Status           string  `json:"status"`
 	CurrentPeriodEnd *string `json:"current_period_end"`
+	AutoRenew        bool    `json:"auto_renew"`
+	CardOnFile       bool    `json:"card_on_file"`
 }
 
 // handleSubscription returns an org's plan to any of its members.
@@ -152,7 +159,12 @@ func (h *billingHandler) handleSubscription(w http.ResponseWriter, r *http.Reque
 		writeError(w, r, newError(ErrInternal, "internal_error", "failed to load plan"))
 		return
 	}
-	resp := subscriptionResponse{TenantID: tenantID, Plan: tp.Plan, Status: tp.Status}
+	rs, err := h.db.GetRenewalSettings(r.Context(), tenantID)
+	if err != nil {
+		writeError(w, r, newError(ErrInternal, "internal_error", "failed to load plan"))
+		return
+	}
+	resp := subscriptionResponse{TenantID: tenantID, Plan: tp.Plan, Status: tp.Status, AutoRenew: rs.AutoRenew, CardOnFile: rs.CardOnFile}
 	if tp.CurrentPeriodEnd != nil {
 		s := tp.CurrentPeriodEnd.UTC().Format(time.RFC3339)
 		resp.CurrentPeriodEnd = &s
@@ -215,7 +227,83 @@ func (h *billingHandler) handleWebhook(w http.ResponseWriter, r *http.Request) {
 		h.log.Error("billing_webhook_apply_failed", "error", err.Error())
 		writeError(w, r, newError(ErrInternal, "internal_error", "failed to apply payment"))
 	default:
-		h.log.Info("billing_plan_applied", "tenant_id", d.Metadata.TenantID, "plan", plan.ID)
+		h.log.Info("billing_plan_applied", "tenant_id", d.Metadata.TenantID, "plan", plan.ID, "reference", d.Reference)
+		h.saveAuthorization(r, ev)
 		ack("applied")
 	}
+}
+
+// saveAuthorization stores a reusable card authorization from a verified,
+// just-applied charge.success, encrypted and bound to the tenant id. It is
+// only a capability: no charge is ever made unless the owner has turned
+// auto_renew on (DEC-236). Failures are logged, never surfaced to Paystack
+// (the payment itself is already applied; a retry would only be a replay).
+// The authorization code itself is never logged.
+func (h *billingHandler) saveAuthorization(r *http.Request, ev billing.Event) {
+	d := ev.Data
+	if h.cfg.AuthBox == nil || !d.Authorization.Reusable || d.Authorization.AuthorizationCode == "" || d.Customer.Email == "" {
+		return
+	}
+	ct, nonce, err := h.cfg.AuthBox.Encrypt([]byte(d.Authorization.AuthorizationCode), []byte(d.Metadata.TenantID))
+	if err == nil {
+		err = h.db.SaveRenewalAuthorization(r.Context(), d.Metadata.TenantID, ct, nonce, d.Customer.Email)
+	}
+	if err != nil {
+		h.log.Error("billing_authorization_save_failed", "tenant_id", d.Metadata.TenantID, "error", err.Error())
+		return
+	}
+	h.log.Info("billing_authorization_saved", "tenant_id", d.Metadata.TenantID)
+}
+
+type autoRenewRequest struct {
+	TenantID  string `json:"tenant_id"`
+	AutoRenew *bool  `json:"auto_renew"`
+}
+
+// handleAutoRenew lets an org OWNER opt in to (or out of) automatic renewal.
+// It never charges and accepts no amount: renewal charges are made later by
+// the Renewer at the server-side plan price, only after a reminder (DEC-237).
+func (h *billingHandler) handleAutoRenew(w http.ResponseWriter, r *http.Request) {
+	humanID, ok := humanIDFromContext(r.Context())
+	if !ok {
+		writeError(w, r, newError(ErrAuthentication, "invalid_access_token", "missing or invalid access token"))
+		return
+	}
+	if !acceptsJSONContentType(r.Header.Get("Content-Type")) {
+		writeError(w, r, newError(ErrUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json"))
+		return
+	}
+	var req autoRenewRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
+		writeError(w, r, newError(ErrInvalidRequest, "invalid_json", "request body is not valid JSON"))
+		return
+	}
+	if req.TenantID == "" {
+		writeError(w, r, newError(ErrValidation, "invalid_tenant", "tenant_id is required"))
+		return
+	}
+	if req.AutoRenew == nil {
+		writeError(w, r, newError(ErrValidation, "invalid_auto_renew", "auto_renew (boolean) is required"))
+		return
+	}
+	isOwner, err := h.db.IsTenantOwner(r.Context(), req.TenantID, humanID)
+	if err != nil {
+		writeError(w, r, newError(ErrInternal, "internal_error", "failed to check organization ownership"))
+		return
+	}
+	if !isOwner {
+		writeError(w, r, newError(ErrForbidden, "not_org_owner", "only an organization owner can change automatic renewal"))
+		return
+	}
+	if *req.AutoRenew && h.cfg.AuthBox == nil {
+		writeError(w, r, newError(ErrTemporarilyUnavailable, "auto_renew_unavailable", "automatic renewal is not available on this deployment"))
+		return
+	}
+	rs, err := h.db.SetAutoRenew(r.Context(), req.TenantID, *req.AutoRenew)
+	if err != nil {
+		writeError(w, r, newError(ErrInternal, "internal_error", "failed to update automatic renewal"))
+		return
+	}
+	h.log.Info("billing_auto_renew_set", "tenant_id", req.TenantID, "auto_renew", rs.AutoRenew, "by_human_id", humanID)
+	writeJSON(w, http.StatusOK, map[string]any{"tenant_id": req.TenantID, "auto_renew": rs.AutoRenew, "card_on_file": rs.CardOnFile})
 }

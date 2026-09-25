@@ -355,9 +355,23 @@ const openAPISpec = `{
           {"name": "tenant_id", "in": "query", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}
         ],
         "responses": {
-          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"tenant_id": {"type": "string"}, "plan": {"type": "string", "enum": ["free", "plus", "pro"]}, "status": {"type": "string", "enum": ["active", "lapsed"]}, "current_period_end": {"type": "string", "format": "date-time", "nullable": true}}}}}},
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"tenant_id": {"type": "string"}, "plan": {"type": "string", "enum": ["free", "plus", "pro"]}, "status": {"type": "string", "enum": ["active", "lapsed"]}, "current_period_end": {"type": "string", "format": "date-time", "nullable": true}, "auto_renew": {"type": "boolean"}, "card_on_file": {"type": "boolean"}}}}}},
           "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
           "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/billing/auto-renew": {
+      "patch": {
+        "summary": "Turn automatic plan renewal on or off",
+        "description": "MailX Cloud only. Owner of tenant_id only (HumanAuth). Off by default. Never charges and takes no amount: when on, and a reusable card was saved from a previous successful checkout, MailX charges the server-side plan price itself shortly before the period ends, only after emailing owners a reminder at least 24 hours in advance. Owners are reminded before every period end whether or not auto-renew is on. 503 auto_renew_unavailable when the deployment has no MAILX_BILLING_MASTER_KEY.",
+        "security": [{"HumanAuth": []}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["tenant_id", "auto_renew"], "properties": {"tenant_id": {"type": "string"}, "auto_renew": {"type": "boolean"}}}}}},
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"tenant_id": {"type": "string"}, "auto_renew": {"type": "boolean"}, "card_on_file": {"type": "boolean"}}}}}},
+          "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "403": {"description": "Caller is not an owner of the organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "503": {"description": "Automatic renewal not available on this deployment", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
         }
       }
     },
