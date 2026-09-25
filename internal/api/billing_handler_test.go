@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -153,6 +154,45 @@ func TestBillingCheckoutOwnerOnly(t *testing.T) {
 	}
 }
 
+func TestBillingCheckoutRejectsInvalidRequestsBeforePaystack(t *testing.T) {
+	b := newBillingAPI(t)
+	owner, err := b.svc.SignUp(context.Background(), "Ada", "ada@example.com", "hunter22hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	org, err := b.svc.CreateOrganization(context.Background(), owner.Human.ID, "Acme", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, body, contentType string
+		wantStatus              int
+		wantCode                string
+	}{
+		{"missing tenant", `{"plan":"plus"}`, "application/json", http.StatusUnprocessableEntity, "invalid_tenant"},
+		{"unknown plan", `{"tenant_id":"` + org.ID + `","plan":"enterprise"}`, "application/json", http.StatusUnprocessableEntity, "invalid_plan"},
+		{"malformed JSON", `{"tenant_id":`, "application/json", http.StatusBadRequest, "invalid_json"},
+		{"wrong content type", `{"tenant_id":"` + org.ID + `","plan":"plus"}`, "text/plain", http.StatusUnsupportedMediaType, "unsupported_media_type"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/billing/checkout", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer "+owner.AccessToken)
+			req.Header.Set("Content-Type", tc.contentType)
+			rec := httptest.NewRecorder()
+			b.mux.ServeHTTP(rec, req)
+			if rec.Code != tc.wantStatus || !strings.Contains(rec.Body.String(), `"code":"`+tc.wantCode+`"`) {
+				t.Fatalf("status = %d, body = %s; want %d %s", rec.Code, rec.Body, tc.wantStatus, tc.wantCode)
+			}
+			b.fp.mu.Lock()
+			calls := len(b.fp.reqs)
+			b.fp.mu.Unlock()
+			if calls != 0 {
+				t.Fatalf("invalid checkout made %d Paystack calls", calls)
+			}
+		})
+	}
+}
+
 func TestBillingWebhookSignatureAndReplay(t *testing.T) {
 	b := newBillingAPI(t)
 	ctx := context.Background()
@@ -211,6 +251,88 @@ func TestBillingWebhookSignatureAndReplay(t *testing.T) {
 	}
 }
 
+func TestBillingWebhookRejectsUnusableSignedCharges(t *testing.T) {
+	b := newBillingAPI(t)
+	tn := newTestTenant(t, b.db)
+	for _, tc := range []struct {
+		name   string
+		change func(map[string]any)
+	}{
+		{"missing reference", func(d map[string]any) { d["reference"] = "" }},
+		{"missing tenant", func(d map[string]any) { d["metadata"].(map[string]any)["tenant_id"] = "" }},
+		{"free plan", func(d map[string]any) { d["metadata"].(map[string]any)["plan"] = "free" }},
+		{"unknown plan", func(d map[string]any) { d["metadata"].(map[string]any)["plan"] = "enterprise" }},
+		{"failed charge", func(d map[string]any) { d["status"] = "failed" }},
+		{"wrong currency", func(d map[string]any) { d["currency"] = "NGN" }},
+		{"underpaid", func(d map[string]any) { d["amount"] = 599 }},
+		{"unknown tenant", func(d map[string]any) { d["metadata"].(map[string]any)["tenant_id"] = "missing-tenant" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := map[string]any{
+				"reference": "ref-" + tc.name, "status": "success", "amount": 600,
+				"currency": "USD", "metadata": map[string]any{"tenant_id": tn.ID, "plan": "plus"},
+			}
+			tc.change(data)
+			raw, err := json.Marshal(map[string]any{"event": "charge.success", "data": data})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rec := b.webhook(t, raw, b.ps.Sign(raw))
+			if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"status":"ignored"`) {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body)
+			}
+			tp, err := b.db.GetTenantPlan(context.Background(), tn.ID)
+			if err != nil || tp.Plan != billing.PlanFree {
+				t.Fatalf("unusable charge changed plan: %+v, %v", tp, err)
+			}
+		})
+	}
+}
+
+func TestBillingWebhookRejectsOversizedBodyAndSignedMissingEvent(t *testing.T) {
+	b := newBillingAPI(t)
+	raw := bytes.Repeat([]byte("x"), maxWebhookBody+1)
+	if rec := b.webhook(t, raw, b.ps.Sign(raw)); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized body: %d %s", rec.Code, rec.Body)
+	}
+	raw = []byte(`{"data":{}}`)
+	if rec := b.webhook(t, raw, b.ps.Sign(raw)); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "malformed_webhook") {
+		t.Fatalf("signed body without event: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestPlanLimitAPIError(t *testing.T) {
+	if got := planLimitAPIError(errors.New("storage unavailable"), true); got != nil {
+		t.Fatalf("non-plan error converted to plan refusal: %+v", got)
+	}
+	wrapped := fmt.Errorf("database: %w: the free plan allows 500 emails per day", database.ErrPlanLimit)
+	volume := planLimitAPIError(wrapped, true)
+	if volume == nil || volume.Type != ErrRateLimited || volume.Code != "daily_send_limit_reached" ||
+		volume.RetryAfter < 1 || volume.RetryAfter > 24*60*60 ||
+		strings.Contains(volume.Message, "database:") || !strings.Contains(volume.Message, "upgrade your plan") {
+		t.Fatalf("volume refusal = %+v", volume)
+	}
+	cap := planLimitAPIError(wrapped, false)
+	if cap == nil || cap.Type != ErrForbidden || cap.Code != "plan_limit_reached" || cap.RetryAfter != 0 {
+		t.Fatalf("cap refusal = %+v", cap)
+	}
+}
+
+func TestSecondsUntilUTCMidnight(t *testing.T) {
+	for _, tc := range []struct {
+		at   time.Time
+		want int
+	}{
+		{time.Date(2026, time.September, 25, 0, 0, 0, 0, time.UTC), 86400},
+		{time.Date(2026, time.September, 25, 12, 0, 0, 0, time.UTC), 43200},
+		{time.Date(2026, time.September, 25, 23, 59, 59, 500000000, time.UTC), 1},
+	} {
+		if got := secondsUntilUTCMidnight(tc.at); got != tc.want {
+			t.Errorf("secondsUntilUTCMidnight(%s) = %d, want %d", tc.at, got, tc.want)
+		}
+	}
+}
+
 func mustSign(t *testing.T, key string, body []byte) string {
 	t.Helper()
 	p, err := billing.NewPaystack(key, "")
@@ -232,6 +354,42 @@ func TestBillingSubscriptionMembersOnly(t *testing.T) {
 	}
 	if rec := b.do(t, "GET", "/v1/billing/subscription?tenant_id="+org.ID, other.AccessToken, nil); rec.Code != http.StatusNotFound {
 		t.Fatalf("non-member: %d", rec.Code)
+	}
+}
+
+func TestBillingSubscriptionShowsActivePaidPeriod(t *testing.T) {
+	b := newBillingAPI(t)
+	ctx := context.Background()
+	owner, err := b.svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter")
+	if err != nil {
+		t.Fatal(err)
+	}
+	org, err := b.svc.CreateOrganization(ctx, owner.Human.ID, "Acme", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const period = 30 * 24 * time.Hour
+	before := time.Now().UTC()
+	if err := b.db.ApplyPlanPayment(ctx, database.Payment{Reference: "ref-active", TenantID: org.ID, Plan: billing.PlanPlus, Amount: 600, Currency: "USD"}, period); err != nil {
+		t.Fatal(err)
+	}
+	rec := b.do(t, http.MethodGet, "/v1/billing/subscription?tenant_id="+org.ID, owner.AccessToken, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body)
+	}
+	var got subscriptionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.TenantID != org.ID || got.Plan != billing.PlanPlus || got.Status != "active" || got.CurrentPeriodEnd == nil {
+		t.Fatalf("subscription = %+v", got)
+	}
+	gotEnd, err := time.Parse(time.RFC3339, *got.CurrentPeriodEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := gotEnd.Sub(before.Add(period)); d < -5*time.Second || d > 5*time.Second {
+		t.Fatalf("current_period_end = %v, want ~= now+%v (before=%v)", gotEnd, period, before)
 	}
 }
 

@@ -1,7 +1,17 @@
 package billing
 
 import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha512"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -91,5 +101,151 @@ func TestParseEventToleratesNonObjectMetadata(t *testing.T) {
 	}
 	if ev.Data.Metadata != (Metadata{TenantID: "t1", Plan: "plus"}) {
 		t.Fatalf("expected real metadata to decode, got %+v", ev.Data.Metadata)
+	}
+}
+
+func TestInitializeTransactionRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name, callback string
+		wantCallback   bool
+	}{
+		{name: "with callback", callback: "https://mailx.example/billing/return", wantCallback: true},
+		{name: "without callback"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Method != http.MethodPost || r.URL.Path != "/transaction/initialize" {
+					t.Errorf("request = %s %s", r.Method, r.URL.Path)
+				}
+				if r.Header.Get("Authorization") != "Bearer sk_test_secret" || r.Header.Get("Content-Type") != "application/json" {
+					t.Errorf("unexpected request headers: %v", r.Header)
+				}
+				var body map[string]json.RawMessage
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				want := map[string]string{
+					"email": `"owner@example.com"`, "amount": "600", "currency": `"USD"`,
+					"metadata": `{"tenant_id":"tenant-1","plan":"plus"}`,
+				}
+				if tc.wantCallback {
+					want["callback_url"] = `"https://mailx.example/billing/return"`
+				}
+				if len(body) != len(want) {
+					t.Errorf("request fields = %v, want %v", body, want)
+				}
+				for key, value := range want {
+					if string(body[key]) != value {
+						t.Errorf("%s = %s, want %s", key, body[key], value)
+					}
+				}
+				_, _ = io.WriteString(w, `{"status":true,"data":{"authorization_url":"https://checkout.paystack.com/abc","reference":"ref-123"}}`)
+			}))
+			defer srv.Close()
+			p, err := NewPaystack("sk_test_secret", srv.URL+"/")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := p.InitializeTransaction(context.Background(), "owner@example.com", PlanFor(PlanPlus), Metadata{TenantID: "tenant-1", Plan: PlanPlus}, tc.callback)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls.Load() != 1 || got.AuthorizationURL != "https://checkout.paystack.com/abc" || got.Reference != "ref-123" {
+				t.Fatalf("calls = %d, result = %+v", calls.Load(), got)
+			}
+			if strings.Contains(p.String(), "sk_test_secret") {
+				t.Fatal("client string exposed secret key")
+			}
+		})
+	}
+}
+
+func TestInitializeTransactionRejectsFreePlanBeforeRequest(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1) }))
+	defer srv.Close()
+	p, err := NewPaystack("sk_test_secret", srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := p.InitializeTransaction(context.Background(), "owner@example.com", PlanFor(PlanFree), Metadata{}, "")
+	if err == nil || calls.Load() != 0 || result != (InitializeResult{}) {
+		t.Fatalf("free checkout: calls = %d, result = %+v, error = %v", calls.Load(), result, err)
+	}
+}
+
+func TestInitializeTransactionProviderFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		status      int
+		body        string
+		wantInError string
+	}{
+		{"HTTP failure", http.StatusBadGateway, `{"status":false,"message":"unavailable"}`, "HTTP 502"},
+		{"HTTP failure with success body", http.StatusBadGateway, `{"status":true,"data":{"authorization_url":"https://checkout.example","reference":"ref-123"}}`, "HTTP 502"},
+		{"provider refusal", http.StatusOK, `{"status":false,"message":"declined"}`, "declined"},
+		{"missing checkout URL", http.StatusOK, `{"status":true,"data":{"reference":"ref-123"}}`, "initialize failed"},
+		{"malformed response", http.StatusOK, `{"status":`, "decode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+			p, err := NewPaystack("sk_test_secret", srv.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := p.InitializeTransaction(context.Background(), "owner@example.com", PlanFor(PlanPlus), Metadata{}, "")
+			if err == nil || !strings.Contains(err.Error(), tc.wantInError) || result != (InitializeResult{}) {
+				t.Fatalf("result = %+v, error = %v; want %q", result, err, tc.wantInError)
+			}
+		})
+	}
+}
+
+func TestParseEvent(t *testing.T) {
+	raw := []byte(`{"event":"charge.success","data":{"reference":"ref-123","status":"success","amount":600,"currency":"USD","metadata":{"tenant_id":"tenant-1","plan":"plus"},"customer":{"customer_code":"CUS_1"}}}`)
+	event, err := ParseEvent(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event.Event != "charge.success" || event.Data.Reference != "ref-123" || event.Data.Status != "success" || event.Data.Amount != 600 || event.Data.Currency != "USD" || event.Data.Metadata != (Metadata{TenantID: "tenant-1", Plan: PlanPlus}) || event.Data.Customer.CustomerCode != "CUS_1" {
+		t.Fatalf("parsed event = %+v", event)
+	}
+	for _, tc := range []struct{ name, body string }{
+		{"invalid JSON", `{"event":`},
+		{"missing event", `{"data":{}}`},
+		{"empty event", `{"event":""}`},
+		{"wrong event type", `{"event":123}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseEvent([]byte(tc.body)); err == nil {
+				t.Fatalf("ParseEvent(%s) accepted malformed event", tc.body)
+			}
+		})
+	}
+}
+
+func TestSignatureMatchesHMACSHA512OfRawBody(t *testing.T) {
+	p, err := NewPaystack("sk_test_secret", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(" {\"event\":\"charge.success\"}\n")
+	mac := hmac.New(sha512.New, []byte("sk_test_secret"))
+	_, _ = mac.Write(body)
+	want := hex.EncodeToString(mac.Sum(nil))
+	if got := p.Sign(body); got != want {
+		t.Fatalf("signature = %s, want %s", got, want)
+	}
+	if err := p.VerifySignature(body, " \n"+strings.ToUpper(want)+"\t"); err != nil {
+		t.Fatalf("uppercase signature with surrounding whitespace rejected: %v", err)
+	}
+	if err := p.VerifySignature([]byte(strings.TrimSpace(string(body))), want); !errors.Is(err, ErrInvalidSignature) {
+		t.Fatalf("signature accepted body with different whitespace: %v", err)
 	}
 }
