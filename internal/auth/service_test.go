@@ -339,8 +339,15 @@ func TestServiceRotateRejectsExpiredKey(t *testing.T) {
 	}
 
 	svc.now = func() time.Time { return frozen.Add(2 * time.Hour) } // now past expiry
-	if _, _, err := svc.Rotate(ctx, record.KeyID, time.Hour); err == nil {
+	_, _, err = svc.Rotate(ctx, record.KeyID, time.Hour)
+	if err == nil {
 		t.Fatal("expected rotating an already-expired key to be rejected, not revive it")
+	}
+	// Wrapped in ErrExpired (CodeRabbit, PR #28) so a caller like the HTTP
+	// rotate handler can map this to 409 instead of a generic 500 - it
+	// used to be a bare fmt.Errorf with no matchable sentinel.
+	if !errors.Is(err, ErrExpired) {
+		t.Fatalf("expected err to wrap ErrExpired, got %v", err)
 	}
 }
 
@@ -356,7 +363,16 @@ func TestServiceRotateRejectsRevokedKey(t *testing.T) {
 	if err := svc.Revoke(ctx, record.KeyID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := svc.Rotate(ctx, record.KeyID, time.Hour); err == nil {
+	_, _, err = svc.Rotate(ctx, record.KeyID, time.Hour)
+	if err == nil {
 		t.Fatal("expected rotating a revoked key to be rejected")
+	}
+	// Wrapped in ErrRevoked (CodeRabbit, PR #28) for the same reason as
+	// ErrExpired above: this is exactly the race where a key is revoked
+	// concurrently between the HTTP handler's own unlocked pre-check and
+	// this call - the handler must be able to tell this apart from a real
+	// internal error.
+	if !errors.Is(err, ErrRevoked) {
+		t.Fatalf("expected err to wrap ErrRevoked, got %v", err)
 	}
 }

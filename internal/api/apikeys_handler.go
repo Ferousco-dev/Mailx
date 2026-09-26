@@ -177,9 +177,14 @@ func (h *orgAPIKeyHandler) handleRotate(w http.ResponseWriter, r *http.Request) 
 	// Grace 0: the old key stops authenticating immediately (DEC-247).
 	gen, rec, err := h.keys.Rotate(r.Context(), k.KeyID, 0)
 	if err != nil {
-		if errors.Is(err, database.ErrConflict) || errors.Is(err, database.ErrNotFound) {
-			// Lost a race with a concurrent revoke/rotate (re-checked under
-			// the row lock in database.RotateAPIKey).
+		if errors.Is(err, database.ErrConflict) || errors.Is(err, database.ErrNotFound) ||
+			errors.Is(err, auth.ErrRevoked) || errors.Is(err, auth.ErrExpired) {
+			// Lost a race where the key was revoked/expired (by a
+			// concurrent revoke, or simply reaching its expiry) between
+			// this handler's own unlocked pre-check above and the actual
+			// Rotate call - auth.Service.Rotate wraps ErrRevoked/ErrExpired
+			// for exactly this case (CodeRabbit, PR #28); previously this
+			// fell through to a generic 500 instead of the correct 409.
 			writeError(w, r, newError(ErrConflictType, "api_key_not_active", "only an active api key can be rotated; create a new one instead"))
 			return
 		}

@@ -156,10 +156,14 @@ func (s *Service) Rotate(ctx context.Context, keyID string, grace time.Duration)
 	// the grace window - exactly the opposite of what grace is for.
 	// Create a fresh key instead.
 	if old.RevokedAt != nil {
-		return Generated{}, database.APIKey{}, fmt.Errorf("auth: cannot rotate a revoked key; create a new one instead")
+		// Wrapped in ErrRevoked (CodeRabbit, PR #28) so a caller like the
+		// HTTP rotate handler can distinguish "key is dead" from a generic
+		// failure and answer 409, not 500, for the race where a key is
+		// revoked/expired between an unlocked pre-check and this call.
+		return Generated{}, database.APIKey{}, fmt.Errorf("auth: cannot rotate a revoked key; create a new one instead: %w", ErrRevoked)
 	}
 	if old.ExpiresAt != nil && !old.ExpiresAt.After(now) {
-		return Generated{}, database.APIKey{}, fmt.Errorf("auth: cannot rotate an already-expired key; create a new one instead")
+		return Generated{}, database.APIKey{}, fmt.Errorf("auth: cannot rotate an already-expired key; create a new one instead: %w", ErrExpired)
 	}
 	gen, err := Generate(s.pepper)
 	if err != nil {
