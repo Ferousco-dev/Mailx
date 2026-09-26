@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/Ferousco-dev/mailx/internal/humanauth"
@@ -60,13 +61,45 @@ func (h *humanAuthHandler) handleOAuthStart(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]string{"authorization_url": u})
 }
 
+// oauthCallbackRefererHosts is the browser's Referer host on a GENUINE
+// callback arrival: the provider's own consent page redirects the browser
+// here, so Referer (when the browser sends one at all) names the provider,
+// never our own frontend. Defense-in-depth against login CSRF (RSK-046):
+// the full fix needs client-side state binding that doesn't exist until a
+// real frontend consumes this API, but a forged callback link (the
+// practical delivery vector - a crafted URL in an email or on an
+// attacker's page) arrives with either no Referer or the WRONG one, never
+// this. A present-and-wrong Referer is rejected; an absent one is allowed,
+// since browsers/extensions legitimately omit it and this is best-effort
+// hardening, not the complete mitigation.
+var oauthCallbackRefererHosts = map[string][]string{
+	"google": {"accounts.google.com"},
+	"github": {"github.com"},
+}
+
 func (h *humanAuthHandler) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	provider := r.PathValue("provider")
+	if ref := r.Referer(); ref != "" {
+		if u, err := url.Parse(ref); err == nil && u.Host != "" {
+			ok := false
+			for _, host := range oauthCallbackRefererHosts[provider] {
+				if u.Host == host {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				writeError(w, r, newError(ErrAuthentication, "invalid_oauth_state", "sign-in state is missing, expired, or already used; start again"))
+				return
+			}
+		}
+	}
 	q := r.URL.Query()
 	code := q.Get("code")
 	if q.Get("error") != "" {
 		code = "" // consent denied: still consume the state, then report a provider error
 	}
-	session, err := h.svc.CompleteOAuth(r.Context(), r.PathValue("provider"), code, q.Get("state"))
+	session, err := h.svc.CompleteOAuth(r.Context(), provider, code, q.Get("state"))
 	if writeMFARequired(w, err) {
 		return
 	}
