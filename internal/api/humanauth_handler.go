@@ -208,6 +208,53 @@ func (h *humanAuthHandler) handleResetPassword(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]string{"message": "password updated; all other sessions have been signed out"})
 }
 
+type verifyEmailRequest struct {
+	Token string `json:"token"`
+}
+
+// handleVerifyEmail is public: the link may be opened on a device with no
+// session. Every token failure collapses to one generic error.
+func (h *humanAuthHandler) handleVerifyEmail(w http.ResponseWriter, r *http.Request) {
+	if !acceptsJSONContentType(r.Header.Get("Content-Type")) {
+		writeError(w, r, newError(ErrUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json"))
+		return
+	}
+	var req verifyEmailRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil || req.Token == "" {
+		writeError(w, r, newError(ErrInvalidRequest, "invalid_json", "token is required"))
+		return
+	}
+	if err := h.svc.VerifyEmail(r.Context(), req.Token); err != nil {
+		if errors.Is(err, humanauth.ErrEmailVerificationTokenInvalid) {
+			writeError(w, r, newError(ErrValidation, "invalid_verification_token", "this verification link is invalid or has expired"))
+			return
+		}
+		slog.Default().Error("verify_email_failed", "error", err.Error())
+		writeError(w, r, newError(ErrInternal, "internal_error", "could not verify email"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "email verified"})
+}
+
+// handleResendVerification ALWAYS responds with the same generic message
+// (unknown, already verified, sent, or internal failure) - same
+// anti-enumeration posture as handleForgotPassword.
+func (h *humanAuthHandler) handleResendVerification(w http.ResponseWriter, r *http.Request) {
+	if !acceptsJSONContentType(r.Header.Get("Content-Type")) {
+		writeError(w, r, newError(ErrUnsupportedMediaType, "unsupported_media_type", "Content-Type must be application/json"))
+		return
+	}
+	var req forgotPasswordRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil || req.Email == "" {
+		writeError(w, r, newError(ErrInvalidRequest, "invalid_json", "email is required"))
+		return
+	}
+	if err := h.svc.ResendVerification(r.Context(), req.Email); err != nil {
+		slog.Default().Error("resend_verification_failed", "error", err.Error())
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"message": "if an unverified account exists for that email, a verification link has been sent"})
+}
+
 type createOrgRequest struct {
 	Name string `json:"name"`
 	Slug string `json:"slug"`

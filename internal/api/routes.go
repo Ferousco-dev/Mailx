@@ -185,6 +185,8 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		mux.HandleFunc("POST /v1/auth/logout", ha.handleLogout)
 		mux.Handle("POST /v1/auth/forgot-password", chain(http.HandlerFunc(ha.handleForgotPassword), passwordResetIPLimitMiddleware(abuse)))
 		mux.Handle("POST /v1/auth/reset-password", chain(http.HandlerFunc(ha.handleResetPassword), passwordResetIPLimitMiddleware(abuse)))
+		mux.Handle("POST /v1/auth/verify-email", chain(http.HandlerFunc(ha.handleVerifyEmail), authIPLimitMiddleware(abuse)))
+		mux.Handle("POST /v1/auth/resend-verification", chain(http.HandlerFunc(ha.handleResendVerification), emailVerificationResendIPLimitMiddleware(abuse)))
 		orgsAuthenticated := humanAuthMiddleware(extras[0].humanAuth)
 		registerMFAAndOAuthRoutes(mux, ha, orgsAuthenticated, abuse)
 		mux.Handle("POST /v1/orgs", orgsAuthenticated(http.HandlerFunc(ha.handleCreateOrg)))
@@ -214,6 +216,15 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		mux.Handle("DELETE /v1/orgs/{id}/invites/{inviteId}", orgsAuthenticated(http.HandlerFunc(dh.handleRevokeInvite)))
 		mux.Handle("GET /v1/orgs/{id}/analytics/overview", orgsAuthenticated(dh.orgAnalytics(analytics.handleOverview)))
 		mux.Handle("GET /v1/orgs/{id}/analytics/timeseries", orgsAuthenticated(dh.orgAnalytics(analytics.handleTimeseries)))
+		// Org API-key management (DEC-241..243): the same auth.Service the
+		// CLI uses; create/rotate additionally pass a per-human mint limit.
+		if km, ok := authSvc.(apiKeyManager); ok {
+			kh := &orgAPIKeyHandler{dash: dh, keys: km}
+			mux.Handle("POST /v1/orgs/{id}/api-keys", orgsAuthenticated(chain(http.HandlerFunc(kh.handleCreate), apiKeyMintLimitMiddleware(abuse))))
+			mux.Handle("GET /v1/orgs/{id}/api-keys", orgsAuthenticated(http.HandlerFunc(kh.handleList)))
+			mux.Handle("POST /v1/orgs/{id}/api-keys/{keyId}/rotate", orgsAuthenticated(chain(http.HandlerFunc(kh.handleRotate), apiKeyMintLimitMiddleware(abuse))))
+			mux.Handle("DELETE /v1/orgs/{id}/api-keys/{keyId}", orgsAuthenticated(http.HandlerFunc(kh.handleRevoke)))
+		}
 	}
 	if len(extras) > 0 && extras[0].billing != nil {
 		lg := extras[0].log

@@ -107,13 +107,15 @@ func rfc3339Ptr(t *time.Time) *string {
 }
 
 type meResponse struct {
-	ID            string        `json:"id"`
-	Name          string        `json:"name"`
-	Email         string        `json:"email"`
-	AvatarURL     *string       `json:"avatar_url"`
-	LastLoginAt   *string       `json:"last_login_at"`
-	CreatedAt     string        `json:"created_at"`
-	Organizations []orgResource `json:"organizations"`
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Email       string  `json:"email"`
+	AvatarURL   *string `json:"avatar_url"`
+	LastLoginAt *string `json:"last_login_at"`
+	// EmailVerifiedAt is null until verified; informational only (DEC-243).
+	EmailVerifiedAt *string       `json:"email_verified_at"`
+	CreatedAt       string        `json:"created_at"`
+	Organizations   []orgResource `json:"organizations"`
 }
 
 func (h *dashboardHandler) writeMe(w http.ResponseWriter, r *http.Request, humanID string) {
@@ -137,7 +139,7 @@ func (h *dashboardHandler) writeMe(w http.ResponseWriter, r *http.Request, human
 	}
 	writeJSON(w, http.StatusOK, meResponse{
 		ID: hu.ID, Name: hu.Name, Email: hu.Email, AvatarURL: hu.AvatarURL,
-		LastLoginAt: rfc3339Ptr(hu.LastLoginAt), CreatedAt: hu.CreatedAt.UTC().Format(time.RFC3339),
+		LastLoginAt: rfc3339Ptr(hu.LastLoginAt), EmailVerifiedAt: rfc3339Ptr(hu.EmailVerifiedAt), CreatedAt: hu.CreatedAt.UTC().Format(time.RFC3339),
 		Organizations: orgs,
 	})
 }

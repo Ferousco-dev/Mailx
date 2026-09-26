@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -63,6 +64,13 @@ const (
 	// whatever channel the inviter chooses, not a same-session self-serve
 	// flow).
 	OrgInvitationTTL = 5 * time.Hour
+	// EmailVerificationTokenTTL is the operator's own stated number:
+	// a signup verification link works for 15 minutes (DEC-241).
+	EmailVerificationTokenTTL = 15 * time.Minute
+	// verificationEmailSendTimeout bounds SignUp's best-effort verification
+	// email so a slow mail-accept path can't stall account creation
+	// indefinitely (CodeRabbit, PR #28).
+	verificationEmailSendTimeout = 10 * time.Second
 )
 
 // Mailer sends a system-originated email to a human account holder
@@ -204,6 +212,24 @@ func (s *Service) SignUp(ctx context.Context, name, email, password string) (Ses
 			return Session{}, ErrEmailTaken
 		}
 		return Session{}, fmt.Errorf("humanauth: create human: %w", err)
+	}
+	// Verification email is best-effort: signup still succeeds and mints a
+	// session if it fails (the user can resend). Logged, never surfaced.
+	// Bounded with its own timeout (CodeRabbit, PR #28) rather than left to
+	// signup's own request context indefinitely: SendSystemEmail's
+	// SubmissionAcceptor.Accept does synchronous file+DB work before
+	// returning, so an unbounded call here would let a slow acceptance
+	// path stall the signup response - and simply detaching it into a
+	// goroutine tied to a context that gets canceled once the response is
+	// written could lose the durable outbound record mid-write. A bounded
+	// timeout keeps this synchronous (so success/failure here still means
+	// the record was actually durably written or cleanly gave up) while
+	// capping how long a slow mailer can hold up account creation.
+	verifyCtx, cancel := context.WithTimeout(ctx, verificationEmailSendTimeout)
+	err = s.sendVerificationEmail(verifyCtx, h)
+	cancel()
+	if err != nil {
+		slog.Default().Error("signup_verification_email_failed", "human_id", h.ID, "error", err.Error())
 	}
 	return s.mintSession(ctx, h)
 }
