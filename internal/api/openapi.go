@@ -317,6 +317,41 @@ const openAPISpec = `{
         "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/AnalyticsBucket"}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "422": {"description": "Invalid range or interval", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
       }
     },
+    "/orgs/{id}/api-keys": {
+      "post": {
+        "summary": "Create an API key for the organization",
+        "description": "Owner only (403 not_org_owner for other members, 404 for non-members). Uses the same key generation and hashing as the mailx create-api-key CLI. Every scope must be a known MailX scope (422 invalid_scopes otherwise); an owner may grant any known scope. The raw key is returned ONLY in this response and can never be retrieved again. The key does not expire. Rate-limited per human.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateOrgAPIKeyRequest"}}}},
+        "responses": { "201": {"description": "Created", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrgAPIKeyCreated"}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "403": {"description": "Caller is a member but not an owner of this organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "422": {"description": "Invalid name or unknown/duplicate/missing scopes", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "429": {"description": "Too many keys created or rotated by this human (api_key_rate_limited)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      },
+      "get": {
+        "summary": "List the organization's API keys",
+        "description": "Any member. Returns active and historical keys (revoked, expired, rotated-out) with metadata only; never the key value or its hash.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}],
+        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"data": {"type": "array", "items": {"$ref": "#/components/schemas/OrgAPIKey"}}}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization not found or caller is not a member", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      }
+    },
+    "/orgs/{id}/api-keys/{keyId}/rotate": {
+      "post": {
+        "summary": "Rotate an API key",
+        "description": "Owner only. Issues a new key with the same name and scopes and invalidates the old key immediately (no grace period). The new raw key is returned only in this response. Rotating a revoked or expired key is rejected (409 api_key_not_active). Rate-limited per human.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}, {"name": "keyId", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The key's public id (key_id)."}],
+        "responses": { "200": {"description": "Rotated", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/OrgAPIKeyCreated"}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "403": {"description": "Caller is a member but not an owner of this organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization or api key not found", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "409": {"description": "Key is revoked or expired", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "429": {"description": "Too many keys created or rotated by this human (api_key_rate_limited)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      }
+    },
+    "/orgs/{id}/api-keys/{keyId}": {
+      "delete": {
+        "summary": "Revoke an API key",
+        "description": "Owner only. The key stops authenticating immediately. Matches the mailx revoke-api-key CLI: revoking an already-revoked key returns 404 api_key_not_found and changes nothing.",
+        "security": [{"HumanAuth": []}],
+        "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}, "description": "Organization (tenant) ID."}, {"name": "keyId", "in": "path", "required": true, "schema": {"type": "string"}, "description": "The key's public id (key_id)."}],
+        "responses": { "204": {"description": "Revoked"}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "403": {"description": "Caller is a member but not an owner of this organization", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "404": {"description": "Organization or api key not found (or key already revoked)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+      }
+    },
     "/orgs/invites/accept": {
       "post": {
         "summary": "Accept an organization invitation",
@@ -3131,6 +3166,30 @@ const openAPISpec = `{
         "properties": {
           "data": {"type": "array", "items": {"$ref": "#/components/schemas/Organization"}}
         }
+      },
+      "CreateOrgAPIKeyRequest": {
+        "type": "object",
+        "required": ["name", "scopes"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1, "maxLength": 200},
+          "scopes": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": ["emails:send", "emails:read", "domains:read", "domains:write", "webhooks:read", "webhooks:write", "suppressions:read", "suppressions:write", "templates:read", "templates:write", "contacts:read", "contacts:write", "audiences:read", "audiences:write", "broadcasts:read", "broadcasts:write", "analytics:read"]}}
+        }
+      },
+      "OrgAPIKey": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string", "description": "Public key_id (the non-secret prefix part of the key)."},
+          "name": {"type": "string"},
+          "scopes": {"type": "array", "items": {"type": "string"}},
+          "status": {"type": "string", "enum": ["active", "revoked", "expired"]},
+          "created_at": {"type": "string", "format": "date-time"},
+          "last_used_at": {"type": "string", "format": "date-time", "nullable": true, "description": "Approximate (updated at most every 5 minutes)."},
+          "expires_at": {"type": "string", "format": "date-time", "nullable": true},
+          "revoked_at": {"type": "string", "format": "date-time", "nullable": true}
+        }
+      },
+      "OrgAPIKeyCreated": {
+        "allOf": [{"$ref": "#/components/schemas/OrgAPIKey"}, {"type": "object", "properties": {"key": {"type": "string", "description": "The raw API key. Shown only once; store it now."}}}]
       },
       "InviteRequest": {
         "type": "object",
