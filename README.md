@@ -119,6 +119,10 @@ Official SDKs live in their own repos under the [UseMailx](https://github.com/Us
 | PHP | [UseMailx/mailx-php](https://github.com/UseMailx/mailx-php) |
 | Ruby | [UseMailx/mailx-ruby](https://github.com/UseMailx/mailx-ruby) |
 
+## MCP server
+
+An MCP server exposing MailX to AI agents (send email, manage domains/templates/webhooks) lives at [UseMailx/mailx-mcp](https://github.com/UseMailx/mailx-mcp), same base-URL-override convention as the SDKs above.
+
 ## API example
 
 Every `/v1` endpoint requires a scoped MailX API key. Tenant and key management are deliberately operator-only CLI operations.
