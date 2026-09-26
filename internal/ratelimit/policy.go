@@ -81,6 +81,11 @@ type Policy struct {
 	// email-bombing concern PasswordResetIPRate exists for.
 	OrgInviteRate  float64
 	OrgInviteBurst int
+	// APIKeyMintRate/APIKeyMintBurst bound POST /v1/orgs/{id}/api-keys and
+	// .../rotate per human (DEC-247): same shape as OrgInviteRate, an
+	// occasional owner-gated mutation keyed on the verified human ID.
+	APIKeyMintRate  float64
+	APIKeyMintBurst int
 	// MFAVerifyIPRate/MFAVerifyIPBurst bound POST /v1/auth/mfa/verify and
 	// /v1/auth/mfa/confirm per client IP: their own, tight bucket because a
 	// 6-digit TOTP code is brute-forceable. A second, per-challenge cap
@@ -112,6 +117,7 @@ func DefaultPolicy() Policy {
 		PasswordResetIPRate: 1.0 / 60, PasswordResetIPBurst: 3,
 		EmailVerificationResendIPRate: 1.0 / 60, EmailVerificationResendIPBurst: 3,
 		OrgInviteRate: 1.0 / 30, OrgInviteBurst: 10,
+		APIKeyMintRate: 1.0 / 30, APIKeyMintBurst: 10,
 		MFAVerifyIPRate: 1.0 / 12, MFAVerifyIPBurst: 5,
 	}
 }
@@ -144,6 +150,7 @@ func (p Policy) Validate() error {
 		rate("email verification resend IP rate", p.EmailVerificationResendIPRate), count("email verification resend IP burst", p.EmailVerificationResendIPBurst, maxBurst),
 		rate("mfa verify IP rate", p.MFAVerifyIPRate), count("mfa verify IP burst", p.MFAVerifyIPBurst, maxBurst),
 		rate("org invite rate", p.OrgInviteRate), count("org invite burst", p.OrgInviteBurst, maxBurst),
+		rate("api key mint rate", p.APIKeyMintRate), count("api key mint burst", p.APIKeyMintBurst, maxBurst),
 	} {
 		if e != nil {
 			return e

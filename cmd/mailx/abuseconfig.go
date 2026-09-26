@@ -99,6 +99,8 @@ func loadAbusePolicy(get func(string) string) (policy ratelimit.Policy, enabled 
 	n("MAILX_LIMIT_MFA_VERIFY_IP_BURST", &policy.MFAVerifyIPBurst)
 	f("MAILX_LIMIT_ORG_INVITE_RPS", &policy.OrgInviteRate)
 	n("MAILX_LIMIT_ORG_INVITE_BURST", &policy.OrgInviteBurst)
+	f("MAILX_LIMIT_APIKEY_MINT_RPS", &policy.APIKeyMintRate)
+	n("MAILX_LIMIT_APIKEY_MINT_BURST", &policy.APIKeyMintBurst)
 	n("MAILX_RETRY_JITTER_PERCENT", &policy.RetryJitterPercent)
 	if raw := strings.TrimSpace(get("MAILX_LIMIT_PERMIT_TTL")); raw != "" {
 		d, e := time.ParseDuration(raw)
