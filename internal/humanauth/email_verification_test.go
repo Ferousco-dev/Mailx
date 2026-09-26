@@ -197,3 +197,34 @@ func TestConcurrentResendsLeaveExactlyOneValidToken(t *testing.T) {
 		}
 	}
 }
+
+// TestFailedResendDoesNotInvalidateTheWorkingVerificationLink is a
+// regression test for a bug caught before merge (same class as DEC-218): a
+// resend whose email delivery fails must NOT invalidate the previous,
+// still-working verification link - otherwise a transient mailer failure
+// leaves the account with neither a delivered new link nor a working old
+// one.
+func TestFailedResendDoesNotInvalidateTheWorkingVerificationLink(t *testing.T) {
+	db := newTestDB(t)
+	mailer := &fakeMailer{}
+	svc, err := NewService(db, testSecret(), WithMailer(mailer), WithDashboardBaseURL("https://app.mailx.dev"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := svc.SignUp(ctx, "Ada", "ada@example.com", "hunter22hunter"); err != nil {
+		t.Fatal(err)
+	}
+	firstToken := tokenFromText(t, mailer.verifySnapshot()[0].text)
+
+	mailer.failNext = true
+	if err := svc.ResendVerification(ctx, "ada@example.com"); err == nil {
+		t.Fatal("expected the simulated send failure to surface as an error")
+	}
+
+	// The original verification link must still work: the failed resend's
+	// delivery failure must not have invalidated it.
+	if err := svc.VerifyEmail(ctx, firstToken); err != nil {
+		t.Fatalf("expected the original verification token to still be valid after a failed resend: %v", err)
+	}
+}

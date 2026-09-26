@@ -26,20 +26,26 @@ var ErrEmailAlreadyVerified = errors.New("database: email already verified")
 // used or superseded by a concurrent call - see VerifyEmail's doc.
 var ErrEmailVerificationTokenConsumed = errors.New("database: email verification token already used")
 
-// IssueEmailVerificationToken atomically supersedes (marks used) every
-// still-pending verification token for humanID and inserts a fresh one,
-// so at most one token is ever valid per account (DEC-242).
+// CreateEmailVerificationToken locks the humans row (serializing concurrent
+// issues for the same account and providing a consistent point to check
+// "not already verified"), then inserts a fresh token. It deliberately does
+// NOT invalidate any other pending token here - see
+// SupersedeOtherEmailVerificationTokens, called only after this token's
+// email has actually been sent. An earlier version invalidated the old
+// token before attempting delivery, so a failed send left the account with
+// NEITHER a working old link nor a delivered new one (the exact bug class
+// DEC-218 fixed for org invitations - caught here before merge, not by a
+// live incident).
 //
-// Race safety (the DEC-226 lesson): the whole invalidate-then-insert runs
-// under SELECT ... FOR UPDATE on the humans row. Two concurrent issues for
-// the same human are therefore fully serialized - the second only starts
-// its UPDATE after the first has committed its INSERT, so it always sees
-// and supersedes the first's token, and it can never supersede its own.
-// Exactly one token (the last committed) remains valid. Unlike org
-// invitations there is no multi-inviter key to order by; the human row is
-// a natural per-account mutex. VerifyEmail takes the same lock, so an
-// issue can never interleave with a verify either.
-func (db *DB) IssueEmailVerificationToken(ctx context.Context, humanID, tokenHash string, expiresAt, now time.Time) (EmailVerificationToken, error) {
+// created_at is set via clock_timestamp(), not the column's now() default:
+// now()/transaction_timestamp() is fixed at this transaction's BEGIN, which
+// happens BEFORE the FOR UPDATE lock wait above - a transaction that
+// waited on the lock would otherwise still capture an earlier timestamp
+// than one that acquired the lock and committed first, which would break
+// SupersedeOtherEmailVerificationTokens' created_at-ordering guarantee
+// exactly the way DEC-226 found for org invitations. clock_timestamp()
+// reflects the actual moment this INSERT runs, i.e. after the lock is held.
+func (db *DB) CreateEmailVerificationToken(ctx context.Context, humanID, tokenHash string, expiresAt time.Time) (EmailVerificationToken, error) {
 	id, err := newID()
 	if err != nil {
 		return EmailVerificationToken{}, err
@@ -57,13 +63,10 @@ func (db *DB) IssueEmailVerificationToken(ctx context.Context, humanID, tokenHas
 	if verifiedAt != nil {
 		return EmailVerificationToken{}, ErrEmailAlreadyVerified
 	}
-	if _, err := tx.Exec(ctx, `UPDATE email_verification_tokens SET used_at = $2 WHERE human_id = $1 AND used_at IS NULL`, humanID, now); err != nil {
-		return EmailVerificationToken{}, fmt.Errorf("database: supersede email verification tokens: %w", normalizeErr(err))
-	}
 	var t EmailVerificationToken
 	err = tx.QueryRow(ctx, `
-		INSERT INTO email_verification_tokens (id, human_id, token_hash, expires_at)
-		VALUES ($1, $2, $3, $4)
+		INSERT INTO email_verification_tokens (id, human_id, token_hash, expires_at, created_at)
+		VALUES ($1, $2, $3, $4, clock_timestamp())
 		RETURNING id, human_id, token_hash, expires_at, used_at, created_at`,
 		id, humanID, tokenHash, expiresAt,
 	).Scan(&t.ID, &t.HumanID, &t.TokenHash, &t.ExpiresAt, &t.UsedAt, &t.CreatedAt)
@@ -74,6 +77,31 @@ func (db *DB) IssueEmailVerificationToken(ctx context.Context, humanID, tokenHas
 		return EmailVerificationToken{}, fmt.Errorf("database: commit issue email verification: %w", normalizeErr(err))
 	}
 	return t, nil
+}
+
+// SupersedeOtherEmailVerificationTokens invalidates every OTHER still-valid
+// verification token for humanID that ORDERS STRICTLY BEFORE keepTokenID -
+// called only once the keeper token's email has been confirmed sent (see
+// CreateEmailVerificationToken's doc). Ordering by (created_at, id), not
+// simply "id != keep", matters under concurrency for the exact reason
+// DEC-219 found for org invitations: two resends completing their sends at
+// nearly the same instant would otherwise each try to supersede the OTHER
+// after both had already been sent, and whichever UPDATE ran last would
+// win - invalidating the link that had just been delivered, so BOTH
+// emailed links could end up dead even though both requests reported
+// success. Superseding only strictly-older rows makes this commutative:
+// the newest token always survives no matter which request's UPDATE runs
+// last. created_at alone is not a total order (two rows can share a
+// timestamp), so id breaks the tie, matching DEC-226's fix.
+func (db *DB) SupersedeOtherEmailVerificationTokens(ctx context.Context, humanID, keepTokenID string, keepCreatedAt, now time.Time) error {
+	_, err := db.pool.Exec(ctx,
+		`UPDATE email_verification_tokens SET used_at = $4 WHERE human_id = $1 AND (created_at, id) < ($3, $2) AND used_at IS NULL`,
+		humanID, keepTokenID, keepCreatedAt, now,
+	)
+	if err != nil {
+		return fmt.Errorf("database: supersede email verification tokens: %w", normalizeErr(err))
+	}
+	return nil
 }
 
 // GetEmailVerificationTokenByHash loads a token row by hash. Returns

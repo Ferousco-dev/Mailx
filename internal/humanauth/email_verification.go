@@ -21,24 +21,25 @@ var ErrEmailVerificationTokenInvalid = errors.New("humanauth: email verification
 // failures the caller logs; they must never fail SignUp or be surfaced
 // by ResendVerification.
 func (s *Service) sendVerificationEmail(ctx context.Context, h database.Human) error {
-	raw, err := generateRawToken()
-	if err != nil {
-		return err
-	}
-	now := s.now()
-	if _, err := s.db.IssueEmailVerificationToken(ctx, h.ID, hashRawToken(raw), now.Add(EmailVerificationTokenTTL), now); err != nil {
-		if errors.Is(err, database.ErrEmailAlreadyVerified) {
-			return nil
-		}
-		return fmt.Errorf("humanauth: issue email verification token: %w", err)
-	}
 	if s.mailer == nil {
-		return fmt.Errorf("humanauth: email verification token created but no mailer is configured")
+		return fmt.Errorf("humanauth: no mailer is configured; cannot send a verification email")
 	}
 	if s.dashboardBaseURL == "" {
 		// Same guard as ForgotPassword (DEC-215): never send a relative,
 		// unusable link.
 		return fmt.Errorf("humanauth: mailer is configured but dashboard base URL is not; refusing to send an unusable verification link")
+	}
+	raw, err := generateRawToken()
+	if err != nil {
+		return err
+	}
+	now := s.now()
+	t, err := s.db.CreateEmailVerificationToken(ctx, h.ID, hashRawToken(raw), now.Add(EmailVerificationTokenTTL))
+	if err != nil {
+		if errors.Is(err, database.ErrEmailAlreadyVerified) {
+			return nil
+		}
+		return fmt.Errorf("humanauth: issue email verification token: %w", err)
 	}
 	link := s.dashboardBaseURL + "/verify-email?token=" + raw
 	text := "Hello " + h.Name + ", welcome to MailX!\n\n" +
@@ -49,7 +50,17 @@ func (s *Service) sendVerificationEmail(ctx context.Context, h database.Human) e
 		`<p><a href="` + link + `" style="display:inline-block;padding:10px 18px;background:#111;color:#fff;text-decoration:none;border-radius:6px">Verify my account</a></p>` +
 		`<p>If you didn't create a MailX account, you can safely ignore this email.</p>`
 	if err := s.mailer.SendSystemEmail(ctx, h.Email, "Verify your MailX account", text, body); err != nil {
+		// Deliberately do NOT supersede prior tokens here: this new one was
+		// never delivered, so invalidating an older, still-working link
+		// would leave the account holder with nothing usable at all
+		// (same fix shape as DEC-218, PR #23).
 		return fmt.Errorf("humanauth: send verification email: %w", err)
+	}
+	// Only now that the new link is confirmed delivered is it safe to
+	// invalidate any other pending token - see
+	// SupersedeOtherEmailVerificationTokens's doc.
+	if err := s.db.SupersedeOtherEmailVerificationTokens(ctx, h.ID, t.ID, t.CreatedAt, s.now()); err != nil {
+		return fmt.Errorf("humanauth: supersede prior verification tokens: %w", err)
 	}
 	return nil
 }
