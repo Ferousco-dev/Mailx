@@ -66,6 +66,12 @@ type Policy struct {
 	// dangerous credential-change action.
 	PasswordResetIPRate  float64
 	PasswordResetIPBurst int
+	// EmailVerificationResendIPRate/Burst bound POST
+	// /v1/auth/resend-verification per client IP. Same tightness as
+	// PasswordResetIPRate for the same reason: each call can send a real
+	// email (email-bombing surface).
+	EmailVerificationResendIPRate  float64
+	EmailVerificationResendIPBurst int
 	// OrgInviteRate/OrgInviteBurst bound POST /v1/orgs/{id}/invites per
 	// inviting human (not IP — unlike the auth-surface buckets above, this
 	// caller is already authenticated, so their human ID is a stronger,
@@ -104,6 +110,7 @@ func DefaultPolicy() Policy {
 		MaxRecipientsPerMessage: 50,
 		AuthIPRate:              1, AuthIPBurst: 10,
 		PasswordResetIPRate: 1.0 / 60, PasswordResetIPBurst: 3,
+		EmailVerificationResendIPRate: 1.0 / 60, EmailVerificationResendIPBurst: 3,
 		OrgInviteRate: 1.0 / 30, OrgInviteBurst: 10,
 		MFAVerifyIPRate: 1.0 / 12, MFAVerifyIPBurst: 5,
 	}
@@ -134,6 +141,7 @@ func (p Policy) Validate() error {
 		count("max recipients per message", p.MaxRecipientsPerMessage, 1000),
 		rate("auth IP rate", p.AuthIPRate), count("auth IP burst", p.AuthIPBurst, maxBurst),
 		rate("password reset IP rate", p.PasswordResetIPRate), count("password reset IP burst", p.PasswordResetIPBurst, maxBurst),
+		rate("email verification resend IP rate", p.EmailVerificationResendIPRate), count("email verification resend IP burst", p.EmailVerificationResendIPBurst, maxBurst),
 		rate("mfa verify IP rate", p.MFAVerifyIPRate), count("mfa verify IP burst", p.MFAVerifyIPBurst, maxBurst),
 		rate("org invite rate", p.OrgInviteRate), count("org invite burst", p.OrgInviteBurst, maxBurst),
 	} {

@@ -24,6 +24,9 @@ type Human struct {
 	AvatarURL *string
 	// MFAEnabled is true once TOTP MFA is confirmed (migration 000032).
 	MFAEnabled bool
+	// EmailVerifiedAt is nil until the human consumes an email
+	// verification token (migration 000034). Gates nothing (DEC-243).
+	EmailVerifiedAt *time.Time
 }
 
 // RefreshToken is one issued refresh token row (see migration 000025).
@@ -73,10 +76,10 @@ func (db *DB) CreateHuman(ctx context.Context, name, email, passwordHash string)
 func (db *DB) GetHumanByEmail(ctx context.Context, email string) (Human, error) {
 	var h Human
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, name, email, password_hash, role, created_at, updated_at, last_login_at, avatar_url, mfa_enabled
+		SELECT id, name, email, password_hash, role, created_at, updated_at, last_login_at, avatar_url, mfa_enabled, email_verified_at
 		FROM humans WHERE normalized_email = $1`,
 		normalizeEmail(email),
-	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt, &h.LastLoginAt, &h.AvatarURL, &h.MFAEnabled)
+	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt, &h.LastLoginAt, &h.AvatarURL, &h.MFAEnabled, &h.EmailVerifiedAt)
 	if err != nil {
 		return Human{}, normalizeErr(err)
 	}
@@ -87,9 +90,9 @@ func (db *DB) GetHumanByEmail(ctx context.Context, email string) (Human, error) 
 func (db *DB) GetHuman(ctx context.Context, id string) (Human, error) {
 	var h Human
 	err := db.pool.QueryRow(ctx, `
-		SELECT id, name, email, password_hash, role, created_at, updated_at, last_login_at, avatar_url, mfa_enabled
+		SELECT id, name, email, password_hash, role, created_at, updated_at, last_login_at, avatar_url, mfa_enabled, email_verified_at
 		FROM humans WHERE id = $1`, id,
-	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt, &h.LastLoginAt, &h.AvatarURL, &h.MFAEnabled)
+	).Scan(&h.ID, &h.Name, &h.Email, &h.PasswordHash, &h.Role, &h.CreatedAt, &h.UpdatedAt, &h.LastLoginAt, &h.AvatarURL, &h.MFAEnabled, &h.EmailVerifiedAt)
 	if err != nil {
 		return Human{}, normalizeErr(err)
 	}

@@ -203,6 +203,43 @@ func passwordResetIPLimitMiddleware(a *AbuseControls) func(http.Handler) http.Ha
 	}
 }
 
+// emailVerificationResendIPLimitMiddleware protects POST
+// /v1/auth/resend-verification with its own bucket, same tightness class
+// as passwordResetIPLimitMiddleware: every call can send a real email.
+func emailVerificationResendIPLimitMiddleware(a *AbuseControls) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		if a == nil || a.Limiter == nil {
+			return next
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ip := authClientIP(r, a.TrustedProxyCIDRs)
+			p := a.Policy
+			dec, err := a.Limiter.Allow(r.Context(),
+				ratelimit.Bucket{Key: "auth:verify-resend:ip:" + ip, Rate: p.EmailVerificationResendIPRate, Burst: p.EmailVerificationResendIPBurst, Cost: 1},
+			)
+			switch {
+			case err != nil:
+				a.Metrics.AbuseDecision("email_verification_resend", "unavailable")
+				a.log().Error("rate_limiter_unavailable", "route_class", "email_verification_resend")
+				e := newError(ErrTemporarilyUnavailable, "rate_limiter_unavailable", "request limiting is temporarily unavailable; retry later")
+				e.RetryAfter = unavailableRetryAfter
+				writeError(w, r, e)
+			case dec.Impossible:
+				a.Metrics.AbuseDecision("email_verification_resend", "impossible")
+				writeError(w, r, newError(ErrInternal, "internal_error", "request limit is misconfigured"))
+			case !dec.Allowed:
+				a.Metrics.AbuseDecision("email_verification_resend", "limited")
+				e := newError(ErrRateLimited, "email_verification_resend_rate_limited", "too many verification email requests from this address; retry after the interval in Retry-After")
+				e.RetryAfter = ratelimit.RetryAfterSeconds(dec.RetryAfter)
+				writeError(w, r, e)
+			default:
+				a.Metrics.AbuseDecision("email_verification_resend", "allowed")
+				next.ServeHTTP(w, r)
+			}
+		})
+	}
+}
+
 // orgInviteLimitMiddleware protects POST /v1/orgs/{id}/invites with its own
 // tighter bucket, keyed by the inviting human's ID rather than IP — unlike
 // the auth-surface middlewares above, this route is already authenticated

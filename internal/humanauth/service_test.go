@@ -328,9 +328,10 @@ func TestAccessTokenRoundTripsAndRejectsTamperedOrExpired(t *testing.T) {
 // (Greptile P1, PR #23: an unsynchronized slice append here raced under
 // -race and could silently drop a recorded call).
 type fakeMailer struct {
-	mu       sync.Mutex
-	calls    []struct{ to, subject, text, html string }
-	failNext bool // when true, the NEXT call fails (and is not recorded) then resets
+	mu          sync.Mutex
+	calls       []struct{ to, subject, text, html string }
+	verifyCalls []struct{ to, subject, text, html string }
+	failNext    bool // when true, the NEXT call fails (and is not recorded) then resets
 }
 
 func (m *fakeMailer) SendSystemEmail(_ context.Context, to, subject, text, html string) error {
@@ -340,7 +341,14 @@ func (m *fakeMailer) SendSystemEmail(_ context.Context, to, subject, text, html 
 		m.failNext = false
 		return fmt.Errorf("fakeMailer: simulated send failure")
 	}
-	m.calls = append(m.calls, struct{ to, subject, text, html string }{to, subject, text, html})
+	c := struct{ to, subject, text, html string }{to, subject, text, html}
+	// SignUp now also sends a verification email; record those separately
+	// so tests about other mail (reset, invites) keep exact call counts.
+	if subject == "Verify your MailX account" {
+		m.verifyCalls = append(m.verifyCalls, c)
+		return nil
+	}
+	m.calls = append(m.calls, c)
 	return nil
 }
 

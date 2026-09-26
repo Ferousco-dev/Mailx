@@ -93,6 +93,8 @@ func loadAbusePolicy(get func(string) string) (policy ratelimit.Policy, enabled 
 	n("MAILX_LIMIT_AUTH_IP_BURST", &policy.AuthIPBurst)
 	f("MAILX_LIMIT_PASSWORD_RESET_IP_RPS", &policy.PasswordResetIPRate)
 	n("MAILX_LIMIT_PASSWORD_RESET_IP_BURST", &policy.PasswordResetIPBurst)
+	f("MAILX_LIMIT_EMAIL_VERIFICATION_RESEND_IP_RPS", &policy.EmailVerificationResendIPRate)
+	n("MAILX_LIMIT_EMAIL_VERIFICATION_RESEND_IP_BURST", &policy.EmailVerificationResendIPBurst)
 	f("MAILX_LIMIT_MFA_VERIFY_IP_RPS", &policy.MFAVerifyIPRate)
 	n("MAILX_LIMIT_MFA_VERIFY_IP_BURST", &policy.MFAVerifyIPBurst)
 	f("MAILX_LIMIT_ORG_INVITE_RPS", &policy.OrgInviteRate)

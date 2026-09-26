@@ -185,6 +185,8 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 		mux.HandleFunc("POST /v1/auth/logout", ha.handleLogout)
 		mux.Handle("POST /v1/auth/forgot-password", chain(http.HandlerFunc(ha.handleForgotPassword), passwordResetIPLimitMiddleware(abuse)))
 		mux.Handle("POST /v1/auth/reset-password", chain(http.HandlerFunc(ha.handleResetPassword), passwordResetIPLimitMiddleware(abuse)))
+		mux.Handle("POST /v1/auth/verify-email", chain(http.HandlerFunc(ha.handleVerifyEmail), authIPLimitMiddleware(abuse)))
+		mux.Handle("POST /v1/auth/resend-verification", chain(http.HandlerFunc(ha.handleResendVerification), emailVerificationResendIPLimitMiddleware(abuse)))
 		orgsAuthenticated := humanAuthMiddleware(extras[0].humanAuth)
 		registerMFAAndOAuthRoutes(mux, ha, orgsAuthenticated, abuse)
 		mux.Handle("POST /v1/orgs", orgsAuthenticated(http.HandlerFunc(ha.handleCreateOrg)))

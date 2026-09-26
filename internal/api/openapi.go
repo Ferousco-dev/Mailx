@@ -197,6 +197,33 @@ const openAPISpec = `{
         }
       }
     },
+    "/auth/verify-email": {
+      "post": {
+        "summary": "Verify an account's email using a verification token",
+        "description": "Public (no auth required; the link may be opened on a device with no session). The token is single-use, expires 15 minutes after issuance, and is superseded by any later resend. On success sets the account's email_verified_at. Unknown, expired, used, and superseded tokens all return the same 422. Verification is informational only; it gates nothing.",
+        "security": [],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["token"], "properties": {"token": {"type": "string"}}}}}},
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"message": {"type": "string"}}}}}},
+          "400": {"description": "Missing token or invalid JSON", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "422": {"description": "The verification token is invalid/expired/used (code invalid_verification_token)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "429": {"description": "Rate limited (per client IP, auth bucket)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
+    "/auth/resend-verification": {
+      "post": {
+        "summary": "Resend the account verification email",
+        "description": "Public (no auth required). Always returns the same generic response whether the email is unknown, already verified, or unverified, to avoid account enumeration. For an unverified account, invalidates any pending verification token and emails a new 15-minute link. Rate-limited per client IP with its own tight bucket (same class as forgot-password).",
+        "security": [],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ForgotPasswordRequest"}}}},
+        "responses": {
+          "200": {"description": "OK (generic; does not reveal whether the account exists or is verified)", "content": {"application/json": {"schema": {"type": "object", "properties": {"message": {"type": "string"}}}}}},
+          "400": {"description": "Missing email or invalid JSON", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}},
+          "429": {"description": "Rate limited (code email_verification_resend_rate_limited)", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}
+        }
+      }
+    },
     "/orgs": {
       "post": {
         "summary": "Create an organization",
@@ -245,14 +272,14 @@ const openAPISpec = `{
         "summary": "Get the caller's profile and organizations",
         "description": "Requires a human access token (HumanAuth).",
         "security": [{"HumanAuth": []}],
-        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "email": {"type": "string"}, "avatar_url": {"type": "string", "nullable": true}, "last_login_at": {"type": "string", "format": "date-time", "nullable": true}, "created_at": {"type": "string", "format": "date-time"}, "organizations": {"type": "array", "items": {"$ref": "#/components/schemas/Organization"}}}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "email": {"type": "string"}, "avatar_url": {"type": "string", "nullable": true}, "last_login_at": {"type": "string", "format": "date-time", "nullable": true}, "email_verified_at": {"type": "string", "format": "date-time", "nullable": true, "description": "Null until the account's email is verified. Informational only; gates nothing."}, "created_at": {"type": "string", "format": "date-time"}, "organizations": {"type": "array", "items": {"$ref": "#/components/schemas/Organization"}}}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
       },
       "patch": {
         "summary": "Update the caller's name and/or avatar_url",
         "description": "Requires a human access token (HumanAuth). Omitted fields are unchanged. Email cannot be changed here.",
         "security": [{"HumanAuth": []}],
         "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 200}, "avatar_url": {"type": "string", "description": "Absolute http(s) URL, max 2048 chars; empty string clears it."}}}}}},
-        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "email": {"type": "string"}, "avatar_url": {"type": "string", "nullable": true}, "last_login_at": {"type": "string", "format": "date-time", "nullable": true}, "created_at": {"type": "string", "format": "date-time"}, "organizations": {"type": "array", "items": {"$ref": "#/components/schemas/Organization"}}}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "422": {"description": "Invalid name or URL", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
+        "responses": { "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"id": {"type": "string"}, "name": {"type": "string"}, "email": {"type": "string"}, "avatar_url": {"type": "string", "nullable": true}, "last_login_at": {"type": "string", "format": "date-time", "nullable": true}, "email_verified_at": {"type": "string", "format": "date-time", "nullable": true, "description": "Null until the account's email is verified. Informational only; gates nothing."}, "created_at": {"type": "string", "format": "date-time"}, "organizations": {"type": "array", "items": {"$ref": "#/components/schemas/Organization"}}}}}}}, "401": {"description": "Missing or invalid access token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}}, "422": {"description": "Invalid name or URL", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/APIError"}}}} }
       }
     },
     "/orgs/{id}": {

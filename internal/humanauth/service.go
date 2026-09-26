@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -63,6 +64,9 @@ const (
 	// whatever channel the inviter chooses, not a same-session self-serve
 	// flow).
 	OrgInvitationTTL = 5 * time.Hour
+	// EmailVerificationTokenTTL is the operator's own stated number:
+	// a signup verification link works for 15 minutes (DEC-241).
+	EmailVerificationTokenTTL = 15 * time.Minute
 )
 
 // Mailer sends a system-originated email to a human account holder
@@ -204,6 +208,11 @@ func (s *Service) SignUp(ctx context.Context, name, email, password string) (Ses
 			return Session{}, ErrEmailTaken
 		}
 		return Session{}, fmt.Errorf("humanauth: create human: %w", err)
+	}
+	// Verification email is best-effort: signup still succeeds and mints a
+	// session if it fails (the user can resend). Logged, never surfaced.
+	if err := s.sendVerificationEmail(ctx, h); err != nil {
+		slog.Default().Error("signup_verification_email_failed", "human_id", h.ID, "error", err.Error())
 	}
 	return s.mintSession(ctx, h)
 }
