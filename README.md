@@ -25,7 +25,7 @@ MailX is open-source, developer-first email infrastructure built from the protoc
 The project is intentionally built as understandable infrastructure rather than a wrapper around a third-party email provider. Its design keeps durable lifecycle state in PostgreSQL, raw message data in local storage, and transient delivery scheduling in Redis.
 
 > [!WARNING]
-> MailX is under active development and is not production-ready. In particular, inbound and outbound STARTTLS/TLS are planned for v0.24 and are not currently implemented. Do not expose the current SMTP or HTTP listeners to untrusted networks.
+> MailX is under active development and is not production-ready.
 
 ## Capabilities
 
