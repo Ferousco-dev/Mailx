@@ -146,6 +146,9 @@ func (e *Expander) tick(ctx context.Context) {
 // audience — see docs/design-v0.36.md "no giant transaction".
 func (e *Expander) process(ctx context.Context, b database.Broadcast) {
 	if err := e.db.MarkBroadcastExpanding(ctx, b.ID); err != nil {
+		if errors.Is(err, database.ErrBroadcastStateConflict) {
+			return
+		}
 		e.onError(fmt.Errorf("broadcast %s: mark expanding: %w", b.ID, err))
 		return
 	}
@@ -153,6 +156,9 @@ func (e *Expander) process(ctx context.Context, b database.Broadcast) {
 	if !b.SnapshotComplete {
 		n, _, err := e.db.SnapshotBroadcastBatch(ctx, b, defaultSnapshotBatch)
 		if err != nil {
+			if errors.Is(err, database.ErrBroadcastStateConflict) {
+				return
+			}
 			e.onError(fmt.Errorf("broadcast %s: snapshot batch: %w", b.ID, err))
 			return
 		}
@@ -241,6 +247,9 @@ func (e *Expander) materializeBatch(ctx context.Context, b database.Broadcast, f
 		}
 
 		if err := e.materializeOne(ctx, b, fromDomain, r); err != nil {
+			if errors.Is(err, database.ErrBroadcastStateConflict) {
+				return
+			}
 			e.onError(fmt.Errorf("broadcast recipient %s: materialize: %w", r.ID, err))
 			e.metrics.BroadcastExpansionBatch("materialize", "error")
 			// Bounded retry, but ONLY for errDeterministic failures (render/
@@ -363,6 +372,19 @@ func (e *Expander) materializeOne(ctx context.Context, b database.Broadcast, fro
 		SenderDomain:                fromDomain,
 		RequireBroadcastRecipientID: r.ID,
 	})
+	if errors.Is(err, database.ErrBroadcastStateConflict) {
+		var delErr error
+		for attempt := 0; attempt < 3; attempt++ {
+			if delErr = e.store.Delete(r.ID); delErr == nil {
+				break
+			}
+			time.Sleep(erasedCleanupRetryDelay)
+		}
+		if delErr != nil {
+			return fmt.Errorf("cancelled recipient disk cleanup: %w", delErr)
+		}
+		return err
+	}
 	if errors.Is(err, database.ErrRecipientErased) {
 		// The recipient was erased (GDPR gdpr-delete) between being claimed
 		// above and this insert — the file just saved above is now for a

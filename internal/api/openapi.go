@@ -847,7 +847,7 @@ const openAPISpec = `{
     "/broadcasts/{id}": {
       "get": {
         "summary": "Get a broadcast",
-        "description": "Requires broadcasts:read. status is an orchestration state (accepted|expanding|completed|failed): 'completed' means every recipient was either suppressed or handed to the normal send pipeline - it does NOT mean delivered, and never means inbox placement. Another account's broadcast is indistinguishable from a missing one (404).",
+        "description": "Requires broadcasts:read. status is an orchestration state (accepted|expanding|completed|failed|cancelled): 'completed' means every recipient was either suppressed or handed to the normal send pipeline - it does NOT mean delivered, and never means inbox placement. Another account's broadcast is indistinguishable from a missing one (404).",
         "parameters": [
           {
             "name": "id",
@@ -885,10 +885,129 @@ const openAPISpec = `{
         "operationId": "getBroadcastsId"
       }
     },
+    "/broadcasts/{id}/cancel": {
+      "post": {
+        "summary": "Cancel a broadcast",
+        "description": "Requires broadcasts:write. Stops new recipient snapshots and message handoffs for an accepted or expanding broadcast. Already queued messages continue through the delivery pipeline and cannot be recalled. Cancellation waits for any database handoff already in progress. Repeating a successful cancellation returns the same cancelled broadcast. Completed or failed broadcasts return 409. Another account's broadcast returns 404.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The updated broadcast",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Broadcast"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "Broadcasts"
+        ],
+        "operationId": "cancelBroadcast"
+      }
+    },
+    "/broadcasts/{id}/reschedule": {
+      "post": {
+        "summary": "Reschedule a broadcast",
+        "description": "Requires broadcasts:write. Changes send_at only while the broadcast is accepted and expansion has not started. The new timestamp must be in the future according to the database clock. Preserves the original audience and template snapshot boundaries. Expansion and rescheduling serialize on the broadcast row, so a stale poller cannot activate the old schedule. Expanding or terminal broadcasts return 409. Another account's broadcast returns 404.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The updated broadcast",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Broadcast"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "415": {
+            "$ref": "#/components/responses/Error"
+          },
+          "422": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "tags": [
+          "Broadcasts"
+        ],
+        "operationId": "rescheduleBroadcast",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RescheduleBroadcastRequest"
+              }
+            }
+          }
+        }
+      }
+    },
     "/broadcasts/{id}/recipients": {
       "get": {
         "summary": "List a broadcast's recipients",
-        "description": "Requires broadcasts:read. Keyset pagination (limit, cursor); the entire recipient set is never returned in one response, however large the audience was. message_id, once present, is a normal /v1/emails id - GET /v1/emails/{message_id} carries that recipient's actual delivery status.",
+        "description": "Requires broadcasts:read. Keyset pagination (limit, cursor); the entire recipient set is never returned in one response, however large the audience was. Recipients awaiting handoff in a cancelled broadcast report cancelled. Recipients already handed off still report materialized. A cancelled broadcast may have a partial snapshot; members not snapshotted have no recipient row. message_id, once present, is a normal /v1/emails id - GET /v1/emails/{message_id} carries that recipient's actual delivery status.",
         "parameters": [
           {
             "name": "id",
@@ -1063,7 +1182,7 @@ const openAPISpec = `{
     "/analytics/broadcasts/{id}": {
       "get": {
         "summary": "Broadcast analytics",
-        "description": "Requires analytics:read. Recipient/orchestration counts come from the Broadcast's OWN durable snapshot (broadcast_recipients, frozen at acceptance - see v0.36) - never live Audience membership, which may have changed since. intended is the full snapshotted recipient count and is NOT a delivery guarantee: some may still be pending/suppressed/recipient_failed. delivered/bounced/complained/failed are the events-table breakdown for recipients that reached materialization, with the same semantics as the overview endpoint's fields. Another account's broadcast is indistinguishable from a missing one (404).",
+        "description": "Requires analytics:read. Recipient/orchestration counts come from the Broadcast's OWN durable snapshot (broadcast_recipients, frozen at acceptance - see v0.36) - never live Audience membership, which may have changed since. intended is the full snapshotted recipient count and is NOT a delivery guarantee: some may still be pending/suppressed/recipient_failed/cancelled. Cancellation counts only snapshotted recipients without a message handoff; unsnapshotted audience members are not included. delivered/bounced/complained/failed are the events-table breakdown for recipients that reached materialization, with the same semantics as the overview endpoint's fields. Another account's broadcast is indistinguishable from a missing one (404).",
         "parameters": [
           {
             "name": "id",
@@ -3484,7 +3603,8 @@ const openAPISpec = `{
               "accepted",
               "expanding",
               "completed",
-              "failed"
+              "failed",
+              "cancelled"
             ]
           },
           "send_at": {
@@ -3502,6 +3622,20 @@ const openAPISpec = `{
             "format": "date-time"
           }
         }
+      },
+      "RescheduleBroadcastRequest": {
+        "type": "object",
+        "required": [
+          "send_at"
+        ],
+        "properties": {
+          "send_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Required RFC 3339 absolute timestamp in the future. Null and missing values are rejected."
+          }
+        },
+        "additionalProperties": false
       },
       "CreateBroadcastRequest": {
         "type": "object",
@@ -3540,7 +3674,7 @@ const openAPISpec = `{
             "type": "string",
             "format": "date-time",
             "nullable": true,
-            "description": "v0.37: RFC 3339 absolute instant. Omit to expand immediately (unchanged v0.36 behavior). The Audience snapshot boundary is always acceptance time regardless of send_at - scheduling only delays WHEN expansion may begin, never which recipients are eligible. Suppression is still re-checked at expansion time, not frozen at creation. Part of the idempotency fingerprint: a retry with the same key but a different send_at is a 409 conflict, not a reschedule. Immutable after acceptance - there is no reschedule/cancel endpoint in v0.37."
+            "description": "v0.37: RFC 3339 absolute instant. Omit to expand immediately (unchanged v0.36 behavior). The Audience snapshot boundary is always acceptance time regardless of send_at - scheduling only delays WHEN expansion may begin, never which recipients are eligible. Suppression is still re-checked at expansion time, not frozen at creation. Part of the idempotency fingerprint: a retry with the same key but a different send_at is a 409 conflict, not a reschedule. Use POST /broadcasts/{id}/reschedule before expansion starts, or POST /broadcasts/{id}/cancel to stop further handoffs."
           }
         },
         "additionalProperties": false
@@ -3578,7 +3712,8 @@ const openAPISpec = `{
               "pending",
               "suppressed",
               "materialized",
-              "failed"
+              "failed",
+              "cancelled"
             ]
           },
           "message_id": {
@@ -3739,6 +3874,10 @@ const openAPISpec = `{
           },
           "pending": {
             "type": "integer"
+          },
+          "cancelled": {
+            "type": "integer",
+            "description": "Snapshotted recipients stopped before message handoff. Already queued messages and unsnapshotted audience members are excluded."
           },
           "suppressed": {
             "type": "integer",

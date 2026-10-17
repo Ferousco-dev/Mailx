@@ -162,6 +162,7 @@ type broadcastAnalyticsResponse struct {
 	BroadcastID     string `json:"broadcast_id"`
 	Intended        int    `json:"intended"`
 	Pending         int    `json:"pending"`
+	Cancelled       int    `json:"cancelled"`
 	Suppressed      int    `json:"suppressed"`
 	Materialized    int    `json:"materialized"`
 	RecipientFailed int    `json:"recipient_failed"`
@@ -184,7 +185,7 @@ func (h *analyticsHandler) handleBroadcast(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, broadcastAnalyticsResponse{
-		BroadcastID: a.BroadcastID, Intended: a.Intended, Pending: a.Pending, Suppressed: a.Suppressed,
+		BroadcastID: a.BroadcastID, Intended: a.Intended, Pending: a.Pending, Cancelled: a.Cancelled, Suppressed: a.Suppressed,
 		Materialized: a.Materialized, RecipientFailed: a.RecipientFailed,
 		Delivered: a.Delivered, Bounced: a.Bounced, Complained: a.Complained, Failed: a.Failed,
 	})

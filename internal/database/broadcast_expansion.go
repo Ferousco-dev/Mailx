@@ -43,11 +43,20 @@ func (db *DB) ClaimActiveBroadcasts(ctx context.Context, limit int) ([]Broadcast
 // MarkBroadcastExpanding transitions accepted -> expanding (idempotent: a
 // no-op if already expanding) and stamps started_at once.
 func (db *DB) MarkBroadcastExpanding(ctx context.Context, id string) error {
-	_, err := db.pool.Exec(ctx, `
+	tag, err := db.pool.Exec(ctx, `
 		UPDATE broadcasts SET status = 'expanding', started_at = COALESCE(started_at, now()), updated_at = now()
-		WHERE id = $1 AND status = 'accepted'`, id)
+		WHERE id = $1 AND status = 'accepted' AND (send_at IS NULL OR send_at <= clock_timestamp())`, id)
 	if err != nil {
 		return fmt.Errorf("database: mark broadcast expanding: %w", normalizeErr(err))
+	}
+	if tag.RowsAffected() == 0 {
+		var status string
+		if err := db.pool.QueryRow(ctx, `SELECT status FROM broadcasts WHERE id = $1`, id).Scan(&status); err != nil {
+			return fmt.Errorf("database: check broadcast activation: %w", normalizeErr(err))
+		}
+		if status != "expanding" {
+			return ErrBroadcastStateConflict
+		}
 	}
 	return nil
 }
@@ -91,10 +100,21 @@ func (db *DB) SnapshotBroadcastBatch(ctx context.Context, b Broadcast, batchSize
 
 	var cursorAt *time.Time
 	var cursorID *string
+	var status string
+	var snapshotComplete bool
+	var due bool
 	if err := tx.QueryRow(ctx, `
-		SELECT expansion_cursor_created_at, expansion_cursor_contact_id FROM broadcasts WHERE id = $1 FOR UPDATE`,
-		b.ID).Scan(&cursorAt, &cursorID); err != nil {
+		SELECT expansion_cursor_created_at, expansion_cursor_contact_id, status, snapshot_complete,
+		       send_at IS NULL OR send_at <= clock_timestamp()
+		FROM broadcasts WHERE id = $1 AND tenant_id = $2 FOR UPDATE`,
+		b.ID, b.TenantID).Scan(&cursorAt, &cursorID, &status, &snapshotComplete, &due); err != nil {
 		return 0, false, fmt.Errorf("database: lock broadcast: %w", normalizeErr(err))
+	}
+	if (status != "accepted" && status != "expanding") || !due {
+		return 0, false, ErrBroadcastStateConflict
+	}
+	if snapshotComplete {
+		return 0, true, nil
 	}
 
 	rows, err := tx.Query(ctx, `
@@ -188,7 +208,21 @@ const recipientClaimLease = 5 * time.Minute
 // unavailable to other claimants for the lease duration even after the SQL
 // statement's own lock releases, covering the actual processing window.
 func (db *DB) ClaimPendingBroadcastRecipients(ctx context.Context, broadcastID string, limit int) ([]BroadcastRecipient, error) {
-	rows, err := db.pool.Query(ctx, `
+	tx, err := db.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("database: begin recipient claim: %w", normalizeErr(err))
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var status string
+	var due bool
+	if err := tx.QueryRow(ctx, `SELECT status, send_at IS NULL OR send_at <= clock_timestamp()
+		FROM broadcasts WHERE id = $1 FOR SHARE`, broadcastID).Scan(&status, &due); err != nil {
+		return nil, fmt.Errorf("database: lock claimed broadcast: %w", normalizeErr(err))
+	}
+	if (status != "accepted" && status != "expanding") || !due {
+		return nil, nil
+	}
+	rows, err := tx.Query(ctx, `
 		UPDATE broadcast_recipients SET claimed_at = now()
 		WHERE id IN (
 			SELECT id FROM broadcast_recipients
@@ -211,7 +245,13 @@ func (db *DB) ClaimPendingBroadcastRecipients(ctx context.Context, broadcastID s
 		}
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("database: commit recipient claim: %w", normalizeErr(err))
+	}
+	return out, nil
 }
 
 // maxRecipientAttempts bounds retries of a deterministically-failing

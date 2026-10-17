@@ -95,6 +95,8 @@ func newMux(h *emailHandler, authSvc authService, readiness func() error, extras
 	v1.HandleFunc("GET /v1/broadcasts", requireScope(auth.ScopeBroadcastsRead)(broadcasts.handleList))
 	v1.HandleFunc("GET /v1/broadcasts/{id}", requireScope(auth.ScopeBroadcastsRead)(broadcasts.handleGet))
 	v1.HandleFunc("GET /v1/broadcasts/{id}/recipients", requireScope(auth.ScopeBroadcastsRead)(broadcasts.handleListRecipients))
+	v1.HandleFunc("POST /v1/broadcasts/{id}/cancel", requireScope(auth.ScopeBroadcastsWrite)(broadcasts.handleCancel))
+	v1.HandleFunc("POST /v1/broadcasts/{id}/reschedule", requireScope(auth.ScopeBroadcastsWrite)(broadcasts.handleReschedule))
 
 	analytics := &analyticsHandler{db: h.db, now: func() time.Time { return time.Now().UTC() }}
 	v1.HandleFunc("GET /v1/analytics/overview", requireScope(auth.ScopeAnalyticsRead)(analytics.handleOverview))

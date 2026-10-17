@@ -132,3 +132,8 @@ explicitly deferred to a later phase — v0.47 as a whole is NOT complete.
 ## v0.47 dashboard — Org API-key management over HTTP — COMPLETE (DEC-245..247)
 - Owner-managed create/list/rotate/revoke under `/v1/orgs/{id}/api-keys` (human JWT), reusing the CLI's `auth.Service`. Unblocker for the rest of the dashboard: domains/emails/templates/webhooks/logs routes stay API-key + `requireScope`, and a web-signed-up org can now mint that key itself.
 - Tests: `internal/api/apikeys_handler_test.go` (non-member 404 / non-owner 403 table; HTTP-created key authenticates on real `GET /v1/domains`; scope enforced (403 without domains:read); list leaks no key material; rotate kills old key and new key works; revoke kills key; unknown/duplicate/empty scope 422). Rate limiter itself not exercised by a test (mirrors the tested invite limiter).
+
+## Broadcast lifecycle controls — PR #30
+- Implemented: tenant-scoped `POST /v1/broadcasts/{id}/cancel` and `POST /v1/broadcasts/{id}/reschedule` (`broadcasts:write`). Cancellation changes accepted/expanding to cancelled; rescheduling accepts a future RFC3339 `send_at` only while accepted. Already queued messages continue.
+- Migration 000035 adds cancelled to the broadcast status constraint. Rollback changes cancelled broadcasts to failed with `failure_reason = 'cancelled'` before restoring the previous constraint; rollback/reapply does not restart them.
+- Verified: endpoint workflow, authorization/isolation, input validation, expanding-state conflicts, OpenAPI/runtime route agreement and migration rollback/reapply against real PostgreSQL. Upgrade all participating processes before enabling controls. Pending PR review; no new numbered milestone declared.

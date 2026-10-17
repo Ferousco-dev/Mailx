@@ -173,14 +173,8 @@ func (db *DB) InsertMessage(ctx context.Context, in NewMessage) (Message, error)
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	if in.RequireBroadcastRecipientID != "" {
-		var exists int
-		err := tx.QueryRow(ctx, `SELECT 1 FROM broadcast_recipients WHERE id = $1 FOR UPDATE`,
-			in.RequireBroadcastRecipientID).Scan(&exists)
-		if errors.Is(normalizeErr(err), ErrNotFound) {
-			return Message{}, ErrRecipientErased
-		}
-		if err != nil {
-			return Message{}, fmt.Errorf("database: check broadcast recipient still exists: %w", normalizeErr(err))
+		if err := lockBroadcastRecipient(ctx, tx, in); err != nil {
+			return Message{}, err
 		}
 	}
 
@@ -287,6 +281,14 @@ func (db *DB) InsertMessage(ctx context.Context, in NewMessage) (Message, error)
 		msg.ID, msg.TenantID, availableAt,
 	); err != nil {
 		return Message{}, fmt.Errorf("database: insert outbox row: %w", normalizeErr(err))
+	}
+
+	if in.RequireBroadcastRecipientID != "" {
+		if _, err := tx.Exec(ctx, `UPDATE broadcast_recipients
+			SET status = 'materialized', message_id = $2, updated_at = now()
+			WHERE tenant_id = $1 AND id = $3`, in.TenantID, msg.ID, in.RequireBroadcastRecipientID); err != nil {
+			return Message{}, fmt.Errorf("database: mark inserted broadcast recipient: %w", normalizeErr(err))
+		}
 	}
 
 	if in.IdempotencyCompletion != nil {
