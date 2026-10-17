@@ -1,263 +1,338 @@
 <div align="center">
-  <img src="./assets/mailx.png" alt="MailX - developer-first email infrastructure built in Go" width="100%">
-
-  <br>
-
-  <a href="https://github.com/Ferousco-dev/Mailx/actions/workflows/go-ci.yml"><img src="https://github.com/Ferousco-dev/Mailx/actions/workflows/go-ci.yml/badge.svg" alt="Go CI status"></a>
-  <a href="https://github.com/Ferousco-dev/Mailx/actions/workflows/security.yml"><img src="https://github.com/Ferousco-dev/Mailx/actions/workflows/security.yml/badge.svg" alt="Security workflow status"></a>
-  <a href="./go.mod"><img src="https://img.shields.io/github/go-mod/go-version/Ferousco-dev/Mailx?style=flat-square&amp;color=00ADD8" alt="Go version"></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/github/license/Ferousco-dev/Mailx?style=flat-square&amp;color=635BFF" alt="MIT license"></a>
-  <a href="#project-status"><img src="https://img.shields.io/badge/status-active_development-F59E0B?style=flat-square" alt="Active development"></a>
+  <img src="./assets/mailx.png" alt="MailX" width="100%">
 
   <p>
-    <a href="#overview">Overview</a> ·
+    <a href="https://github.com/Ferousco-dev/Mailx/actions/workflows/go-ci.yml"><img src="https://github.com/Ferousco-dev/Mailx/actions/workflows/go-ci.yml/badge.svg" alt="Go CI"></a>
+    <a href="https://github.com/Ferousco-dev/Mailx/actions/workflows/security.yml"><img src="https://github.com/Ferousco-dev/Mailx/actions/workflows/security.yml/badge.svg" alt="Security checks"></a>
+    <a href="./go.mod"><img src="https://img.shields.io/github/go-mod/go-version/Ferousco-dev/Mailx?style=flat-square&amp;color=00ADD8" alt="Go version"></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/github/license/Ferousco-dev/Mailx?style=flat-square" alt="MIT license"></a>
+  </p>
+
+  <p>
     <a href="#quick-start">Quick start</a> ·
-    <a href="#api-example">API</a> ·
+    <a href="#send-your-first-email">Send an email</a> ·
     <a href="#architecture">Architecture</a> ·
+    <a href="#broadcast-controls">Broadcasts</a> ·
     <a href="#development">Development</a>
   </p>
 </div>
 
-## Overview
+MailX is open-source email infrastructure written in Go. Submit mail through a tenant-scoped REST API or authenticated SMTP submission, send directly to recipient mail servers or through a trusted relay, and follow each message through signed webhooks.
 
-MailX is open-source, developer-first email infrastructure built from the protocol up in Go. It accepts mail over SMTP or a tenant-scoped REST API, stores the source message, processes delivery through a durable PostgreSQL and Redis pipeline, and exposes lifecycle events through signed webhooks.
-
-The project is intentionally built as understandable infrastructure rather than a wrapper around a third-party email provider. Its design keeps durable lifecycle state in PostgreSQL, raw message data in local storage, and transient delivery scheduling in Redis.
+PostgreSQL records delivery history. Redis schedules work, and local storage keeps the MIME message. The protocol, queue and delivery code live in this repository.
 
 > [!WARNING]
-> MailX is under active development and is not production-ready.
+> MailX is under active development and is not production-ready. The supplied stack is for local development. Keep the unauthenticated SMTP receiver and operator endpoints off untrusted networks.
 
 ## Capabilities
 
-| | Capability | What MailX provides |
-| --- | --- | --- |
-| <img src="./assets/readme/icon-smtp.svg" width="28" alt=""> | SMTP engine | Bounded command and message handling, CRLF validation, dot-stuffing, recipient and connection limits, enhanced status codes, and graceful shutdown. |
-| <img src="./assets/readme/icon-message.svg" width="28" alt=""> | MIME and storage | Plain text, HTML, nested multipart parsing, transfer decoding, attachment extraction, raw `.eml` preservation, and local message inspection. |
-| <img src="./assets/readme/icon-api.svg" width="28" alt=""> | Developer API | Tenant-scoped email, domain, event, and webhook resources with API-key scopes, pagination, request IDs, OpenAPI documentation, and HTTP idempotency. |
-| <img src="./assets/readme/icon-queue.svg" width="28" alt=""> | Durable processing | PostgreSQL outbox state, a Redis-backed leased queue, bounded workers, persistent delivery attempts, retries, and crash recovery. |
-| <img src="./assets/readme/icon-delivery.svg" width="28" alt=""> | Mail delivery | DNS MX resolution, direct SMTP transfer, retry classification and scheduling, terminal outcomes, and safe bounce/DSN generation. |
-| <img src="./assets/readme/icon-webhook.svg" width="28" alt=""> | Events and webhooks | Immutable lifecycle events, durable fan-out, HMAC-SHA256 signatures, retries, secret rotation, tenant isolation, and delivery inspection. |
+| Area | Included |
+| --- | --- |
+| Sending | Plain text and HTML, templates, scheduled emails, batch submission, direct MX delivery and authenticated relay delivery |
+| Campaigns | Contacts, audiences, personalized broadcasts, scheduling, rescheduling before expansion and cancellation of further message handoffs |
+| Delivery safety | Verified sender domains, DKIM signing, recipient suppression, tenant limits, bounded workers and durable retry history |
+| Transport | Verified outbound STARTTLS and optional SMTP submission over implicit TLS with API-key authentication |
+| Events | Immutable email events, signed webhooks, retry history and webhook secret rotation |
+| Visibility | Delivery analytics, optional open/click tracking, structured logs, Prometheus metrics and health checks |
+| Accounts | Human accounts, organizations, invitations, scoped API keys, optional OAuth and TOTP MFA, and optional Paystack billing |
+| Operations | Sending pools, DNS readiness checks for SPF/DMARC/BIMI, retention controls and operator GDPR export/delete tools |
 
 ## Quick start
 
-### Requirements
+You need Docker Engine with Compose v2 and `curl`. Building outside Docker requires Go 1.27.1 or newer.
 
-- Docker Engine with Docker Compose v2
-- `curl` for the API example
-- Go 1.27.1 only when building or testing outside Docker
+### Start the local stack
 
-### Run the complete local stack
+```bash
+git clone https://github.com/Ferousco-dev/Mailx.git
+cd Mailx
+cp .env.example .env
+docker compose up --build -d
+docker compose ps
+```
 
-1. Clone the repository and enter it.
+Compose starts PostgreSQL, Redis, a migration job and MailX. It publishes the following ports on loopback only:
 
-   ```bash
-   git clone https://github.com/Ferousco-dev/Mailx.git
-   cd Mailx
-   ```
-
-2. Create a local environment file.
-
-   ```bash
-   cp .env.example .env
-   ```
-
-   The checked-in defaults are for local development only. Never reuse them in a real deployment.
-
-3. Build and start MailX, PostgreSQL, Redis, and the database migration job.
-
-   ```bash
-   docker compose up --build -d
-   docker compose ps
-   ```
-
-4. Confirm the API is available.
-
-   ```bash
-   curl --fail http://localhost:8080/health/live
-   curl --fail http://localhost:8080/health/ready
-   ```
-
-The local services are available at:
-
-| Service | Address |
+| Service | Local address |
 | --- | --- |
 | REST API | `http://localhost:8080` |
-| Interactive API documentation | `http://localhost:8080/docs` |
+| Interactive API docs | `http://localhost:8080/docs` |
 | OpenAPI contract | `http://localhost:8080/openapi.json` |
-| SMTP receiver | `localhost:2525` |
+| SMTP capture receiver | `localhost:2525` |
+| Operator metrics and health | `http://localhost:9090` |
 | PostgreSQL | `localhost:5432` |
 | Redis | `localhost:6379` |
 
-View logs or stop the stack with:
+Check that MailX can reach its dependencies:
+
+```bash
+curl --fail http://localhost:8080/health/live
+curl --fail http://localhost:8080/health/ready
+```
+
+Liveness reports whether the process is running. Readiness requires PostgreSQL and Redis; an unavailable dependency returns `503` with its name.
+
+<details>
+<summary>Logs, shutdown and smaller hosts</summary>
 
 ```bash
 docker compose logs -f mailx
 docker compose down
 ```
 
-Use `docker compose down -v` only when you intentionally want to delete all local MailX, PostgreSQL, and Redis data.
+`docker compose down` preserves the named volumes. Adding `-v` deletes the stored messages, database and queue data.
 
-### Small hosts (about 1 GB RAM)
-
-An opt-in low-memory PostgreSQL profile is available for small deployments. It is not the default and it keeps PostgreSQL's durability settings on:
+For hosts with about 1 GB RAM, use the optional PostgreSQL profile:
 
 ```bash
 docker compose -f compose.yaml -f compose.low-memory.yaml up -d
 ```
 
-See `docs/low-memory-deployment.md` for what it changes, the measured effect and the trade-offs.
+The profile keeps durability enabled. See the [deployment guide](./docs/low-memory-deployment.md) for its settings and trade-offs. A separate [DNS override](./compose.dns-workaround.yaml) is available for environments that need it.
 
-## Client libraries
+</details>
 
-Official SDKs live in their own repos under the [UseMailx](https://github.com/UseMailx) organization, not in this one — a self-hosted server checkout doesn't need client-side code in five languages sitting in it. Each SDK defaults to the hosted API's base URL but takes an override, so the same client code works against a self-hosted deployment.
+## Send your first email
 
-| Language | Repo |
-| --- | --- |
-| Node.js / TypeScript | [UseMailx/mailx-node](https://github.com/UseMailx/mailx-node) |
-| Python | [UseMailx/mailx-python](https://github.com/UseMailx/mailx-python) |
-| Go | [UseMailx/mailx-go](https://github.com/UseMailx/mailx-go) |
-| PHP | [UseMailx/mailx-php](https://github.com/UseMailx/mailx-php) |
-| Ruby | [UseMailx/mailx-ruby](https://github.com/UseMailx/mailx-ruby) |
+The sender's domain must belong to your tenant and pass DNS ownership verification. Create the tenant and API key first, then verify the domain before submitting mail.
 
-## API example
+### 1. Create a tenant and API key
 
-Every `/v1` endpoint requires a scoped MailX API key. Tenant and key management are deliberately operator-only CLI operations.
+```bash
+docker compose exec mailx /app/mailx create-tenant -name local-development
+```
 
-1. Create a tenant.
+Use the printed `tenant_id` in the next command:
 
-   ```bash
-   docker compose exec mailx /app/mailx create-tenant -name local-development
-   ```
+```bash
+docker compose exec mailx /app/mailx create-api-key \
+  -tenant TENANT-ID \
+  -name local-client \
+  -scopes emails:send,emails:read,domains:read,domains:write,webhooks:read
+```
 
-2. Create a key using the `tenant_id` printed by the previous command.
+Save the printed `key`. MailX displays the raw key once.
 
-   ```bash
-   docker compose exec mailx /app/mailx create-api-key \
-     -tenant TENANT-ID \
-     -name local-client \
-     -scopes emails:send,emails:read,domains:read,domains:write,webhooks:read,webhooks:write
-   ```
+```bash
+export MAILX_API_KEY='PASTE-THE-KEY-HERE'
+export MAILX_DOMAIN='your-domain.example'
+```
 
-   Save the printed `key` immediately. MailX displays the raw key only once.
+Replace `your-domain.example` with a public domain you own. The values above are placeholders.
 
-3. Submit an email using that key.
+### 2. Verify your sending domain
 
-   ```bash
-   export MAILX_API_KEY='PASTE-THE-KEY-HERE'
+```bash
+curl --fail-with-body --request POST http://localhost:8080/v1/domains \
+  --header "Authorization: Bearer ${MAILX_API_KEY}" \
+  --header 'Content-Type: application/json' \
+  --data "{\"name\":\"${MAILX_DOMAIN}\"}"
+```
 
-   curl --request POST http://localhost:8080/v1/emails \
-     --header "Authorization: Bearer ${MAILX_API_KEY}" \
-     --header 'Content-Type: application/json' \
-     --header 'Idempotency-Key: local-example-001' \
-     --data '{
-       "from": "sender@example.com",
-       "to": ["recipient@example.net"],
-       "subject": "Hello from MailX",
-       "text": "MailX accepted this message for asynchronous delivery."
-     }'
-   ```
+Publish the TXT record returned in `records` at your DNS provider. Set `MAILX_DOMAIN_ID` to the response's `id`, then verify it after DNS has propagated:
 
-An HTTP `202 Accepted` response means MailX durably recorded responsibility for the message. It does not mean that a remote SMTP server accepted the message or that it reached an inbox. Use `GET /v1/emails/{id}` and `GET /v1/events` to inspect durable lifecycle state.
+```bash
+export MAILX_DOMAIN_ID='DOMAIN-ID'
 
-For the complete API, including domains, webhooks, pagination, scopes, and error schemas, open the [interactive documentation](http://localhost:8080/docs) after starting MailX.
+curl --fail-with-body --request POST \
+  "http://localhost:8080/v1/domains/${MAILX_DOMAIN_ID}/verify" \
+  --header "Authorization: Bearer ${MAILX_API_KEY}"
+```
+
+Continue once `ownership_state` is `verified`. Sending before verification returns `403 from_domain_not_authorized`. Ownership verification is separate from publishing DKIM, SPF and DMARC records.
+
+### 3. Submit the message
+
+Set `MAILX_RECIPIENT` to an address you control:
+
+```bash
+export MAILX_RECIPIENT='recipient@example.net'
+
+curl --fail-with-body --request POST http://localhost:8080/v1/emails \
+  --header "Authorization: Bearer ${MAILX_API_KEY}" \
+  --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: local-example-001' \
+  --data "{\"from\":\"sender@${MAILX_DOMAIN}\",\"to\":[\"${MAILX_RECIPIENT}\"],\"subject\":\"Hello from MailX\",\"text\":\"This message was submitted through MailX.\"}"
+```
+
+`202 Accepted` means MailX committed the message and its delivery work to PostgreSQL. The worker sends it asynchronously. Use the returned email `id` to check progress:
+
+```bash
+curl --fail-with-body "http://localhost:8080/v1/emails/EMAIL-ID" \
+  --header "Authorization: Bearer ${MAILX_API_KEY}"
+
+curl --fail-with-body http://localhost:8080/v1/events \
+  --header "Authorization: Bearer ${MAILX_API_KEY}"
+```
+
+`delivered` means the remote SMTP server accepted the message. Inbox placement depends on the receiver.
+
+Each email's To, Cc and Bcc recipients must share one destination domain. Use separate messages or a broadcast to reach recipients across domains.
 
 ## Architecture
 
-<div align="center">
-  <img src="./assets/readme/architecture.svg" alt="MailX architecture: SMTP and HTTP inputs flow through durable PostgreSQL state, local message storage, Redis scheduling, delivery workers, SMTP transfer, lifecycle events, and signed webhooks" width="100%">
-</div>
+All outbound entry points share the same message, outbox and delivery pipeline. Broadcasts hand off one message per recipient in bounded batches.
 
-MailX separates durable truth from scheduling:
+```mermaid
+flowchart TD
+    API["Tenant REST API"] --> Accept["Validate sender and limits<br/>Build MIME and sign DKIM"]
+    Submission["Authenticated SMTP submission<br/>Implicit TLS, optional"] --> Accept
+    Campaign["Scheduled broadcast"] --> Expand["Snapshot and personalize<br/>Bounded expansion"]
+    Expand --> Accept
+    Accept --> Files[("Local message storage<br/>Raw MIME and attachments")]
+    Accept --> DB[("PostgreSQL<br/>Messages, recipients, outbox and events")]
+    DB --> Dispatch["Dispatch due outbox work"]
+    Dispatch --> Redis[("Redis<br/>Available jobs and leased claims")]
+    Redis --> Worker["Bounded delivery workers"]
+    Worker --> Transport["MX lookup or trusted relay<br/>SMTP and STARTTLS policy"]
+    Transport --> Remote["Recipient mail server"]
+    Worker -->|"Persist outcome before ack or retry"| DB
+    DB --> Fanout["Durable event fan-out"]
+    Fanout --> Hooks["Webhook workers<br/>Sign, deliver and retry"]
+    Hooks --> Target["Subscriber HTTPS endpoint"]
+    Capture["Local SMTP capture receiver<br/>Storage only"] --> Files
 
-- **PostgreSQL** owns tenants, API keys, email lifecycle state, delivery attempts, domains, idempotency records, immutable events, and webhook deliveries.
-- **Local file storage** preserves raw messages and extracted attachment data.
-- **Redis** coordinates available and leased jobs; it is not the authoritative delivery-history store.
-- **Workers** persist delivery outcomes before acknowledging or releasing queue jobs.
-- **Webhooks** observe immutable events and never change email delivery state.
-
-This architecture provides at-least-once processing. MailX does not claim exactly-once SMTP delivery: a crash after remote acceptance but before local outcome persistence is inherently ambiguous.
-
-## Configuration
-
-The complete development configuration is documented in [`.env.example`](./.env.example). The main runtime settings are:
-
-| Variable | Purpose | Local default |
-| --- | --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string; enables the full API, queue, worker, and webhook runtime | Set by Compose |
-| `REDIS_ADDR` | Redis queue address | `localhost:6379` outside Compose |
-| `MAILX_HTTP_ADDR` | HTTP API listener | `:8080` |
-| `MAILX_SMTP_ADDR` | SMTP listener | `:2525` |
-| `MAILX_STORAGE_ROOT` | Raw message and attachment storage directory | MailX storage default |
-| `MAILX_API_KEY_PEPPER` | Optional HMAC pepper for stored API-key verifiers | Development-only value in Compose |
-| `MAILX_WEBHOOK_MASTER_KEY` | Base64-encoded 32-byte key used to protect webhook secrets | Development-only value in Compose |
-| `MAILX_WEBHOOK_ALLOW_INSECURE` | Allows HTTP/private webhook targets for local development | `true` in Compose |
-| `MAILX_WEBHOOK_WORKERS` | Number of webhook delivery workers | `4` |
-
-Do not commit a real `.env` file. Use distinct random secrets and restricted network bindings outside local development.
-
-### SMTP-only mode
-
-When `DATABASE_URL` is unset, running MailX starts the original SMTP receiver and local file store without the REST API, PostgreSQL pipeline, Redis queue, or webhooks:
-
-```bash
-go run ./cmd/mailx
+    classDef store fill:#eef2f6,stroke:#64748b,color:#0f172a
+    class Files,DB,Redis store
 ```
 
-This mode is useful for parser and receiver development; it is not equivalent to the complete stack.
+### State and recovery
 
-## Local message inspection
+| Component | Responsibility |
+| --- | --- |
+| PostgreSQL | Authoritative message state, attempts, tenant data, campaign snapshots and webhook history |
+| Local files | Stored message bytes and extracted attachments |
+| Redis | Job scheduling and temporary claim ownership |
+| Workers | Delivery attempts; commit outcomes before acknowledging jobs or scheduling retries |
 
-Messages accepted by the SMTP receiver can be listed and inspected from the local file store:
+Acceptance writes the message, recipients, queued event and outbox row in one database transaction. The dispatcher retries the handoff to Redis. Workers load durable state when reclaiming a job, so they can resume after a crash.
+
+Delivery is at least once. A crash after a remote server accepts mail but before MailX records that outcome can lead to a repeat attempt. SMTP has no transaction that spans both servers.
+
+### SMTP modes
+
+| Mode | Behavior |
+| --- | --- |
+| Capture receiver | The default `:2525` listener parses and stores mail locally. It creates no delivery jobs and requires no authentication. |
+| Authenticated submission | Optional listener configured with `MAILX_SUBMISSION_ADDR` and certificate/key files. Uses implicit TLS and an API key with `emails:send` as the password, then enters the outbound pipeline. |
+| Outbound delivery | Direct MX connections by default, or one configured trusted relay. STARTTLS verifies certificates; a TLS attempt that fails never falls back to plaintext. |
+
+Without `DATABASE_URL`, MailX runs the capture receiver and operator listener without the API or delivery pipeline. To inspect locally captured messages:
 
 ```bash
 go run ./cmd/mailx list
 go run ./cmd/mailx inspect MAILX-ID
 ```
 
-Set `MAILX_STORAGE_ROOT` when the messages are not stored in the default location. The inspection command reports metadata and attachment information without rendering HTML or executing remote content.
+Set `MAILX_STORAGE_ROOT` to inspect a different store. Inspection reports metadata and attachments without rendering HTML.
+
+## Broadcast controls
+
+Create a broadcast with an audience, template and optional RFC 3339 `send_at`. Its template content is copied at acceptance. Audience members added afterward are excluded; members removed before their snapshot batch is scanned may be excluded too.
+
+```mermaid
+stateDiagram-v2
+    [*] --> accepted: Create
+    accepted --> accepted: Reschedule
+    accepted --> expanding: Schedule is due
+    accepted --> cancelled: Cancel
+    expanding --> cancelled: Cancel
+    expanding --> completed: Expansion finishes
+    expanding --> failed: Broadcast-wide failure
+    completed --> [*]
+    failed --> [*]
+    cancelled --> [*]
+```
+
+Both control endpoints require `broadcasts:write`. Replace `BROADCAST-ID` with your broadcast's `id`.
+
+| Action | Endpoint | Allowed states |
+| --- | --- | --- |
+| Change the schedule | `POST /v1/broadcasts/{id}/reschedule` | `accepted` |
+| Stop further handoffs | `POST /v1/broadcasts/{id}/cancel` | `accepted`, `expanding`; repeats on `cancelled` succeed |
+
+```bash
+curl --fail-with-body --request POST \
+  http://localhost:8080/v1/broadcasts/BROADCAST-ID/reschedule \
+  --header "Authorization: Bearer ${MAILX_API_KEY}" \
+  --header 'Content-Type: application/json' \
+  --data '{"send_at":"2027-01-15T09:00:00Z"}'
+
+curl --fail-with-body --request POST \
+  http://localhost:8080/v1/broadcasts/BROADCAST-ID/cancel \
+  --header "Authorization: Bearer ${MAILX_API_KEY}"
+```
+
+Choose a future timestamp. Rescheduling preserves the original audience and template snapshots. Once expansion starts, rescheduling returns `409 broadcast_state_conflict`.
+
+Cancellation waits for any database handoff already in progress, then prevents new snapshots and message inserts. Messages already queued continue through delivery and cannot be recalled. A completed or failed broadcast returns `409`; another tenant's broadcast returns `404`.
+
+Recipient lists and broadcast analytics distinguish `cancelled` recipients from `materialized` recipients already handed off. Counts cover the stored snapshot, which can be partial when cancellation interrupts expansion. Audience members never snapshotted have no recipient row and are excluded from those counts. `completed` means expansion finished, regardless of the messages' delivery outcomes.
+
+Apply migrations and upgrade all MailX processes before using these controls. Older expander binaries do not enforce the cancellation boundary. Rolling migration 000035 back preserves cancelled broadcasts as failed records so they stay inactive.
+
+## Configuration
+
+The [environment example](./.env.example) covers the core local stack. Optional features also read the settings below; Compose must explicitly pass any additional variables or mount certificate files you configure.
+
+| Settings | Purpose |
+| --- | --- |
+| `DATABASE_URL`, `REDIS_ADDR` | Database and queue connections |
+| `MAILX_HTTP_ADDR`, `MAILX_SMTP_ADDR`, `MAILX_STORAGE_ROOT` | API, capture listener and local storage |
+| `MAILX_API_KEY_PEPPER` | API-key verifier protection |
+| `MAILX_WEBHOOK_MASTER_KEY`, `MAILX_DKIM_MASTER_KEY` | Distinct base64-encoded 32-byte encryption keys for webhook secrets and DKIM keys |
+| `MAILX_SMTP_TLS_POLICY`, `MAILX_SMTP_TLS_CA_FILE` | Outbound `opportunistic` or `required` TLS and optional additional trusted CA roots |
+| `MAILX_RELAY_HOST`, `MAILX_RELAY_PORT`, `MAILX_RELAY_USERNAME`, `MAILX_RELAY_PASSWORD` | Optional trusted relay; authenticated relay delivery requires verified STARTTLS |
+| `MAILX_SMTP_HOSTNAME`, `MAILX_SENDING_IPS`, `MAILX_SPF_RELAY_INCLUDE` | Public sending identity and DNS readiness guidance |
+| `MAILX_LOG_LEVEL`, `MAILX_LOG_FORMAT`, `MAILX_OBSERVABILITY_ADDR` | Logging and the separate operator listener |
+| `MAILX_SUBMISSION_ADDR`, `MAILX_SUBMISSION_TLS_CERT`, `MAILX_SUBMISSION_TLS_KEY` | Optional authenticated SMTP submission listener |
+| `MAILX_JWT_SECRET`, `MAILX_SYSTEM_TENANT_ID`, `MAILX_SYSTEM_FROM_ADDRESS` | Persistent human sessions and system email delivery from a verified sender |
+
+Use fresh secrets outside local development, set `MAILX_WEBHOOK_ALLOW_INSECURE=false`, and put the HTTP API behind HTTPS. Without a configured system mailer, account verification and password-reset emails cannot be sent. Optional OAuth, MFA, tracking and billing configuration lives in the corresponding [runtime modules](./cmd/mailx).
 
 ## Development
 
-Start the infrastructure dependencies, then run the full validation suite:
+Start PostgreSQL and Redis before running integration tests. If you already have them running locally, use an isolated test database and set its connection string instead of starting duplicate services.
 
 ```bash
 docker compose up -d postgres redis
 
 export MAILX_TEST_DATABASE_URL='postgres://mailx:mailx-dev-only@127.0.0.1:5432/mailx?sslmode=disable'
 export REDIS_ADDR='127.0.0.1:6379'
+export GOMAXPROCS=2
 
 go fmt ./...
-go vet ./...
-go test -count=1 ./...
-go test -race -count=1 ./...
-go build ./...
+go vet -p 1 ./...
+go test -p 1 -parallel 2 -count=1 ./...
+go test -race -p 1 -parallel 2 -count=1 ./...
+go build -p 1 ./...
 git diff --check
 ```
 
-The test suite includes unit, integration, concurrency, protocol-boundary, persistence, tenant-isolation, retry, and security regression coverage. PostgreSQL and Redis integration tests require those services to be reachable.
+Tests use isolated PostgreSQL schemas and Redis namespaces. Set `MAILX_TEST_DATABASE_URL` explicitly: database tests can skip if PostgreSQL is unavailable, while Redis integration tests fail if Redis is unreachable.
 
-Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a change. Pull requests should be focused, tested, and use Conventional Commit messages.
+### Repository map
+
+| Path | Contains |
+| --- | --- |
+| [`cmd/mailx`](./cmd/mailx) | Runtime wiring, configuration and operator commands |
+| [`internal/api`](./internal/api) | HTTP handlers, middleware and the OpenAPI contract |
+| [`internal/database`](./internal/database) | PostgreSQL repositories and versioned migrations |
+| [`internal/smtp`](./internal/smtp) | SMTP protocol server and outbound client |
+| [`internal/broadcast`](./internal/broadcast) | Campaign snapshots and bounded message handoffs |
+| [`internal/worker`](./internal/worker), [`internal/queue`](./internal/queue), [`internal/dispatch`](./internal/dispatch) | Delivery processing, claims and outbox dispatch |
+| [`internal/webhook`](./internal/webhook) | Signing, fan-out and delivery retries |
 
 ## Project status
 
-MailX is an educational and engineering project under active development. The current codebase implements milestones through durable webhook delivery; operational observability and transport security remain ongoing roadmap work.
+MailX implements the sending pipeline and account backend, with features through the v0.47 account and organization work. Some features require optional configuration. The repository remains a project under active development. Its [progress record](./.ilana/milestones.md) tracks the completed milestones and remaining scope.
 
-read [Ilana](.ilana) for the current progress of mailx 
+DNS readiness checks describe sender configuration; they cannot guarantee inbox placement. General inbound mailbox hosting is outside the current scope. Generated bounce/DSN reports are recorded locally rather than automatically sent.
 
-## Security
+## Contributing
 
-MailX handles private message data and security-sensitive credentials. Do not include real API keys, webhook secrets, SMTP credentials, message bodies, or connection strings in issues or logs.
+Read the [contribution guide](./CONTRIBUTING.md) and [Code of Conduct](./CODE_OF_CONDUCT.md). Keep changes focused, test the affected behavior and use Conventional Commit messages. For a large feature, discuss the scope with the maintainer before submitting it.
 
-Report vulnerabilities privately according to [SECURITY.md](./SECURITY.md). Do not open a public issue containing exploit details.
+Report bugs and feature proposals through [GitHub Issues](https://github.com/Ferousco-dev/Mailx/issues). Report security vulnerabilities privately using [SECURITY.md](./SECURITY.md); keep credentials and private message content out of reports and logs.
 
-## Community
-
-- MailX is maintained by Feranmi Oresajo with contributions welcomed from the community.
-- Read the [contribution guide](./CONTRIBUTING.md) before submitting code.
-- Follow the [Code of Conduct](./CODE_OF_CONDUCT.md) in all project spaces.
-- Use [GitHub Issues](https://github.com/Ferousco-dev/Mailx/issues) for reproducible bugs and scoped feature proposals.
-- Use the generated [OpenAPI contract](http://localhost:8080/openapi.json) as the source of truth for the current HTTP surface.
-
-## License
-
-MailX is available under the [MIT License](./LICENSE).
+MailX is maintained by Feranmi Oresajo and released under the [MIT License](./LICENSE).
