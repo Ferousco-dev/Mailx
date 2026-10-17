@@ -242,14 +242,7 @@ Read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a change. Pull requests
 
 MailX is an educational and engineering project under active development. The current codebase implements milestones through durable webhook delivery; operational observability and transport security remain ongoing roadmap work.
 
-The following are important current boundaries:
-
-- No inbound or outbound STARTTLS/TLS yet.
-- No SMTP AUTH yet.
-- DNS ownership verification does not imply DKIM, SPF, DMARC, or inbox placement.
-- API acceptance and SMTP acceptance have distinct meanings.
-- Delivery and webhook processing are at-least-once, not exactly-once.
-- The supplied Compose credentials and webhook settings are local-development defaults only.
+read [Ilana](.ilana) for the current progress of mailx 
 
 ## Security
 
