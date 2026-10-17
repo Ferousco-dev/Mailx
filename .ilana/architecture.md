@@ -7,7 +7,7 @@ Update this file whenever a task changes anything listed here (see `CLAUDE.md`).
 ## Purpose
 
 MailX: open-source, developer-first email infrastructure written from the protocol up in Go (module `github.com/Ferousco-dev/mailx`,
-Go 1.27.1; deps: pgx/v5, go-redis/v9, x/net). It began as a Go-learning project and grew into an owned SMTP/delivery/API stack.
+Go 1.27.2; deps: pgx/v5, go-redis/v9, x/net). It began as a Go-learning project and grew into an owned SMTP/delivery/API stack.
 
 ## Runtime shape
 
@@ -233,6 +233,7 @@ Abuse controls (v0.31), all optional, invalid value FAILS STARTUP: `MAILX_ABUSE_
 - Outbound MIME: CRLF/header-injection rejection on every user-controlled field; Bcc never appears in headers.
 - SMTP receiver: bounded line/message/connection/recipient/time limits.
 - Compose: loopback-only host ports, non-root image, dev-only credentials.
+- `.github/workflows/security.yml` gates `main` with `govulncheck ./...`; the current baseline is Go 1.27.2 and `golang.org/x/net` v0.60.0. On 2026-10-17, GO-2026-5932 in `golang.org/x/crypto` v0.57.0 remained module-reported but unreachable, with no fixed version available (RSK-050).
 
 ## Worker / concurrency
 

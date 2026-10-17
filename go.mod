@@ -1,6 +1,6 @@
 module github.com/Ferousco-dev/mailx
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/emersion/go-msgauth v0.7.0
@@ -8,7 +8,7 @@ require (
 	github.com/prometheus/client_golang v1.24.1
 	github.com/redis/go-redis/v9 v9.22.0
 	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 )
 
 require (

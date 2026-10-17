@@ -306,7 +306,15 @@ func TestAccessTokenRoundTripsAndRejectsTamperedOrExpired(t *testing.T) {
 		t.Fatalf("unexpected claims: %+v", got)
 	}
 
-	tampered := tok[:len(tok)-2] + "xx"
+	tamperedBytes := []byte(tok)
+	signatureStart := strings.LastIndexByte(tok, '.') + 1
+	tamperIndex := signatureStart + (len(tok)-signatureStart)/2
+	if tamperedBytes[tamperIndex] == 'A' {
+		tamperedBytes[tamperIndex] = 'B'
+	} else {
+		tamperedBytes[tamperIndex] = 'A'
+	}
+	tampered := string(tamperedBytes)
 	if _, err := svc.VerifyAccessToken(tampered); err == nil {
 		t.Fatal("expected tampered token to be rejected")
 	}
