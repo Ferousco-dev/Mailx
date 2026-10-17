@@ -42,7 +42,7 @@ type createBroadcastRequest struct {
 }
 
 // broadcastResource never claims delivery: status values are orchestration
-// states (accepted/expanding/completed/failed), and "completed" means every
+// states (accepted/expanding/completed/failed/cancelled), and "completed" means every
 // recipient was handed to the existing send pipeline or suppressed — never
 // that mail reached an inbox.
 type broadcastResource struct {

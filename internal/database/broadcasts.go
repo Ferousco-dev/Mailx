@@ -22,7 +22,7 @@ type Broadcast struct {
 	TextTemplate    string
 	HTMLTemplate    string
 	Variables       map[string]string
-	Status          string // accepted | expanding | completed | failed
+	Status          string // accepted | expanding | completed | failed | cancelled
 	FailureReason   string
 	// SendAt is nil for immediate (unchanged v0.36 behavior) or the instant
 	// below which expansion must never start (v0.37). It never affects
@@ -67,7 +67,7 @@ type BroadcastRecipient struct {
 	Email       string
 	Name        string
 	Attributes  map[string]string
-	Status      string // pending | suppressed | materialized | failed
+	Status      string // pending | suppressed | materialized | failed | cancelled
 	MessageID   *string
 	Attempts    int
 	CreatedAt   time.Time
@@ -214,6 +214,11 @@ func scanBroadcastRecipient(row rowScanner) (BroadcastRecipient, error) {
 
 const broadcastRecipientColumns = `id, broadcast_id, contact_id, email, name, attributes, status, message_id, attempts, created_at`
 
+const broadcastRecipientEffectiveStatus = `CASE
+	WHEN r.status = 'pending' AND m.id IS NOT NULL THEN 'materialized'
+	WHEN r.status = 'pending' AND b.status = 'cancelled' THEN 'cancelled'
+	ELSE r.status END`
+
 // ListBroadcastRecipients is tenant-scoped via the broadcast row itself
 // (confirmed first, so an unknown/foreign broadcast id is ErrNotFound, not a
 // silently empty page) and keyset-paginated — never returns the whole set.
@@ -230,12 +235,14 @@ func (db *DB) ListBroadcastRecipients(ctx context.Context, tenantID, broadcastID
 	if after != nil {
 		afterTime, afterID = &after.CreatedAt, &after.ID
 	}
-	rows, err := db.pool.Query(ctx, `SELECT `+broadcastRecipientColumns+`
-		FROM broadcast_recipients
-		WHERE broadcast_id = $1
-		  AND ($2::timestamptz IS NULL OR (created_at, id) > ($2, $3))
-		ORDER BY created_at, id
-		LIMIT $4`, broadcastID, afterTime, afterID, limit)
+	rows, err := db.pool.Query(ctx, `SELECT r.id, r.broadcast_id, r.contact_id, r.email, r.name, r.attributes,
+		`+broadcastRecipientEffectiveStatus+`, coalesce(r.message_id, m.id), r.attempts, r.created_at
+		FROM broadcast_recipients r JOIN broadcasts b ON b.id = r.broadcast_id AND b.tenant_id = r.tenant_id
+		LEFT JOIN messages m ON m.id = coalesce(r.message_id, r.id) AND m.tenant_id = r.tenant_id
+		WHERE r.broadcast_id = $1 AND r.tenant_id = $5
+		  AND ($2::timestamptz IS NULL OR (r.created_at, r.id) > ($2, $3))
+		ORDER BY r.created_at, r.id
+		LIMIT $4`, broadcastID, afterTime, afterID, limit, tenantID)
 	if err != nil {
 		return nil, fmt.Errorf("database: list broadcast recipients: %w", normalizeErr(err))
 	}

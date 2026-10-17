@@ -177,7 +177,7 @@ func (db *DB) AnalyticsTimeseries(ctx context.Context, tenantID string, from, to
 		return nil, ErrTooManyBuckets
 	}
 	rows, err := db.pool.Query(ctx, `
-		SELECT date_trunc($4, occurred_at) AS bucket,`+eventTypeCountColumns+`
+		SELECT date_trunc($4, occurred_at, 'UTC') AS bucket,`+eventTypeCountColumns+`
 		FROM events
 		WHERE tenant_id = $1 AND occurred_at >= $2 AND occurred_at < $3
 		GROUP BY bucket
@@ -219,6 +219,7 @@ type BroadcastAnalytics struct {
 	BroadcastID     string
 	Intended        int // total snapshotted broadcast_recipients rows
 	Pending         int
+	Cancelled       int
 	Suppressed      int // suppressed at broadcast-materialization time (recipient-level historical fact)
 	Materialized    int
 	RecipientFailed int // broadcast_recipients.status = 'failed' (bounded-retry terminal, see migration 000021)
@@ -245,13 +246,19 @@ func (db *DB) BroadcastAnalytics(ctx context.Context, tenantID, broadcastID stri
 	err := db.pool.QueryRow(ctx, `
 		SELECT
 			count(*) FILTER (WHERE status = 'pending'),
+			count(*) FILTER (WHERE status = 'cancelled'),
 			count(*) FILTER (WHERE status = 'suppressed'),
 			count(*) FILTER (WHERE status = 'materialized'),
 			count(*) FILTER (WHERE status = 'failed'),
 			count(*)
-		FROM broadcast_recipients WHERE broadcast_id = $1`,
-		broadcastID,
-	).Scan(&out.Pending, &out.Suppressed, &out.Materialized, &out.RecipientFailed, &out.Intended)
+		FROM (
+			SELECT `+broadcastRecipientEffectiveStatus+` AS status
+			FROM broadcast_recipients r JOIN broadcasts b ON b.id = r.broadcast_id AND b.tenant_id = r.tenant_id
+			LEFT JOIN messages m ON m.id = coalesce(r.message_id, r.id) AND m.tenant_id = r.tenant_id
+			WHERE r.broadcast_id = $1 AND r.tenant_id = $2
+		) recipients`,
+		broadcastID, tenantID,
+	).Scan(&out.Pending, &out.Cancelled, &out.Suppressed, &out.Materialized, &out.RecipientFailed, &out.Intended)
 	if err != nil {
 		return BroadcastAnalytics{}, fmt.Errorf("database: broadcast recipient counts: %w", normalizeErr(err))
 	}
@@ -263,7 +270,7 @@ func (db *DB) BroadcastAnalytics(ctx context.Context, tenantID, broadcastID stri
 			count(*) FILTER (WHERE e.event_type = 'failed')
 		FROM events e
 		WHERE e.tenant_id = $1 AND e.message_id IN (
-			SELECT message_id FROM broadcast_recipients WHERE broadcast_id = $2 AND message_id IS NOT NULL
+			SELECT coalesce(message_id, id) FROM broadcast_recipients WHERE broadcast_id = $2 AND tenant_id = $1
 		)`,
 		tenantID, broadcastID,
 	).Scan(&out.Delivered, &out.Bounced, &out.Complained, &out.Failed)
