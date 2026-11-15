@@ -4,7 +4,7 @@ go 1.27.2
 
 require (
 	github.com/emersion/go-msgauth v0.7.0
-	github.com/jackc/pgx/v5 v5.12.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/prometheus/client_golang v1.24.1
 	github.com/redis/go-redis/v9 v9.22.0
 	golang.org/x/crypto v0.57.0
